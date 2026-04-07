@@ -1,0 +1,8 @@
+{
+  "_global": {
+    "substituicoes": {},
+    "max_chars_linha": 42,
+    "remover_hesitacoes": true,
+    "capitalizar_inicio": true
+  }
+}

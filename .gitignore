@@ -1,0 +1,28 @@
+# Cache e temporários
+cache/
+temp/
+__pycache__/
+*.pyc
+
+# Narrações e scripts gerados
+narracoes/
+scripts/
+
+# Dados sensíveis
+config.json
+credentials.json
+
+# Dados locais (podem ser recriados)
+historico.json
+temas.json
+
+# Agente histórico de chat
+agents/temas/historico.json
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/

@@ -1,0 +1,310 @@
+================================================================================
+                       VIDEO AUTOMATOR - BACKLOG
+================================================================================
+  Automacao completa de producao de videos YouTube
+  Substitui o Premiere Pro por Python + FFmpeg
+  Criado em: 2026-04-01 | Atualizado: 2026-04-07
+================================================================================
+
+
+========================== DONE (CONCLUIDO) ====================================
+
+[x] VIDEO EDITING ENGINE (engine.py)
+    - OpenCV zoom com ease-in-out cubico (warpAffine + subpixel interpolation)
+    - 4 efeitos Ken Burns: zoom_in, zoom_out, pan_left, pan_right (alternados)
+    - Cache de clips por hash MD5 (img path + dur + resolucao + fps + zoom + efeito)
+    - FFmpeg concat de clips pre-renderizados + overlay + legendas + audio
+    - Anti-jitter: coordenadas float no OpenCV, interpolacao INTER_LINEAR
+    - Imagens escaladas via INTER_LANCZOS4 para tamanho de trabalho
+    - Frames enviados por pipe rawvideo ao FFmpeg para encode H.264
+    - Fallback automatico h264_nvenc -> libx264 para clips
+    - Renderizacao final com h264_nvenc, CRF 20, AAC 192k, faststart
+    - Ajustes visuais Lumetri-style: exposicao (gamma), brilho, contraste,
+      saturacao, realces, sombras, brancos, pretos, temperatura, tonalidade, vinheta
+    - Randomizacao de ajustes visuais com variacoes sutis centradas nos valores base
+    - Filtros FFmpeg: eq, curves, colorbalance, vignette
+    - Tipo fundo: imagens (com zoom) ou videos (sem zoom, com scale+pad+fps)
+    - Suporte a multiplos overlays por template com opacidade individual
+    - Filter complex escrito em arquivo temporario para evitar limite de cmd line
+    - Callback de progresso por etapa (clips 0-60%, render 65-100%)
+    - Cancelamento mid-render com processo.kill()
+
+[x] FFMPEG PRIORITY MANAGEMENT
+    - Processos FFmpeg rodam com BELOW_NORMAL_PRIORITY_CLASS via psutil
+    - Fallback sem psutil via ctypes/kernel32 para Windows
+    - Evita travar o servidor durante renders pesados
+
+[x] SUBTITLE SYSTEM (subtitle_fixer.py + engine.py)
+    - ASS format com PlayResX/Y = resolucao real do video (pixel-perfect)
+    - Whisper transcricao (faster-whisper com GPU CUDA, fallback CPU)
+    - Correcao automatica de SRT: substituicoes, hesitacoes, capitalizacao
+    - Regras por idioma (en/de/pt/es) em rules/*.json com merge global + template
+    - Regras embutidas no template (prioridade sobre arquivo JSON)
+    - Quebra de linha inteligente: equilibrio entre linhas, nunca corta palavras
+    - Remocao de hesitacoes por idioma (uh, um, ah, eh, tipo, naja, etc)
+    - Palavras customizadas para remover
+    - SRT -> ASS conversion com estilo completo (fonte, tamanho, cor, outline, sombra)
+    - Font scaling formula: FontSize * (resolucao_real / 288)
+    - Outline e Shadow tambem escalados pela mesma formula
+    - 5 estilos preset + customizacao completa via legenda_config
+    - Posicionamento: bottom, top, center, custom (X%/Y%)
+    - Maiuscula opcional por template
+    - Max chars por linha e max linhas configuraveis
+    - Liberacao de VRAM apos transcricao (del model + gc + torch.cuda.empty_cache)
+
+[x] TEMPLATE SYSTEM (app.py + templates.json)
+    - CRUD completo de templates via API REST
+    - Cada template define: resolucao, fps, pasta imagens, tipo fundo,
+      duracao por imagem, efeito zoom, zoom ratio, overlays[], ajustes{},
+      trilha sonora, volumes, estilo legenda, legenda_config{}, pasta saida,
+      formato nome saida, CTA config, regras de correcao
+    - Overlays com colorkey (fundo preto -> transparente) e opacidade
+    - CTA overlay com chromakey verde, escala, posicao (7 opcoes),
+      inicio, duracao, intervalo entre aparicoes (enable expr)
+    - Formato de nome de saida com {tag}_{data}_{sequencia}
+    - Regras de correcao embutidas no template (substituicoes, max_chars, etc)
+
+[x] BATCH VIDEO PRODUCTION (app.py)
+    - Selecao de multiplos templates + narracoes
+    - Fila de processamento com thread por job
+    - Estado global com progresso por job (porcentagem + etapa)
+    - Cancelamento de batch em andamento
+    - Nome de saida com data + sequencia automaticos
+    - Historico de producoes em historico.json
+
+[x] PIPELINE/ROTEIROS SYSTEM (scriptwriter.py)
+    - Multi-step LLM pipelines com etapas encadeadas
+    - Suporte Claude, GPT e Gemini via APIs diretas (httpx)
+    - System message + prompt por etapa com substituicao de variaveis
+    - Variaveis: {{entrada}}, {{saida_anterior}}, {{saida_etapa_N}}, {{roteiro_atual}}
+    - Estado de execucao com status por etapa (aguardando/processando/concluido/erro)
+    - Cancelamento de pipeline em andamento
+    - Resultado salvo automaticamente em scripts/ com nome + timestamp
+    - CRUD de pipelines via API
+
+[x] MULTI-CREDENTIAL SYSTEM (scriptwriter.py)
+    - Credenciais multiplas para Claude, GPT, Gemini
+    - Listagem automatica de modelos via API de cada provedor
+    - Teste de credencial com retorno de status + modelos disponiveis
+    - Claude: api.anthropic.com/v1/models
+    - GPT: api.openai.com/v1/models (filtro gpt-4/gpt-3.5/o1/o3/o4)
+    - Gemini: generativelanguage.googleapis.com/v1beta/models (filtro generateContent)
+    - Persistencia em credentials.json
+
+[x] TEMAS GRID (app.py)
+    - Grid Notion-style com colunas e linhas
+    - Drag & drop de colunas e linhas (reordenamento)
+    - Cell editor com campos: tema, titulo, thumb
+    - Estrutura JSON: colunas[], linhas[], celulas{colId_linhaId}
+    - API: GET/POST /api/temas
+
+[x] CLAUDE CLI CHAT ASSISTANT (app.py + agents/temas/)
+    - Chat integrado na interface para geracao de temas
+    - CLAUDE.md agent em agents/temas/ com contexto espiritual completo
+    - Instrucoes editaveis via API (/api/chat/instructions)
+    - Execucao do Claude CLI como subprocess com env vars limpas
+      (CLAUDE_CODE_*, ANTHROPIC_* removidas para evitar nested session error)
+    - Diretorio de trabalho: agents/temas/
+
+[x] NARRATION VIA ai33.pro (narrator.py)
+    - ElevenLabs TTS: vozes de banco + modelos (eleven_multilingual_v2, etc)
+    - Minimax TTS: speech-2.6-hd, turbo, etc + speed/pitch control
+    - Voice cloning listing (Minimax cloned voices)
+    - Task polling assincrono com retry
+    - Download de audio gerado para pasta local
+    - Creditos restantes rastreados
+
+[x] BATCH NARRATION (app.py)
+    - Cards por template com selecao de voz e texto
+    - Nomeacao baseada em data: {tag}_{data}_{sequencia}
+    - Log de progresso por narracao
+    - Pasta de saida configurable por template
+
+[x] PREVIEW MODE
+    - Ouvir narracao sem salvar (preview: true)
+    - Preview de frame do video (GET /api/preview/frame)
+    - Preview de imagem individual (GET /api/preview/image)
+    - Preview de audio (POST /api/preview/audio + GET play)
+
+[x] NARRATION HISTORY
+    - Historico de narracoes geradas em historico.json
+
+[x] CONFIG PAGE (app.py)
+    - Credenciais LLM (Claude/GPT/Gemini) com CRUD
+    - ai33.pro API key em config.json como ai33_api_key
+    - Supabase sync settings
+    - Google Sheets sync settings
+    - GET/PUT /api/config
+
+[x] FILE BROWSER (app.py)
+    - Browse de sistema de arquivos via GET /api/browse
+    - Memoria de ultima pasta por campo (per-field last-folder)
+    - Filtro por extensao
+
+[x] SUBTITLE RULES PER TEMPLATE
+    - Regras embutidas no template JSON (substituicoes, max_chars, etc)
+    - Merge com regras globais por idioma (rules/*.json)
+    - Template-specific rules sobrescrevem global
+
+[x] CTA OVERLAY WITH CHROMA KEY
+    - Arquivo de video com fundo verde
+    - Chromakey 0x00FF00 com similaridade 0.2 e blend 0.1
+    - Escala configuravel (% do video)
+    - 7 posicoes: bottom-right/center/left, top-right/center/left, center
+    - Scheduling: inicio, duracao, intervalo (aparece periodicamente)
+    - Enable expression com between(t,start,end) encadeados
+
+[x] RESILIENT POLLING
+    - Retry em falhas de fetch na narracao
+    - Estado persistente durante polling
+    - Timeout handling com mensagens de erro claras
+
+
+========================== TODO (PENDENTE) =====================================
+
+--- INFRAESTRUTURA ---
+
+[ ] CLOUDFLARE TUNNEL / TAILSCALE
+    Acesso remoto ao servidor sem expor porta publica
+    Prioridade: MEDIA
+
+[ ] GIT REPOSITORY + GITHUB PUSH
+    Inicializar repositorio, .gitignore, primeiro commit, push
+    Prioridade: MEDIA
+
+[ ] MOBILE-RESPONSIVE UI
+    Adaptar interface SPA para uso em celular/tablet
+    Prioridade: BAIXA
+
+--- AUTOMACAO COMPLETA ---
+
+[ ] FULL PIPELINE AUTOMATICO (por data)
+    Gatilho: usuario seleciona uma DATA e clica "Produzir Tudo"
+    Pre-requisito: todas as celulas da data devem ter TEMA preenchido
+
+    O fluxo completo roda em sequencia para cada coluna da data:
+
+    ETAPA 1 - GERAR ROTEIRO
+    [ ] Pegar o tema da celula
+    [ ] Rodar a pipeline da coluna (LLM multi-step)
+    [ ] Salvar roteiro gerado na celula
+    [ ] Variáveis: {{tema}}, {{canal}}, {{data}}, {{titulo}}, {{thumb}}
+
+    ETAPA 2 - NARRAR
+    [ ] Pegar o roteiro gerado na etapa anterior
+    [ ] Usar a voz configurada no template associado à coluna
+    [ ] Gerar TTS via ai33.pro (ElevenLabs ou Minimax)
+    [ ] Poll até concluir, baixar MP3
+    [ ] Salvar em pasta configurada como TAG DD-MM.mp3
+
+    ETAPA 3 - TRANSCREVER (legendas)
+    [ ] Rodar Whisper no MP3 gerado
+    [ ] Aplicar regras do template (substituicoes, max_chars, maiuscula)
+    [ ] Gerar SRT corrigido -> ASS com estilo do template
+
+    ETAPA 4 - PRODUZIR VIDEO
+    [ ] Montar video com engine.py usando template da coluna
+    [ ] Input: MP3 (narracao) + imagens + overlay + trilha + legenda ASS
+    [ ] Efeitos: zoom OpenCV, ajustes visuais, CTA chroma key
+    [ ] Output: TAG_YYYYMMDD_SEQ.mp4 na pasta de saida do template
+
+    ETAPA 5 - POS-PRODUCAO (futuro)
+    [ ] Sync Supabase (marcar como concluido)
+    [ ] Upload YouTube via API (se configurado)
+    [ ] Agendar publicacao
+
+    INTEGRAÇÕES NECESSÁRIAS:
+    [ ] Mapear coluna do grid -> template de video (cada coluna precisa
+        saber qual template usar para producao)
+    [ ] Mapear coluna do grid -> voz de narracao (cada coluna precisa
+        saber qual voz/provider/modelo TTS usar)
+    [ ] Botao "Produzir Data Completa" na aba Temas
+    [ ] Botao "Produzir" individual por celula
+    [ ] Painel de status mostrando cada etapa de cada coluna
+    [ ] Fila de processamento (uma coluna por vez para nao sobrecarregar)
+    [ ] Log detalhado com tempo/creditos por etapa
+    [ ] Tratamento de erro: se uma etapa falha, pular para proxima coluna
+    [ ] Opcao de pular etapas ja concluidas (ex: roteiro ja existe, pular)
+
+    Prioridade: ALTA
+
+[ ] SUPABASE/SHEETS SYNC TESTING
+    Testar e refinar sincronizacao real com Supabase e Google Sheets
+    Prioridade: MEDIA
+
+[ ] GOOGLE SHEETS READ/WRITE INTEGRATION
+    Leitura e escrita de dados em planilhas Google
+    Prioridade: MEDIA
+
+[ ] THUMBNAIL TEXT GENERATION
+    Gerar texto/overlay para thumbnails automaticamente
+    Prioridade: MEDIA
+
+--- DISTRIBUICAO ---
+
+[ ] YOUTUBE UPLOAD INTEGRATION
+    Upload direto via YouTube Data API v3
+    Prioridade: MEDIA
+
+[ ] UPLOAD SCHEDULING
+    Agendar uploads para horarios especificos
+    Prioridade: BAIXA
+
+[ ] LINK TRACKER INTEGRATION
+    Criar links automaticamente no tracker apos gerar videos
+    Prioridade: BAIXA
+
+--- NARRACAO AVANCADA ---
+
+[ ] VOICE PRESET PER TEMPLATE
+    Salvar voz + modelo + settings por template para batch rapido
+    Prioridade: ALTA
+
+[ ] FAVORITE VOICES (LOCAL BOOKMARKS)
+    Marcar vozes favoritas localmente para acesso rapido
+    Prioridade: MEDIA
+
+[ ] TTS MODEL SELECTION PER VOICE
+    Selecao de modelo ElevenLabs (eleven_v3, eleven_multilingual_v2, etc)
+    por voz individual
+    Prioridade: MEDIA
+
+[ ] MINIMAX MODEL SELECTION
+    Selecao de modelo Minimax (speech-2.6-hd, turbo, etc) por voz
+    Prioridade: MEDIA
+
+[ ] SOUND EFFECTS GENERATION
+    Gerar efeitos sonoros via ai33.pro API
+    Prioridade: BAIXA
+
+[ ] MUSIC GENERATION
+    Gerar musica/trilha sonora via ai33.pro API
+    Prioridade: BAIXA
+
+[ ] VOICE CLONING FROM THE APP
+    Interface para clonar vozes diretamente do app (upload de samples)
+    Prioridade: BAIXA
+
+[ ] DUBBING (TRANSLATE NARRATIONS)
+    Traduzir narracoes existentes para outros idiomas via ai33.pro
+    Prioridade: BAIXA
+
+[ ] MULTI-LANGUAGE SUPPORT FOR SAME PIPELINE
+    Gerar multiplos idiomas de um mesmo roteiro automaticamente
+    Prioridade: BAIXA
+
+--- MONITORAMENTO ---
+
+[ ] DASHBOARD WITH PRODUCTION STATS
+    Metricas: videos produzidos/dia, tempo medio, erros, creditos TTS
+    Prioridade: BAIXA
+
+[ ] ERROR RECOVERY FOR FAILED PRODUCTIONS
+    Retry automatico de producoes que falharam, com log de erros
+    Prioridade: MEDIA
+
+
+================================================================================
+  Legenda:  [x] Concluido   [ ] Pendente   [-] Cancelado
+  Ultima atualizacao: 2026-04-07
+================================================================================
