@@ -73,10 +73,16 @@ DEFAULT_TEXT_CONFIG = {
 }
 
 
+FONTS_DIR = BASE_DIR / "fonts"
+FONTS_DIR.mkdir(exist_ok=True)
+
 def _find_font(font_name: str, size: int) -> ImageFont.FreeTypeFont:
-    """Encontra fonte no sistema Windows."""
+    """Encontra fonte no sistema Windows ou na pasta local fonts/."""
     import os
     fonts_dir = os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "Fonts")
+    user_fonts = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "Windows", "Fonts")
+    local_fonts = str(FONTS_DIR)
+    all_dirs = [local_fonts, user_fonts, fonts_dir]
 
     # Mapeamento de nomes comuns
     font_map = {
@@ -87,33 +93,50 @@ def _find_font(font_name: str, size: int) -> ImageFont.FreeTypeFont:
         "montserrat": "Montserrat-Regular.ttf",
         "bebas neue": "BebasNeue-Regular.ttf",
         "oswald": "Oswald-Bold.ttf",
+        "anton": "Anton-Regular.ttf",
+        "open sans": "OpenSans.ttf",
+        "inter": "Inter.ttf",
+        "poppins": "Poppins-Bold.ttf",
+        "poppins bold": "Poppins-Bold.ttf",
+        "poppins black": "Poppins-Black.ttf",
+        "zuume rough": "fontspring-demo-zuumerough-bold.otf",
+        "zuume rough bold": "fontspring-demo-zuumerough-bold.otf",
+        "zuume": "fontspring-demo-zuumerough-bold.otf",
     }
 
     name_lower = font_name.lower()
 
-    # Tentar mapeamento direto
+    # Tentar mapeamento direto — local > user > sistema
     if name_lower in font_map:
-        path = os.path.join(fonts_dir, font_map[name_lower])
-        if os.path.exists(path):
-            return ImageFont.truetype(path, size)
+        for d in all_dirs:
+            if not d or not os.path.exists(d):
+                continue
+            path = os.path.join(d, font_map[name_lower])
+            if os.path.exists(path):
+                return ImageFont.truetype(path, size)
 
     # Tentar nome direto
-    for ext in (".ttf", ".otf"):
-        path = os.path.join(fonts_dir, font_name + ext)
-        if os.path.exists(path):
-            return ImageFont.truetype(path, size)
-        # Sem espaços
-        path = os.path.join(fonts_dir, font_name.replace(" ", "") + ext)
-        if os.path.exists(path):
-            return ImageFont.truetype(path, size)
+    for d in all_dirs:
+        if not d or not os.path.exists(d):
+            continue
+        for ext in (".ttf", ".otf"):
+            path = os.path.join(d, font_name + ext)
+            if os.path.exists(path):
+                return ImageFont.truetype(path, size)
+            path = os.path.join(d, font_name.replace(" ", "") + ext)
+            if os.path.exists(path):
+                return ImageFont.truetype(path, size)
 
-    # Tentar buscar parcialmente
-    for f in Path(fonts_dir).iterdir():
-        if name_lower.replace(" ", "") in f.stem.lower():
-            try:
-                return ImageFont.truetype(str(f), size)
-            except Exception:
-                continue
+    # Tentar buscar parcialmente em todas as pastas
+    for d in all_dirs:
+        if not d or not os.path.exists(d):
+            continue
+        for f in Path(d).iterdir():
+            if name_lower.replace(" ", "") in f.stem.lower():
+                try:
+                    return ImageFont.truetype(str(f), size)
+                except Exception:
+                    continue
 
     # Fallback
     try:

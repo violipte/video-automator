@@ -424,8 +424,25 @@ def _executar_batch():
                 job["status"] = "montando"
                 job["etapa"] = "Iniciando montagem..."
                 tag = template.get("tag", template_id)
-                data = datetime.now().strftime("%Y%m%d")
-                data_pasta = datetime.now().strftime("%Y-%m-%d")
+                # Usar data de referência se disponível (vem do grid de Temas)
+                data_ref = job.get("data_ref", "")
+                if data_ref:
+                    # Formato: DD/MM/YYYY ou DD-MM ou YYYY-MM-DD
+                    parts = data_ref.replace("-", "/").split("/")
+                    if len(parts) == 3 and len(parts[0]) == 4:
+                        # YYYY/MM/DD
+                        data = parts[0] + parts[1] + parts[2]
+                        data_pasta = parts[0] + "-" + parts[1] + "-" + parts[2]
+                    elif len(parts) == 3:
+                        # DD/MM/YYYY
+                        data = parts[2] + parts[1] + parts[0]
+                        data_pasta = parts[2] + "-" + parts[1] + "-" + parts[0]
+                    else:
+                        data = datetime.now().strftime("%Y%m%d")
+                        data_pasta = datetime.now().strftime("%Y-%m-%d")
+                else:
+                    data = datetime.now().strftime("%Y%m%d")
+                    data_pasta = datetime.now().strftime("%Y-%m-%d")
                 seq = str(i + 1).zfill(2)
                 nome_saida = f"{tag}_{data}_{seq}.mp4"
                 pasta_saida = template.get("pasta_saida", str(TEMP_DIR))
@@ -523,6 +540,7 @@ async def iniciar_batch(request: Request):
             {
                 "template_id": j["template_id"],
                 "mp3": j.get("mp3", ""),
+                "data_ref": j.get("data_ref", ""),
                 "status": "aguardando",
                 "progresso": 0,
                 "erro": None,
@@ -5929,6 +5947,43 @@ async function produzirDataCompleta() {
       } catch(e) { log.innerHTML += '<div style="color:var(--danger)">  Roteiro: ' + e.message + '</div>'; continue; }
     }
 
+    // === VALIDAÇÃO DO ROTEIRO ===
+    var roteiroChars = (job.cel.roteiro || '').length;
+    var minChars = 15000;  // mínimo aceitável
+    if (roteiroChars > 0 && roteiroChars < minChars) {
+      log.innerHTML += '<div style="color:var(--danger)">  Roteiro muito curto (' + roteiroChars + ' chars, mínimo ' + minChars + ') - REFAZENDO...</div>';
+      // Deletar roteiro curto e reger
+      if (temasData.celulas[job.key]) temasData.celulas[job.key].roteiro = '';
+      job.cel.roteiro = '';
+      // Voltar pra etapa de roteiro
+      try {
+        var _wc2 = 0;
+        while (_wc2 < 30) { try { var _chk2 = await (await fetch('/api/pipelines/execucao')).json(); if (!_chk2.ativo) break; } catch(e2){} await new Promise(function(r){setTimeout(r,2000)}); _wc2++; }
+        var rRes2 = await fetch('/api/pipelines/' + job.pipeline_id + '/executar', {
+          method: 'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ entrada: job.cel.tema, tema: job.cel.tema, canal: job.tag, data: row.data })
+        });
+        if (rRes2.ok) {
+          var rDone2 = false;
+          while (!rDone2) {
+            await new Promise(function(r){ setTimeout(r, 2000); });
+            try { var sr2 = await (await fetch('/api/pipelines/execucao')).json(); } catch(e2) { continue; }
+            if (!sr2.ativo) {
+              rDone2 = true;
+              if (sr2.resultado_final && sr2.resultado_final.length >= minChars) {
+                job.cel.roteiro = sr2.resultado_final;
+                if (temasData.celulas[job.key]) temasData.celulas[job.key].roteiro = sr2.resultado_final;
+                log.innerHTML += '<div style="color:var(--accent)">  Roteiro refeito: OK (' + sr2.resultado_final.length + ' chars)</div>';
+              } else {
+                log.innerHTML += '<div style="color:var(--danger)">  Roteiro refeito ainda curto (' + (sr2.resultado_final||'').length + ' chars) - pulando canal</div>';
+                continue;
+              }
+            }
+          }
+        }
+      } catch(e) { log.innerHTML += '<div style="color:var(--danger)">  Erro ao refazer: ' + e.message + '</div>'; continue; }
+    }
+
     // === ETAPA 2: NARRAÇÃO ===
     // Verificar se MP3 já existe
     var mp3Existente = null;
@@ -5988,7 +6043,7 @@ async function produzirDataCompleta() {
       try {
         var vRes = await fetch('/api/batch', {
           method: 'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ jobs: [{ template_id: job.template_id, mp3: job._mp3 }] })
+          body: JSON.stringify({ jobs: [{ template_id: job.template_id, mp3: job._mp3, data_ref: row.data }] })
         });
         if (!vRes.ok) { log.innerHTML += '<div style="color:var(--danger)">  Vídeo: ERRO ao iniciar</div>'; continue; }
         var vDone = false;
