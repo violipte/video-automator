@@ -411,9 +411,26 @@ def _executar_batch():
                 def callback_etapa(etapa):
                     job["etapa"] = etapa
 
-                engine = VideoEngine(template, mp3_path, output_path)
-                engine_atual = engine
-                resultado = engine.montar(srt_path=srt_corrigido, callback_progresso=callback_progresso, callback_etapa=callback_etapa)
+                # Retry até 2x em caso de falha
+                max_retries = 2
+                for attempt in range(max_retries + 1):
+                    try:
+                        engine = VideoEngine(template, mp3_path, output_path)
+                        engine_atual = engine
+                        if attempt > 0:
+                            job["etapa"] = f"Retry {attempt}/{max_retries}..."
+                            job["progresso"] = 12
+                        resultado = engine.montar(srt_path=srt_corrigido, callback_progresso=callback_progresso, callback_etapa=callback_etapa)
+                        break  # sucesso
+                    except Exception as retry_err:
+                        if attempt < max_retries:
+                            # Deletar arquivo parcial e tentar de novo
+                            if Path(output_path).exists():
+                                Path(output_path).unlink(missing_ok=True)
+                            import time as _time
+                            _time.sleep(5)
+                            continue
+                        raise retry_err  # falhou todas as tentativas
 
                 job["status"] = "concluido"
                 job["etapa"] = "Concluído"
@@ -427,6 +444,9 @@ def _executar_batch():
                 job["erro"] = str(e)
                 job["etapa"] = "Erro"
                 job["fim"] = time.time()
+                # Limpar arquivo corrompido
+                if Path(output_path).exists():
+                    Path(output_path).unlink(missing_ok=True)
                 registrar_historico(template_id, template.get("tag", ""), template.get("nome", ""), mp3_path, "", job["fim"] - job["inicio"], "erro", str(e))
                 # Log para debug
                 with open(TEMP_DIR / "erro_batch.log", "a", encoding="utf-8") as f:

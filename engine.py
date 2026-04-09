@@ -274,7 +274,14 @@ class VideoEngine:
                 input_idx += 1
         else:
             for arquivo, dur in clips:
-                inputs.extend(["-t", f"{dur:.2f}", "-i", arquivo])
+                # Para vídeos: loop se necessário para cobrir a duração
+                vid_dur = obter_duracao(arquivo)
+                if vid_dur > 0 and vid_dur < dur:
+                    # Vídeo é mais curto que o desejado — usar stream_loop
+                    loops = int(dur / vid_dur) + 1
+                    inputs.extend(["-stream_loop", str(loops), "-t", f"{dur:.2f}", "-i", arquivo])
+                else:
+                    inputs.extend(["-t", f"{dur:.2f}", "-i", arquivo])
                 input_idx += 1
 
         n_clips = len(clips)
@@ -616,7 +623,27 @@ class VideoEngine:
 
         self.processo.wait()
         if self.processo.returncode != 0:
+            # Deletar arquivo incompleto/corrompido
+            if Path(self.output_path).exists():
+                Path(self.output_path).unlink(missing_ok=True)
             raise RuntimeError(f"FFmpeg falhou com código {self.processo.returncode}")
+
+        # Limpar metadados do vídeo (remove encoder, software, timestamps)
+        if Path(self.output_path).exists():
+            clean_path = self.output_path.replace(".mp4", "_clean.mp4")
+            clean_cmd = [
+                "ffmpeg", "-y", "-i", self.output_path,
+                "-map_metadata", "-1",
+                "-c", "copy",
+                "-fflags", "+bitexact",
+                "-flags:v", "+bitexact",
+                "-flags:a", "+bitexact",
+                clean_path
+            ]
+            ret = subprocess.run(clean_cmd, capture_output=True, timeout=60)
+            if ret.returncode == 0 and Path(clean_path).exists():
+                Path(self.output_path).unlink()
+                Path(clean_path).rename(self.output_path)
 
         if callback_progresso:
             callback_progresso(100.0)

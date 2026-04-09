@@ -441,6 +441,15 @@
 
 --- BLINDAGEM PARA OPERAÇÃO REMOTA (CELULAR) ---
 
+[ ] LIMPEZA DE METADADOS DO VÍDEO EXPORTADO
+    Remover metadados do MP4 final (encoder, software, creation_time, etc)
+    para que o YouTube não detecte automação.
+    Implementar como passo final após renderização:
+    ffmpeg -i input.mp4 -map_metadata -1 -c copy output_clean.mp4
+    Ou usar -metadata title="" -metadata comment="" etc
+    Aplicar automaticamente no "Produzir Tudo" e na produção manual.
+    Prioridade: ALTA
+
 [ ] RETRY AUTOMÁTICO POR ETAPA
     Se uma etapa falha (timeout API, erro de rede, FFmpeg crash),
     tentar novamente até 3x com delay crescente entre tentativas (5s, 15s, 30s).
