@@ -35,6 +35,7 @@ import scriptwriter
 import narrator
 import thumbnail
 import production_log
+import orchestrator
 from engine import VideoEngine
 
 # === CONFIG ===
@@ -1224,6 +1225,27 @@ async def prod_log_update(request: Request):
 async def prod_log_finish(request: Request):
     dados = await request.json()
     production_log.finalizar(dados.get("cancelado", False))
+    return {"ok": True}
+
+
+# === API: PRODUÇÃO COMPLETA (BACKEND) ===
+
+@app.post("/api/producao-completa/iniciar")
+async def iniciar_producao_completa(request: Request):
+    """Inicia produção completa no backend (thread)."""
+    dados = await request.json()
+    data_idx = dados.get("data_idx", -1)
+    if data_idx < 0:
+        raise HTTPException(400, "data_idx é obrigatório")
+    result = orchestrator.iniciar_producao(data_idx)
+    if not result.get("ok"):
+        raise HTTPException(409, result.get("erro", "Erro"))
+    return result
+
+
+@app.post("/api/producao-completa/cancelar")
+def cancelar_producao_completa():
+    orchestrator.cancelar()
     return {"ok": True}
 
 
@@ -6165,291 +6187,45 @@ var _produzirTudoCancelled = false;
 
 function cancelarProduzirTudo() {
   _produzirTudoCancelled = true;
-  var btn = document.getElementById('btn-produzir-tudo-cancel');
-  btn.textContent = 'Cancelando...';
-  btn.style.opacity = '0.6';
-  btn.disabled = true;
-  var log = document.getElementById('lote-log');
-  log.innerHTML += '<div style="color:var(--danger);font-weight:600;padding:4px 0;border-top:1px solid var(--danger)">⛔ CANCELAMENTO SOLICITADO — finalizando etapa atual...</div>';
-  log.scrollTop = 99999;
-  toast('Cancelando produção após etapa atual...', 'error');
-  // Também matar FFmpeg se estiver rodando
+  fetch('/api/producao-completa/cancelar', { method: 'POST' }).catch(function(){});
   fetch('/api/batch/cancel', { method: 'POST' }).catch(function(){});
-  // Production log: cancel signal (actual finish happens when loop ends)
-  fetch('/api/production-log/update', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({index:0, log_msg:'CANCELAMENTO SOLICITADO'})}).catch(function(){});
+  var btn = document.getElementById('btn-produzir-tudo-cancel');
+  if (btn) { btn.textContent = 'Cancelando...'; btn.style.opacity = '0.6'; btn.disabled = true; }
+  toast('Cancelando produção...', 'error');
 }
 
 async function produzirDataCompleta() {
+  // Delega ao backend Python (orchestrator.py)
   _produzirTudoCancelled = false;
   var ri = parseInt(document.getElementById('lote-data-select').value);
   if (isNaN(ri)) { toast('Selecione uma data', 'error'); return; }
   var row = temasData.linhas[ri];
-  var cols = temasData.colunas || [];
 
-  // Carregar templates se necessário
-  if (!templates.length) { var tr = await fetch('/api/templates'); templates = await tr.json(); }
-
-  var dateParts = row.data.split('/');
-  var dataFormatada = dateParts[0] + '-' + dateParts[1];
-  var dataYMD = dateParts[2] + dateParts[1] + dateParts[0];
-
-  // Montar jobs com todas as configs
-  var jobs = [];
-  cols.forEach(function(col, ci) {
-    var key = ri + '_' + ci;
-    var cel = (temasData.celulas || {})[key] || {};
-    if (!cel.tema) return;
-
-    // Buscar template associado à coluna
-    var tmpl = col.template_id ? templates.find(function(t){ return t.id === col.template_id; }) : null;
-    var tmplVoz = tmpl ? (tmpl.narracao_voz || {}) : {};
-
-    // Voz: template > coluna
-    var voiceId = tmplVoz.voice_id || col.voice_id || '';
-    var voiceProv = tmplVoz.provider || col.voice_provider || '';
-
-    jobs.push({
-      ri: ri, ci: ci, key: key, col: col, cel: cel,
-      pipeline_id: cel.pipeline_id || col.pipeline_id || '',
-      template_id: col.template_id || '',
-      voice_id: voiceId,
-      voice_provider: voiceProv,
-      voice_speed: tmplVoz.speed || 1.0,
-      voice_pitch: tmplVoz.pitch || 0,
-      tag: col.nome,
-      narrNome: col.nome + ' ' + dataFormatada,
-    });
-  });
-
-  if (!jobs.length) { toast('Nenhuma célula com tema nessa data', 'error'); return; }
-
-  // Validar configs
-  var erros = [];
-  jobs.forEach(function(j) {
-    if (!j.pipeline_id) erros.push(j.tag + ': sem pipeline');
-    if (!j.voice_id) erros.push(j.tag + ': sem voz (configure no template ou coluna)');
-    if (!j.template_id) erros.push(j.tag + ': sem template');
-  });
-  if (erros.length) {
-    toast('Config incompleta:\\n' + erros.join('\\n'), 'error');
-    return;
-  }
-
-  if (!confirm('Produzir ' + jobs.length + ' vídeos para ' + row.data + '?\\n\\nRoteiro → Narração → Vídeo')) return;
-
-  // Production log: START
-  fetch('/api/production-log/start', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({data_ref: row.data, canais: jobs.map(function(j){ return {tag: j.tag, template: j.template_id}; })})}).catch(function(){});
+  if (!confirm('Produzir todos os vídeos para ' + row.data + '?')) return;
 
   document.getElementById('btn-produzir-tudo').style.display = 'none';
   document.getElementById('btn-produzir-tudo-cancel').style.display = 'inline-flex';
 
-  document.getElementById('lote-status').style.display = 'block';
-  var log = document.getElementById('lote-log');
-  log.innerHTML = '<div style="font-weight:600">PRODUÇÃO COMPLETA | ' + row.data + ' | ' + jobs.length + ' vídeos</div>';
-  var startTime = Date.now();
-
-  for (var i = 0; i < jobs.length; i++) {
-    if (_produzirTudoCancelled) {
-      var restantes = jobs.length - i;
-      log.innerHTML += '<div style="color:var(--danger);font-weight:600;padding:6px 0">⛔ PRODUÇÃO CANCELADA | ' + i + '/' + jobs.length + ' processados | ' + restantes + ' canais pulados: '
-        + jobs.slice(i).map(function(j){ return j.tag; }).join(', ') + '</div>';
-      log.scrollTop = 99999;
-      break;
+  try {
+    var res = await fetch('/api/producao-completa/iniciar', {
+      method: 'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ data_idx: ri })
+    });
+    if (!res.ok) {
+      var err = await res.json();
+      toast('Erro: ' + (err.detail || ''), 'error');
+      document.getElementById('btn-produzir-tudo').style.display = 'inline-flex';
+      document.getElementById('btn-produzir-tudo-cancel').style.display = 'none';
+      return;
     }
-    var job = jobs[i];
-    document.getElementById('lote-count').textContent = (i+1) + '/' + jobs.length;
-    document.getElementById('lote-fill').style.width = (i / jobs.length * 100) + '%';
-    log.innerHTML += '<div style="margin-top:6px;font-weight:500;color:var(--text)">' + job.tag + '</div>';
-
-    // === ETAPA 1: ROTEIRO ===
-    fetch('/api/production-log/update', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({index:i, etapa:'roteiro', inicio:Date.now()/1000, log_msg:job.tag+': iniciando roteiro...'})}).catch(function(){});
-    if (job.cel.roteiro) {
-      log.innerHTML += '<div style="color:var(--text-sec)">  Roteiro: existe (' + job.cel.roteiro.length + ' chars) - pulando</div>';
-      fetch('/api/production-log/update', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({index:i, etapa:'concluido', etapa_detalhe:'roteiro pulado (existente)', roteiro_chars:job.cel.roteiro.length, fim:Date.now()/1000, progresso:33, log_msg:job.tag+': roteiro existente ('+job.cel.roteiro.length+' chars)'})}).catch(function(){});
-    } else {
-      log.innerHTML += '<div style="color:var(--text-sec)">  Roteiro: gerando...</div>';
-      log.scrollTop = 99999;
-      try {
-        // Esperar pipeline anterior terminar
-        var _wc = 0;
-        while (_wc < 30) { try { var _chk = await (await fetch('/api/pipelines/execucao')).json(); if (!_chk.ativo) break; } catch(e){} await new Promise(function(r){setTimeout(r,2000)}); _wc++; }
-
-        var rRes = await fetch('/api/pipelines/' + job.pipeline_id + '/executar', {
-          method: 'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ entrada: job.cel.tema, tema: job.cel.tema, canal: job.tag, data: row.data, titulo: job.cel.titulo||'', thumb: job.cel.thumb||'' })
-        });
-        if (!rRes.ok) { var re = await rRes.json(); log.innerHTML += '<div style="color:var(--danger)">  Roteiro: ERRO - ' + (re.detail||'') + '</div>'; continue; }
-        var rDone = false;
-        while (!rDone) {
-          await new Promise(function(r){ setTimeout(r, 2000); });
-          try { var sr = await (await fetch('/api/pipelines/execucao')).json(); } catch(e) { continue; }
-          if (!sr.ativo) {
-            rDone = true;
-            if (sr.resultado_final) {
-              job.cel.roteiro = sr.resultado_final;
-              if (!temasData.celulas[job.key]) temasData.celulas[job.key] = {};
-              temasData.celulas[job.key].roteiro = sr.resultado_final;
-              log.innerHTML += '<div style="color:var(--accent)">  Roteiro: OK (' + sr.resultado_final.length + ' chars)</div>';
-              fetch('/api/production-log/update', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({index:i, etapa_detalhe:'roteiro OK', roteiro_chars:sr.resultado_final.length, progresso:33, log_msg:job.tag+': roteiro OK ('+sr.resultado_final.length+' chars)'})}).catch(function(){});
-            } else {
-              var erroEtapas = sr.etapas ? sr.etapas.filter(function(e){return e.status==='erro'}).map(function(e){return e.nome+': '+e.erro}).join(' | ') : '';
-              log.innerHTML += '<div style="color:var(--danger)">  Roteiro: FALHOU - ' + (erroEtapas || 'sem resultado') + '</div>';
-              fetch('/api/production-log/update', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({index:i, etapa:'erro', erro:'Roteiro falhou: '+(erroEtapas||'sem resultado'), fim:Date.now()/1000, log_msg:job.tag+': roteiro FALHOU'})}).catch(function(){});
-              continue;
-            }
-          }
-        }
-      } catch(e) { log.innerHTML += '<div style="color:var(--danger)">  Roteiro: ' + e.message + '</div>'; continue; }
-    }
-
-    // === VALIDAÇÃO DO ROTEIRO ===
-    var roteiroChars = (job.cel.roteiro || '').length;
-    var minChars = 15000;  // mínimo aceitável
-    if (roteiroChars > 0 && roteiroChars < minChars) {
-      log.innerHTML += '<div style="color:var(--danger)">  Roteiro muito curto (' + roteiroChars + ' chars, mínimo ' + minChars + ') - REFAZENDO...</div>';
-      // Deletar roteiro curto e reger
-      if (temasData.celulas[job.key]) temasData.celulas[job.key].roteiro = '';
-      job.cel.roteiro = '';
-      // Voltar pra etapa de roteiro
-      try {
-        var _wc2 = 0;
-        while (_wc2 < 30) { try { var _chk2 = await (await fetch('/api/pipelines/execucao')).json(); if (!_chk2.ativo) break; } catch(e2){} await new Promise(function(r){setTimeout(r,2000)}); _wc2++; }
-        var rRes2 = await fetch('/api/pipelines/' + job.pipeline_id + '/executar', {
-          method: 'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ entrada: job.cel.tema, tema: job.cel.tema, canal: job.tag, data: row.data })
-        });
-        if (rRes2.ok) {
-          var rDone2 = false;
-          while (!rDone2) {
-            await new Promise(function(r){ setTimeout(r, 2000); });
-            try { var sr2 = await (await fetch('/api/pipelines/execucao')).json(); } catch(e2) { continue; }
-            if (!sr2.ativo) {
-              rDone2 = true;
-              if (sr2.resultado_final && sr2.resultado_final.length >= minChars) {
-                job.cel.roteiro = sr2.resultado_final;
-                if (temasData.celulas[job.key]) temasData.celulas[job.key].roteiro = sr2.resultado_final;
-                log.innerHTML += '<div style="color:var(--accent)">  Roteiro refeito: OK (' + sr2.resultado_final.length + ' chars)</div>';
-              } else {
-                log.innerHTML += '<div style="color:var(--danger)">  Roteiro refeito ainda curto (' + (sr2.resultado_final||'').length + ' chars) - pulando canal</div>';
-                continue;
-              }
-            }
-          }
-        }
-      } catch(e) { log.innerHTML += '<div style="color:var(--danger)">  Erro ao refazer: ' + e.message + '</div>'; continue; }
-    }
-
-    // === ETAPA 2: NARRAÇÃO ===
-    fetch('/api/production-log/update', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({index:i, etapa:'narracao', etapa_detalhe:'verificando MP3...', log_msg:job.tag+': iniciando narracao...'})}).catch(function(){});
-    // Verificar se MP3 já existe
-    var mp3Existente = null;
-    try {
-      var checkRes = await fetch('/api/browse?path=' + encodeURIComponent('narracoes'));
-      var files = await checkRes.json();
-      var mp3Nome = job.narrNome + '.mp3';
-      var found = files.find(function(f){ return f.name === mp3Nome; });
-      if (found) mp3Existente = found.path;
-    } catch(e) {}
-
-    if (mp3Existente) {
-      log.innerHTML += '<div style="color:var(--text-sec)">  Narração: existe (' + mp3Existente.split('/').pop() + ') - pulando</div>';
-      job._mp3 = mp3Existente;
-      fetch('/api/production-log/update', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({index:i, etapa_detalhe:'narracao pulada (existente)', narracao_path:mp3Existente, progresso:66, log_msg:job.tag+': narracao existente'})}).catch(function(){});
-    } else {
-      log.innerHTML += '<div style="color:var(--text-sec)">  Narração: gerando (' + job.narrNome + ')...</div>';
-      log.scrollTop = 99999;
-      try {
-        var nRes = await fetch('/api/narration/generate', {
-          method: 'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ provider: job.voice_provider, voice_id: job.voice_id, texto: job.cel.roteiro, nome: job.narrNome, speed: job.voice_speed || 1.0, pitch: job.voice_pitch || 0 })
-        });
-        var nData = await nRes.json();
-        if (!nData.ok) { log.innerHTML += '<div style="color:var(--danger)">  Narração: ERRO - ' + (nData.erro||'') + '</div>'; continue; }
-        var nDone = false;
-        while (!nDone) {
-          await new Promise(function(r){ setTimeout(r, 3000); });
-          try { var ns = await (await fetch('/api/narration/status')).json(); } catch(e) { continue; }
-          if (ns.status === 'done') { nDone = true; job._mp3 = ns.audio_local; log.innerHTML += '<div style="color:var(--accent)">  Narração: OK -> ' + (ns.audio_local||'').split('/').pop() + '</div>'; fetch('/api/production-log/update', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({index:i, etapa_detalhe:'narracao OK', narracao_path:ns.audio_local||'', progresso:66, log_msg:job.tag+': narracao OK'})}).catch(function(){}); }
-          else if (ns.status === 'error') { nDone = true; log.innerHTML += '<div style="color:var(--danger)">  Narração: ERRO - ' + (ns.erro||'') + '</div>'; fetch('/api/production-log/update', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({index:i, etapa:'erro', erro:'Narracao: '+(ns.erro||''), fim:Date.now()/1000, log_msg:job.tag+': narracao ERRO'})}).catch(function(){}); }
-        }
-        if (!job._mp3) continue;
-      } catch(e) { log.innerHTML += '<div style="color:var(--danger)">  Narração: ' + e.message + '</div>'; continue; }
-    }
-
-    // === ETAPA 3: PRODUÇÃO DE VÍDEO ===
-    fetch('/api/production-log/update', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({index:i, etapa:'video', etapa_detalhe:'verificando video...', log_msg:job.tag+': iniciando video...'})}).catch(function(){});
-    // Verificar se vídeo já existe
-    var tmpl = templates.find(function(t){ return t.id === job.template_id; });
-    var pastaSaida = tmpl ? (tmpl.pasta_saida || '') : '';
-    var videoNome = (tmpl ? tmpl.tag || job.tag : job.tag) + '_' + dataYMD + '_01.mp4';
-    // Subpasta por data: pasta_saida/YYYY-MM-DD/
-    var dataPasta = dateParts[2] + '-' + dateParts[1] + '-' + dateParts[0];
-    var videoExiste = false;
-    if (pastaSaida) {
-      try {
-        var vCheck = await fetch('/api/browse?path=' + encodeURIComponent(pastaSaida + '/' + dataPasta));
-        var vFiles = await vCheck.json();
-        videoExiste = vFiles.some(function(f){ return f.name === videoNome; });
-      } catch(e) {}
-    }
-
-    if (videoExiste) {
-      log.innerHTML += '<div style="color:var(--text-sec)">  Vídeo: existe (' + videoNome + ') - pulando</div>';
-      fetch('/api/production-log/update', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({index:i, etapa:'concluido', etapa_detalhe:'video pulado (existente)', video_path:videoNome, progresso:100, fim:Date.now()/1000, log_msg:job.tag+': video existente - concluido'})}).catch(function(){});
-    } else {
-      log.innerHTML += '<div style="color:var(--text-sec)">  Vídeo: produzindo...</div>';
-      log.scrollTop = 99999;
-      try {
-        var vRes = await fetch('/api/batch', {
-          method: 'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ jobs: [{ template_id: job.template_id, mp3: job._mp3, data_ref: row.data }] })
-        });
-        if (!vRes.ok) { log.innerHTML += '<div style="color:var(--danger)">  Vídeo: ERRO ao iniciar</div>'; continue; }
-        var vDone = false;
-        while (!vDone) {
-          await new Promise(function(r){ setTimeout(r, 3000); });
-          try { var vs = await (await fetch('/api/batch/status', { signal: AbortSignal.timeout(10000) })).json(); } catch(e) { continue; }
-          if (!vs.ativo) {
-            vDone = true;
-            var vJob = vs.jobs && vs.jobs[0];
-            if (vJob && vJob.status === 'concluido') {
-              log.innerHTML += '<div style="color:var(--accent)">  Vídeo: OK -> ' + (vJob.output||'').split('/').pop() + '</div>';
-              fetch('/api/production-log/update', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({index:i, etapa:'concluido', etapa_detalhe:'video OK', video_path:(vJob.output||''), progresso:100, fim:Date.now()/1000, log_msg:job.tag+': video OK - concluido'})}).catch(function(){});
-            } else {
-              log.innerHTML += '<div style="color:var(--danger)">  Vídeo: ' + (vJob ? vJob.erro || vJob.status : 'erro') + '</div>';
-              fetch('/api/production-log/update', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({index:i, etapa:'erro', erro:'Video: '+(vJob?vJob.erro||vJob.status:'erro'), fim:Date.now()/1000, log_msg:job.tag+': video ERRO'})}).catch(function(){});
-            }
-          }
-        }
-      } catch(e) { log.innerHTML += '<div style="color:var(--danger)">  Vídeo: ' + e.message + '</div>'; }
-    }
-
-    log.scrollTop = 99999;
+    toast('Produção iniciada! Acompanhe no Monitor.', 'success');
+    // Ir para aba Monitor automaticamente
+    showPage('monitor');
+  } catch(e) {
+    toast('Erro: ' + e.message, 'error');
+    document.getElementById('btn-produzir-tudo').style.display = 'inline-flex';
+    document.getElementById('btn-produzir-tudo-cancel').style.display = 'none';
   }
-
-  await salvarTemasLocal();
-  renderTemasGrid();
-  document.getElementById('lote-fill').style.width = '100%';
-  var totalTime = ((Date.now() - startTime) / 1000 / 60).toFixed(1);
-  log.innerHTML += '<div style="font-weight:600;margin-top:6px;border-top:1px solid var(--border);padding-top:6px">CONCLUÍDO | ' + totalTime + ' min total</div>';
-  log.scrollTop = 99999;
-  var btnC = document.getElementById('btn-produzir-tudo-cancel');
-  btnC.style.display = 'none';
-  btnC.textContent = 'Cancelar';
-  btnC.style.opacity = '1';
-  btnC.disabled = false;
-  document.getElementById('btn-produzir-tudo').style.display = 'inline-flex';
-
-  // Production log: FINISH
-  fetch('/api/production-log/finish', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({cancelado: _produzirTudoCancelled})}).catch(function(){});
-
-  if (_produzirTudoCancelled) {
-    log.innerHTML += '<div style="font-weight:600;margin-top:6px;border-top:1px solid var(--danger);padding-top:6px;color:var(--danger)">⛔ CANCELADO | ' + totalTime + ' min decorridos</div>';
-  } else {
-    log.innerHTML += '<div style="font-weight:600;margin-top:6px;border-top:1px solid var(--accent);padding-top:6px;color:var(--accent)">✅ CONCLUÍDO | ' + totalTime + ' min total</div>';
-  }
-  log.scrollTop = 99999;
-  toast(_produzirTudoCancelled ? 'Produção cancelada' : 'Produção finalizada!', _produzirTudoCancelled ? 'error' : 'success');
 }
 
 // === CHAT (CLAUDE CLI) ===

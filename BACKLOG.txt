@@ -162,6 +162,74 @@
 
 ========================== TODO (PENDENTE) =====================================
 
+--- CRÍTICO / BUGS ---
+
+[ ] REFATORAR ORQUESTRADOR "PRODUZIR TUDO"
+    O fluxo completo está com bugs graves:
+    - Roteiros gerados mas não salvos na célula do Temas
+    - Narrações com chunks não concatenados (encoding issue)
+    - Monitor não alimentado corretamente
+    - Etapas sendo puladas por verificações incorretas de "já existe"
+    Precisa reescrever produzirDataCompleta do zero com:
+    - Cada etapa com verificação robusta
+    - Salvamento explícito após cada etapa
+    - Log persistente (production_log) alimentado a cada passo
+    - Nomenclatura e pastas consistentes (data + canal)
+    Prioridade: CRÍTICA — EM ANDAMENTO
+
+[ ] REGRAS DE OUTPUT PARA ROTEIRO (MIN/MAX CHARS)
+    Configuração por pipeline ou template de quantidade mínima/máxima
+    de caracteres do roteiro. Se não atender:
+    - Deletar roteiro gerado
+    - Refazer geração automaticamente (até 2x)
+    - Se falhar 2x, marcar como erro e pular
+    Campo configurável no template ou pipeline: min_chars, max_chars
+    Prioridade: ALTA
+
+--- THUMBNAIL (REFATORAÇÃO COMPLETA) ---
+
+[ ] ABA THUMBNAIL NO TEMPLATE (CONFIGURAÇÕES POR CANAL)
+    Mover configs de thumb para dentro do Template (nova aba "Thumbnail"):
+
+    IMAGEM DE FUNDO (switch 2 lados):
+    [ ] Lado 1: Pasta de imagens prontas + checkbox "Randomizar"
+    [ ] Lado 2: Gerar via IA
+        - Checkboxes: usar thumbnail/titulo/tema como input pro prompt
+        - Escolher LLM (credencial + modelo)
+        - Box de prompt para o agente
+        - Gerar imagem via Nano Banana (ai33.pro API)
+
+    TEXTO (1 a 3 frases):
+    [ ] Seletor de quantidade de frases (1, 2 ou 3)
+    [ ] Cada frase com config independente:
+        fonte, tamanho, cor, outline, sombra, bg_box
+
+    POSIÇÃO:
+    [ ] Posição padrão fixa (topo/centro/inferior/esquerdo/direito)
+    [ ] Posição randomizada com pool de checkboxes habilitadas
+
+    ZOOM: valor padrão da imagem de fundo
+
+    THUMB DA REFERÊNCIA (checkbox opcional):
+    [ ] Quando ON: campo LLM + prompt de modelagem
+    [ ] No processo: se link vazio na célula → pula thumb
+    [ ] Se tem link → extrai thumb YT → LLM gera prompt → Nano Banana
+
+    PREVIEW: com textos pré-definidos para visualizar estilo
+
+[ ] ABA THUMBNAIL (SIDEBAR) - EXECUÇÃO
+    Manter aba no sidebar para:
+    - Preview real com texto da thumb da data/canal
+    - Edição/retoque manual isolado
+    - Geração individual ou em lote
+    - Extração de thumbnail do YouTube (movido pra cá)
+
+[ ] CAMPO "LINK DO VÍDEO REFERÊNCIA" NAS CÉLULAS DO TEMAS
+    Novo campo opcional na célula do grid de Temas.
+    Quando preenchido + "Usar Thumb da Referência" ON:
+    → extrai thumb do YT → gera via IA
+    Quando vazio → ignora etapa de thumb no fluxo completo
+
 --- INFRAESTRUTURA ---
 
 [ ] CLOUDFLARE TUNNEL / TAILSCALE
