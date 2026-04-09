@@ -240,32 +240,53 @@ estado_narracao = {
 }
 
 
+MINIMAX_CHUNK_LIMIT = 8000  # chars por chunk (margem do limite de 10k)
+
+
+def _dividir_em_chunks(texto: str, max_chars: int) -> list:
+    """Divide texto em chunks respeitando parágrafos."""
+    paragrafos = texto.split("\n\n")
+    chunks = []
+    chunk_atual = ""
+
+    for p in paragrafos:
+        if len(chunk_atual) + len(p) + 2 > max_chars and chunk_atual:
+            chunks.append(chunk_atual.strip())
+            chunk_atual = p
+        else:
+            chunk_atual += ("\n\n" if chunk_atual else "") + p
+
+    if chunk_atual.strip():
+        chunks.append(chunk_atual.strip())
+
+    # Se algum chunk ainda é grande demais, dividir por frases
+    final_chunks = []
+    for chunk in chunks:
+        if len(chunk) <= max_chars:
+            final_chunks.append(chunk)
+        else:
+            # Dividir por frases (. seguido de espaço ou newline)
+            import re
+            frases = re.split(r'(?<=[.!?])\s+', chunk)
+            sub_chunk = ""
+            for frase in frases:
+                if len(sub_chunk) + len(frase) + 1 > max_chars and sub_chunk:
+                    final_chunks.append(sub_chunk.strip())
+                    sub_chunk = frase
+                else:
+                    sub_chunk += (" " if sub_chunk else "") + frase
+            if sub_chunk.strip():
+                final_chunks.append(sub_chunk.strip())
+
+    return final_chunks if final_chunks else [texto]
+
+
 def iniciar_narracao(api_key: str, provider: str, voice_id: str, texto: str, nome_saida: str, pasta: str = "", preview: bool = False, **kwargs) -> dict:
-    """Inicia geração de narração e retorna task_id."""
+    """Inicia geração de narração. Suporta chunking para textos longos."""
     global estado_narracao
 
-    # Prevenir duplicação — não iniciar se já tem uma ativa
     if estado_narracao.get("ativo"):
         return {"ok": False, "erro": "Já existe uma narração em andamento. Aguarde."}
-
-    if provider in ("minimax", "minimax_clone"):
-        result = gerar_narracao_minimax(
-            api_key, voice_id, texto,
-            model=kwargs.get("model", "speech-2.6-hd"),
-            speed=kwargs.get("speed", 1.0),
-            pitch=kwargs.get("pitch", 0),
-        )
-    else:
-        result = gerar_narracao_elevenlabs(
-            api_key, voice_id, texto,
-            model_id=kwargs.get("model_id", "eleven_multilingual_v2"),
-        )
-
-    if not result.get("ok"):
-        return result
-
-    global ultimo_creditos
-    ultimo_creditos = result.get("credits")
 
     # Determinar pasta de saída
     output_dir = Path(pasta) if pasta else NARRACOES_DIR
@@ -273,23 +294,107 @@ def iniciar_narracao(api_key: str, provider: str, voice_id: str, texto: str, nom
         output_dir = BASE_DIR / output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    estado_narracao = {
-        "ativo": True,
-        "task_id": result["task_id"],
-        "provider": provider,
-        "status": "processing",
-        "progresso": 10,
-        "audio_url": None,
-        "audio_local": None,
-        "srt_url": None,
-        "erro": None,
-        "nome_saida": nome_saida,
-        "output_dir": str(output_dir),
-        "preview": preview,
-        "api_key": api_key,
-    }
+    # Chunking para Minimax com textos longos
+    needs_chunking = provider in ("minimax", "minimax_clone") and len(texto) > MINIMAX_CHUNK_LIMIT
 
-    return result
+    if needs_chunking:
+        chunks = _dividir_em_chunks(texto, MINIMAX_CHUNK_LIMIT)
+        # Enviar todos os chunks como tasks separadas
+        task_ids = []
+        total_credits = 0
+        for i, chunk in enumerate(chunks):
+            result = gerar_narracao_minimax(
+                api_key, voice_id, chunk,
+                model=kwargs.get("model", "speech-2.6-hd"),
+                speed=kwargs.get("speed", 1.0),
+                pitch=kwargs.get("pitch", 0),
+            )
+            if not result.get("ok"):
+                return {"ok": False, "erro": f"Chunk {i+1}/{len(chunks)}: {result.get('erro', '')}"}
+            task_ids.append(result["task_id"])
+            total_credits = result.get("credits", 0)
+
+        global ultimo_creditos
+        ultimo_creditos = total_credits
+
+        estado_narracao = {
+            "ativo": True,
+            "task_id": task_ids[0],  # primeiro para compatibilidade
+            "task_ids": task_ids,
+            "chunks_total": len(chunks),
+            "chunks_done": 0,
+            "provider": provider,
+            "status": "processing",
+            "progresso": 5,
+            "audio_url": None,
+            "audio_local": None,
+            "srt_url": None,
+            "erro": None,
+            "nome_saida": nome_saida,
+            "output_dir": str(output_dir),
+            "preview": preview,
+            "api_key": api_key,
+            "credit_cost": 0,
+        }
+        return {"ok": True, "task_id": task_ids[0], "credits": total_credits, "chunks": len(chunks)}
+
+    else:
+        # Single request (sem chunking)
+        if provider in ("minimax", "minimax_clone"):
+            result = gerar_narracao_minimax(
+                api_key, voice_id, texto,
+                model=kwargs.get("model", "speech-2.6-hd"),
+                speed=kwargs.get("speed", 1.0),
+                pitch=kwargs.get("pitch", 0),
+            )
+        else:
+            result = gerar_narracao_elevenlabs(
+                api_key, voice_id, texto,
+                model_id=kwargs.get("model_id", "eleven_multilingual_v2"),
+            )
+
+        if not result.get("ok"):
+            return result
+
+        ultimo_creditos = result.get("credits")
+
+        estado_narracao = {
+            "ativo": True,
+            "task_id": result["task_id"],
+            "task_ids": None,
+            "chunks_total": 1,
+            "chunks_done": 0,
+            "provider": provider,
+            "status": "processing",
+            "progresso": 10,
+            "audio_url": None,
+            "audio_local": None,
+            "srt_url": None,
+            "erro": None,
+            "nome_saida": nome_saida,
+            "output_dir": str(output_dir),
+            "preview": preview,
+            "api_key": api_key,
+            "credit_cost": 0,
+        }
+        return result
+
+
+def _concatenar_audios(paths: list, output: str):
+    """Concatena múltiplos MP3 com FFmpeg."""
+    import subprocess
+    output_dir = Path(output).parent
+    list_file = output_dir / "concat_list.txt"
+    # Usar nomes relativos para evitar problemas com caracteres especiais no path
+    with open(list_file, "w", encoding="utf-8") as f:
+        for p in paths:
+            nome = Path(p).name
+            f.write(f"file '{nome}'\n")
+    cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file), "-c", "copy", output]
+    proc = subprocess.run(cmd, capture_output=True, timeout=120, cwd=str(output_dir))
+    list_file.unlink(missing_ok=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"FFmpeg concat falhou: {proc.stderr.decode('utf-8', errors='replace')[:200]}")
 
 
 def poll_narracao() -> dict:
@@ -297,47 +402,115 @@ def poll_narracao() -> dict:
     global estado_narracao
 
     if not estado_narracao["ativo"] or not estado_narracao["task_id"]:
-        return estado_narracao
+        safe = {k: v for k, v in estado_narracao.items() if k != "api_key"}
+        return safe
 
-    task = consultar_tarefa(estado_narracao["api_key"], estado_narracao["task_id"])
-    status = task.get("status", "doing")
+    task_ids = estado_narracao.get("task_ids")
+    api_key = estado_narracao["api_key"]
+    nome = estado_narracao.get("nome_saida", "narracao")
+    output_dir = Path(estado_narracao.get("output_dir", str(NARRACOES_DIR)))
+    is_preview = estado_narracao.get("preview", False)
 
-    if status == "done":
-        metadata = task.get("metadata", {})
-        audio_url = metadata.get("audio_url", "")
-        srt_url = metadata.get("srt_url", "")
+    if task_ids and len(task_ids) > 1:
+        # === MODO CHUNKED: múltiplas tasks ===
+        all_done = True
+        any_error = False
+        total_cost = 0
+        audio_urls = []
 
-        # Baixar áudio (se não for preview)
-        nome = estado_narracao.get("nome_saida", "narracao")
-        output_dir = Path(estado_narracao.get("output_dir", str(NARRACOES_DIR)))
-        is_preview = estado_narracao.get("preview", False)
+        for i, tid in enumerate(task_ids):
+            task = consultar_tarefa(api_key, tid)
+            st = task.get("status", "doing")
+            if st == "done":
+                metadata = task.get("metadata", {})
+                audio_urls.append((i, metadata.get("audio_url", "")))
+                total_cost += task.get("credit_cost", 0)
+            elif st == "error":
+                any_error = True
+                estado_narracao["erro"] = f"Chunk {i+1}: {task.get('error_message', 'erro')}"
+                break
+            else:
+                all_done = False
 
-        if not is_preview:
-            destino = str(output_dir / f"{nome}.mp3")
-            try:
-                baixar_audio(audio_url, destino)
-                estado_narracao["audio_local"] = destino
-            except Exception as e:
-                estado_narracao["erro"] = str(e)
-        else:
-            estado_narracao["audio_local"] = "(preview - não salvo)"
+        chunks_done = len(audio_urls)
+        chunks_total = len(task_ids)
+        estado_narracao["chunks_done"] = chunks_done
+        estado_narracao["progresso"] = int(chunks_done / chunks_total * 90) if chunks_total else 0
+        estado_narracao["status"] = "processing"
 
-        estado_narracao["audio_url"] = audio_url
-        estado_narracao["srt_url"] = srt_url
-        estado_narracao["credit_cost"] = task.get("credit_cost", 0)
-        estado_narracao["status"] = "done"
-        estado_narracao["progresso"] = 100
-        estado_narracao["ativo"] = False
+        if any_error:
+            estado_narracao["status"] = "error"
+            estado_narracao["ativo"] = False
 
-    elif status == "error":
-        estado_narracao["status"] = "error"
-        estado_narracao["erro"] = task.get("error_message", "Erro desconhecido")
-        estado_narracao["ativo"] = False
+        elif all_done:
+            # Baixar todos os áudios e concatenar
+            estado_narracao["progresso"] = 92
+            audio_urls.sort(key=lambda x: x[0])
+
+            if not is_preview:
+                try:
+                    chunk_paths = []
+                    for i, url in audio_urls:
+                        chunk_path = str(output_dir / f"_chunk_{nome}_{i}.mp3")
+                        baixar_audio(url, chunk_path)
+                        chunk_paths.append(chunk_path)
+
+                    # Concatenar
+                    destino = str(output_dir / f"{nome}.mp3")
+                    _concatenar_audios(chunk_paths, destino)
+
+                    # Limpar chunks temporários
+                    for cp in chunk_paths:
+                        Path(cp).unlink(missing_ok=True)
+
+                    estado_narracao["audio_local"] = destino
+                except Exception as e:
+                    estado_narracao["erro"] = str(e)
+            else:
+                estado_narracao["audio_local"] = "(preview - não salvo)"
+
+            estado_narracao["audio_url"] = audio_urls[-1][1] if audio_urls else ""
+            estado_narracao["credit_cost"] = total_cost
+            estado_narracao["status"] = "done"
+            estado_narracao["progresso"] = 100
+            estado_narracao["ativo"] = False
 
     else:
-        estado_narracao["status"] = "processing"
-        progress = task.get("progress", 0)
-        estado_narracao["progresso"] = max(10, progress) if progress else 30
+        # === MODO SINGLE: uma task ===
+        task = consultar_tarefa(api_key, estado_narracao["task_id"])
+        status = task.get("status", "doing")
+
+        if status == "done":
+            metadata = task.get("metadata", {})
+            audio_url = metadata.get("audio_url", "")
+            srt_url = metadata.get("srt_url", "")
+
+            if not is_preview:
+                destino = str(output_dir / f"{nome}.mp3")
+                try:
+                    baixar_audio(audio_url, destino)
+                    estado_narracao["audio_local"] = destino
+                except Exception as e:
+                    estado_narracao["erro"] = str(e)
+            else:
+                estado_narracao["audio_local"] = "(preview - não salvo)"
+
+            estado_narracao["audio_url"] = audio_url
+            estado_narracao["srt_url"] = srt_url
+            estado_narracao["credit_cost"] = task.get("credit_cost", 0)
+            estado_narracao["status"] = "done"
+            estado_narracao["progresso"] = 100
+            estado_narracao["ativo"] = False
+
+        elif status == "error":
+            estado_narracao["status"] = "error"
+            estado_narracao["erro"] = task.get("error_message", "Erro desconhecido")
+            estado_narracao["ativo"] = False
+
+        else:
+            estado_narracao["status"] = "processing"
+            progress = task.get("progress", 0)
+            estado_narracao["progresso"] = max(10, progress) if progress else 30
 
     # Limpar api_key do estado antes de retornar
     safe = {k: v for k, v in estado_narracao.items() if k != "api_key"}

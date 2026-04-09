@@ -236,8 +236,71 @@
     Leitura e escrita de dados em planilhas Google
     Prioridade: MEDIA
 
-[ ] THUMBNAIL TEXT GENERATION
-    Gerar texto/overlay para thumbnails automaticamente
+--- ABA THUMBNAIL ---
+
+[ ] ABA THUMBNAIL (NOVA)
+    Cards por canal (como narração em lote). Cada card tem:
+    - Template de thumb configurado (fonte, posição texto, estilo)
+    - Texto da thumb puxado da célula Temas (data + canal)
+    - 3 modos de geração de imagem de fundo:
+
+    MODO 1: IMAGEM EXISTENTE
+    [ ] Seleção de imagem local (file browser)
+    [ ] Preview da thumb com texto sobreposto
+    [ ] Exportar como JPG/PNG
+
+    MODO 2: GERAR IMAGEM POR PROMPT
+    [ ] Agente LLM gera prompt de imagem baseado no tema/título
+    [ ] Pipeline configurável para o agente de prompt
+    [ ] Enviar prompt para ai33.pro Nano Banana (geração de imagem)
+    [ ] Receber imagem gerada, aplicar texto, exportar
+    Prioridade: ALTA
+
+    MODO 3: MODELAR DA REFERÊNCIA
+    [ ] Campo opcional: URL do vídeo YouTube de referência
+    [ ] Extrair thumbnail do vídeo de referência (YouTube API ou scraping)
+    [ ] Agente LLM analisa a thumb de referência e gera prompt de modelagem
+    [ ] Gerar nova imagem inspirada via Nano Banana
+    [ ] Aplicar texto da célula Temas, exportar
+    Prioridade: MEDIA
+
+    CONFIGURAÇÃO DO CARD:
+    [ ] Fonte, tamanho, cor, posição do texto
+    [ ] Estilo (outline, shadow, background box)
+    [ ] Resolução (1280x720 padrão YouTube)
+    [ ] Template de layout (onde fica o texto, margens)
+    [ ] Salvamento: {TAG}_{data}_thumb.jpg na pasta configurada
+    Prioridade: ALTA
+
+    INTEGRAÇÃO:
+    [ ] Puxar texto da thumb da célula Temas (data + canal)
+    [ ] Geração em lote por data (gera todas as thumbs de uma data)
+    [ ] Link com ai33.pro Nano Banana API para geração de imagem
+    [ ] Link com Canva API (MCP) para edição avançada (futuro)
+    Prioridade: ALTA
+
+--- ABA UPLOAD ---
+
+[ ] ABA UPLOAD (NOVA)
+    Upload direto para YouTube via YouTube Data API v3.
+    Cards por canal com:
+    - Vídeo (path do MP4 gerado)
+    - Título (puxado da célula Temas)
+    - Descrição (template configurável com variáveis)
+    - Tags (configuráveis por template)
+    - Thumbnail (path do JPG gerado na aba Thumbnail)
+    - Categoria (Education, Entertainment, etc)
+    - Visibilidade (public, unlisted, private, scheduled)
+    - Data de agendamento (se scheduled)
+
+    [ ] Autenticação OAuth2 com YouTube Data API v3
+    [ ] Upload de vídeo com metadata
+    [ ] Upload de thumbnail customizada
+    [ ] Agendamento de publicação
+    [ ] Upload em lote por data
+    [ ] Status de upload (progresso, concluído, erro)
+    [ ] Histórico de uploads
+    [ ] Template de descrição com variáveis ({{titulo}}, {{canal}}, {{data}}, etc)
     Prioridade: MEDIA
 
 --- DISTRIBUICAO ---
