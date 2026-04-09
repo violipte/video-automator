@@ -4682,6 +4682,15 @@ async function iniciarBatchNarracao() {
     log.innerHTML += '<div style="color:var(--text-sec)">' + job.tag + ': Enviando (' + job.chars + ' chars)...</div>';
     log.scrollTop = 99999;
 
+    // Esperar narração anterior terminar + delay
+    var _waitNarr = 0;
+    while (_waitNarr < 30) {
+      try { var _ns = await (await fetch('/api/narration/status')).json(); if (!_ns.ativo) break; } catch(e){}
+      await new Promise(function(r){ setTimeout(r, 2000); });
+      _waitNarr++;
+    }
+    await new Promise(function(r){ setTimeout(r, 1000); });
+
     try {
       var res = await fetch('/api/narration/generate', {
         method: 'POST', headers:{'Content-Type':'application/json'},
