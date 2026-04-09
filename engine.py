@@ -99,6 +99,7 @@ class VideoEngine:
         w, h = res[0], res[1]
         zoom = t.get("efeito_zoom", True)
         zoom_ratio = t.get("zoom_ratio", 1.04)
+        video_loop = t.get("video_loop", True)
 
         # === PASSO 1: Preparar clips de fundo (com cache) ===
         arquivos_fundo = self._listar_arquivos_fundo()
@@ -272,19 +273,61 @@ class VideoEngine:
             for clip in clips:
                 inputs.extend(["-i", clip])
                 input_idx += 1
+            n_clips = len(clips)
         else:
-            for arquivo, dur in clips:
-                # Para vídeos: loop se necessário para cobrir a duração
-                vid_dur = obter_duracao(arquivo)
-                if vid_dur > 0 and vid_dur < dur:
-                    # Vídeo é mais curto que o desejado — usar stream_loop
-                    loops = int(dur / vid_dur) + 1
-                    inputs.extend(["-stream_loop", str(loops), "-t", f"{dur:.2f}", "-i", arquivo])
-                else:
-                    inputs.extend(["-t", f"{dur:.2f}", "-i", arquivo])
-                input_idx += 1
+            if video_loop:
+                # LOOP: pré-concatenar vídeos shuffled em um único arquivo
+                if callback_etapa:
+                    callback_etapa("Pré-concatenando vídeos de fundo (loop)...")
 
-        n_clips = len(clips)
+                concat_list = TEMP_DIR / "bg_concat.txt"
+                with open(concat_list, "w", encoding="utf-8") as f:
+                    for arquivo, dur in clips:
+                        vid_dur = obter_duracao(arquivo)
+                        if vid_dur > 0 and vid_dur < dur:
+                            loops = int(dur / vid_dur) + 1
+                            for _ in range(loops):
+                                f.write(f"file '{Path(arquivo).as_posix()}'\n")
+                        else:
+                            f.write(f"file '{Path(arquivo).as_posix()}'\n")
+
+                bg_video = str(TEMP_DIR / "bg_concat.mp4")
+                concat_cmd = [
+                    "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                    "-i", str(concat_list),
+                    "-t", f"{self.duracao_total:.2f}",
+                    "-c", "copy", bg_video
+                ]
+                ret = _rodar_ffmpeg(concat_cmd)
+                if ret != 0:
+                    raise RuntimeError("Falha ao pré-concatenar vídeos de fundo")
+
+                inputs.extend(["-i", bg_video])
+                input_idx += 1
+                n_clips = 1
+            else:
+                # SEM LOOP: concatenar vídeos sem repetir, congela no último frame
+                if callback_etapa:
+                    callback_etapa("Pré-concatenando vídeos de fundo (sem loop)...")
+
+                concat_list = TEMP_DIR / "bg_concat.txt"
+                with open(concat_list, "w", encoding="utf-8") as f:
+                    for arquivo, dur in clips:
+                        f.write(f"file '{Path(arquivo).as_posix()}'\n")
+
+                bg_video = str(TEMP_DIR / "bg_concat.mp4")
+                concat_cmd = [
+                    "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                    "-i", str(concat_list),
+                    "-c", "copy", bg_video
+                ]
+                ret = _rodar_ffmpeg(concat_cmd)
+                if ret != 0:
+                    raise RuntimeError("Falha ao pré-concatenar vídeos de fundo")
+
+                inputs.extend(["-i", bg_video])
+                input_idx += 1
+                n_clips = 1
 
         # Narração
         idx_narracao = input_idx
@@ -329,10 +372,19 @@ class VideoEngine:
         # === FILTROS ===
 
         # Concatenar clips
-        if tipo_fundo == "imagens" and zoom:
-            # Clips já estão no tamanho certo, só concatenar
+        if n_clips == 1:
+            # Vídeo pré-concatenado ou único — só scale+trim
+            filtros.append(
+                f"[0:v]scale={w}:{h}:force_original_aspect_ratio=decrease,"
+                f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setpts=PTS-STARTPTS,"
+                f"fps={fps},trim=0:{self.duracao_total:.2f},setpts=PTS-STARTPTS[trimmed]"
+            )
+        elif tipo_fundo == "imagens" and zoom:
             for i in range(n_clips):
                 filtros.append(f"[{i}:v]setpts=PTS-STARTPTS[img{i}]")
+            concat_inputs = "".join(f"[img{i}]" for i in range(n_clips))
+            filtros.append(f"{concat_inputs}concat=n={n_clips}:v=1:a=0[base]")
+            filtros.append(f"[base]trim=0:{self.duracao_total:.2f},setpts=PTS-STARTPTS[trimmed]")
         else:
             for i in range(n_clips):
                 filtros.append(
@@ -340,10 +392,9 @@ class VideoEngine:
                     f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setpts=PTS-STARTPTS,"
                     f"fps={fps}[img{i}]"
                 )
-
-        concat_inputs = "".join(f"[img{i}]" for i in range(n_clips))
-        filtros.append(f"{concat_inputs}concat=n={n_clips}:v=1:a=0[base]")
-        filtros.append(f"[base]trim=0:{self.duracao_total:.2f},setpts=PTS-STARTPTS[trimmed]")
+            concat_inputs = "".join(f"[img{i}]" for i in range(n_clips))
+            filtros.append(f"{concat_inputs}concat=n={n_clips}:v=1:a=0[base]")
+            filtros.append(f"[base]trim=0:{self.duracao_total:.2f},setpts=PTS-STARTPTS[trimmed]")
         ultimo_video = "trimmed"
 
         # Ajustes visuais (Lumetri-style)
@@ -611,6 +662,10 @@ class VideoEngine:
         )
         _set_low_priority(self.processo)
 
+        import time as _time
+        _last_progress_time = _time.time()
+        _stall_timeout = 600  # 10 min sem progresso = morto
+
         for linha in self.processo.stderr:
             if self.cancelado:
                 self.processo.kill()
@@ -620,8 +675,18 @@ class VideoEngine:
                 hh, mm, ss, cs = int(match.group(1)), int(match.group(2)), int(match.group(3)), int(match.group(4))
                 tempo = hh * 3600 + mm * 60 + ss + cs / 100
                 cb_passo2(min(100.0, (tempo / self.duracao_total) * 100))
+                _last_progress_time = _time.time()
 
-        self.processo.wait()
+            # Watchdog: se sem progresso por 10 min, matar
+            if _time.time() - _last_progress_time > _stall_timeout:
+                self.processo.kill()
+                raise RuntimeError(f"FFmpeg travou (sem progresso por {_stall_timeout}s)")
+
+        try:
+            self.processo.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            self.processo.kill()
+            self.processo.wait()
         if self.processo.returncode != 0:
             # Deletar arquivo incompleto/corrompido
             if Path(self.output_path).exists():

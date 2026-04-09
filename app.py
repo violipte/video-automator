@@ -184,9 +184,12 @@ async def produzir_video(request: Request):
     template = templates[template_id]
     tag = template.get("tag", template_id)
     data = datetime.now().strftime("%Y%m%d")
+    data_pasta = datetime.now().strftime("%Y-%m-%d")
     nome_saida = f"{tag}_{data}.mp4"
     pasta_saida = template.get("pasta_saida", str(TEMP_DIR))
-    output_path = str(Path(pasta_saida) / nome_saida)
+    pasta_final = Path(pasta_saida) / data_pasta
+    pasta_final.mkdir(parents=True, exist_ok=True)
+    output_path = str(pasta_final / nome_saida)
 
     try:
         # Transcrever
@@ -400,10 +403,14 @@ def _executar_batch():
                 job["etapa"] = "Iniciando montagem..."
                 tag = template.get("tag", template_id)
                 data = datetime.now().strftime("%Y%m%d")
+                data_pasta = datetime.now().strftime("%Y-%m-%d")
                 seq = str(i + 1).zfill(2)
                 nome_saida = f"{tag}_{data}_{seq}.mp4"
                 pasta_saida = template.get("pasta_saida", str(TEMP_DIR))
-                output_path = str(Path(pasta_saida) / nome_saida)
+                # Organizar por data: pasta_saida/YYYY-MM-DD/arquivo.mp4
+                pasta_final = Path(pasta_saida) / data_pasta
+                pasta_final.mkdir(parents=True, exist_ok=True)
+                output_path = str(pasta_final / nome_saida)
 
                 def callback_progresso(pct):
                     job["progresso"] = round(12 + pct * 0.88, 1)
@@ -458,9 +465,21 @@ def _executar_batch():
         with open(TEMP_DIR / "erro_batch.log", "a", encoding="utf-8") as f:
             f.write(f"\n{'='*60}\nERRO FATAL: {datetime.now().isoformat()}\n")
             traceback.print_exc(file=f)
+        # Marcar job atual como erro
+        idx = estado_batch.get("job_atual", -1)
+        if 0 <= idx < len(estado_batch["jobs"]):
+            estado_batch["jobs"][idx]["status"] = "erro"
+            estado_batch["jobs"][idx]["erro"] = str(e)
+            estado_batch["jobs"][idx]["etapa"] = "Erro fatal"
     finally:
         engine_atual = None
         estado_batch["ativo"] = False
+        # Matar qualquer FFmpeg órfão
+        try:
+            import subprocess as _sp
+            _sp.run(["taskkill", "/F", "/IM", "ffmpeg.exe"], capture_output=True, timeout=5)
+        except Exception:
+            pass
 
 
 @app.post("/api/batch")
@@ -1329,6 +1348,7 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
     <div class="page-header">
       <h2>Produção em Lote</h2>
       <div style="display:flex;gap:8px">
+        <button class="btn btn-secondary btn-sm" onclick="limparTodosAudios()" style="font-size:11px">Limpar Áudios</button>
         <button id="btn-batch-start" class="btn btn-primary" onclick="iniciarBatch()">Iniciar Produção</button>
         <button id="btn-batch-cancel" class="btn btn-danger" onclick="cancelarBatch()" style="display:none">Cancelar</button>
       </div>
@@ -1819,6 +1839,10 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
             <option value="imagens">Imagens (JPEG/PNG)</option>
             <option value="videos">Vídeos (MP4)</option>
           </select>
+        </div>
+        <div class="form-group" id="opcoes-video-loop" style="display:none">
+          <label><input type="checkbox" id="ed-video-loop" checked> Loop de vídeos (repete até o final do áudio)</label>
+          <div style="font-size:10px;color:var(--text-sec);margin-top:2px">Desmarcado: congela no último frame quando os vídeos acabam</div>
         </div>
         <div class="form-group">
           <label>Pasta de Imagens/Vídeos</label>
@@ -2492,6 +2516,7 @@ async function abrirEditor(id) {
     document.getElementById('ed-resolucao').value = res;
     document.getElementById('ed-fps').value = t.fps || 30;
     document.getElementById('ed-tipo-fundo').value = t.tipo_fundo || 'imagens';
+    document.getElementById('ed-video-loop').checked = t.video_loop !== false;
     document.getElementById('ed-pasta-imagens').value = t.pasta_imagens || '';
     document.getElementById('ed-duracao-imagem').value = t.duracao_por_imagem || 10;
     document.getElementById('ed-zoom-ratio').value = t.zoom_ratio || 1.04;
@@ -2661,6 +2686,7 @@ function showEditorTab(tab, el) {
 function toggleFundoOpcoes() {
   const tipo = document.getElementById('ed-tipo-fundo').value;
   document.getElementById('opcoes-imagens').style.display = tipo === 'imagens' ? 'block' : 'none';
+  document.getElementById('opcoes-video-loop').style.display = tipo === 'videos' ? 'block' : 'none';
 }
 
 // Overlays dinâmicos
@@ -2743,6 +2769,7 @@ async function salvarTemplate() {
     fps: parseInt(document.getElementById('ed-fps').value),
     pasta_imagens: document.getElementById('ed-pasta-imagens').value,
     tipo_fundo: document.getElementById('ed-tipo-fundo').value,
+    video_loop: document.getElementById('ed-video-loop').checked,
     duracao_por_imagem: parseInt(document.getElementById('ed-duracao-imagem').value),
     efeito_zoom: document.getElementById('ed-efeito-zoom').checked,
     zoom_ratio: parseFloat(document.getElementById('ed-zoom-ratio').value),
@@ -3269,7 +3296,7 @@ function selecionarArquivo(path) {
 }
 
 // === BATCH PRODUCTION ===
-var _batchMp3Values = {};  // Preserva caminhos MP3 entre recarregamentos
+var _batchMp3Values = JSON.parse(localStorage.getItem('batchMp3Values') || '{}');
 
 var _batchDragIdx = -1;
 function _batchDragStart(e) { _batchDragIdx = parseInt(e.target.closest('tr').dataset.bidx); e.dataTransfer.effectAllowed = 'move'; }
@@ -3288,6 +3315,7 @@ async function carregarBatch() {
   document.querySelectorAll('.batch-mp3').forEach(function(inp) {
     if (inp.value.trim()) _batchMp3Values[inp.dataset.tid] = inp.value.trim();
   });
+  localStorage.setItem('batchMp3Values', JSON.stringify(_batchMp3Values));
 
   const res = await fetch('/api/templates');
   templates = await res.json();
@@ -3335,8 +3363,23 @@ async function carregarBatch() {
     if (_batchMp3Values[inp.dataset.tid]) inp.value = _batchMp3Values[inp.dataset.tid];
   });
 
+  // Auto-save quando input muda
+  document.querySelectorAll('.batch-mp3').forEach(function(inp) {
+    inp.addEventListener('change', function() {
+      _batchMp3Values[this.dataset.tid] = this.value.trim();
+      localStorage.setItem('batchMp3Values', JSON.stringify(_batchMp3Values));
+    });
+  });
+
   // Verificar se batch ativo
   checkBatchStatus();
+}
+
+function limparTodosAudios() {
+  document.querySelectorAll('.batch-mp3').forEach(function(inp) { inp.value = ''; });
+  _batchMp3Values = {};
+  localStorage.setItem('batchMp3Values', JSON.stringify({}));
+  toast('Caminhos removidos', 'success');
 }
 
 async function iniciarIndividual(tid) {
@@ -5636,10 +5679,12 @@ async function produzirDataCompleta() {
     var tmpl = templates.find(function(t){ return t.id === job.template_id; });
     var pastaSaida = tmpl ? (tmpl.pasta_saida || '') : '';
     var videoNome = (tmpl ? tmpl.tag || job.tag : job.tag) + '_' + dataYMD + '_01.mp4';
+    // Subpasta por data: pasta_saida/YYYY-MM-DD/
+    var dataPasta = dateParts[2] + '-' + dateParts[1] + '-' + dateParts[0];
     var videoExiste = false;
     if (pastaSaida) {
       try {
-        var vCheck = await fetch('/api/browse?path=' + encodeURIComponent(pastaSaida));
+        var vCheck = await fetch('/api/browse?path=' + encodeURIComponent(pastaSaida + '/' + dataPasta));
         var vFiles = await vCheck.json();
         videoExiste = vFiles.some(function(f){ return f.name === videoNome; });
       } catch(e) {}
