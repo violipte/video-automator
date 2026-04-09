@@ -32,6 +32,7 @@ import transcriber
 import subtitle_fixer
 import scriptwriter
 import narrator
+import thumbnail
 from engine import VideoEngine
 
 # === CONFIG ===
@@ -999,6 +1000,85 @@ def status_producao_completa():
     return estado_producao_completa
 
 
+# === API: THUMBNAILS ===
+
+@app.get("/api/thumbnail/preview")
+async def preview_thumbnail(request: Request):
+    """Gera preview de thumbnail com texto sobreposto (retorna base64)."""
+    params = dict(request.query_params)
+    imagem = params.get("imagem", "")
+    texto = params.get("texto", "")
+
+    if not imagem or not Path(imagem).exists():
+        raise HTTPException(400, "Imagem de fundo não encontrada")
+    if not texto:
+        raise HTTPException(400, "Texto é obrigatório")
+
+    config = {}
+    for k in ("font", "size", "color", "outline_color", "outline_width",
+              "shadow", "shadow_offset", "position", "margin", "line_spacing"):
+        if k in params:
+            val = params[k]
+            if k in ("size", "outline_width", "shadow_offset", "margin", "line_spacing"):
+                val = int(val)
+            elif k == "shadow":
+                val = val.lower() in ("true", "1", "yes")
+            config[k] = val
+
+    try:
+        b64 = thumbnail.gerar_thumbnail_base64(imagem, texto, config)
+        return {"base64": b64, "mime": "image/jpeg"}
+    except Exception as e:
+        raise HTTPException(500, f"Erro ao gerar preview: {e}")
+
+
+@app.post("/api/thumbnail/generate")
+async def gerar_thumbnail_endpoint(request: Request):
+    """Gera e salva thumbnail."""
+    dados = await request.json()
+    imagem = dados.get("imagem", "")
+    texto = dados.get("texto", "")
+    output = dados.get("output", "")
+    config = dados.get("config", {})
+
+    if not imagem or not Path(imagem).exists():
+        raise HTTPException(400, "Imagem de fundo não encontrada")
+    if not texto:
+        raise HTTPException(400, "Texto é obrigatório")
+    if not output:
+        raise HTTPException(400, "Caminho de saída é obrigatório")
+
+    try:
+        result = thumbnail.salvar_thumbnail(imagem, texto, config, output)
+        return {"ok": True, "output": result}
+    except Exception as e:
+        raise HTTPException(500, f"Erro ao gerar thumbnail: {e}")
+
+
+@app.post("/api/thumbnail/extract-youtube")
+async def extrair_thumb_youtube_endpoint(request: Request):
+    """Extrai thumbnail de URL do YouTube."""
+    dados = await request.json()
+    url = dados.get("url", "")
+    if not url:
+        raise HTTPException(400, "URL é obrigatória")
+
+    result = thumbnail.extrair_thumb_youtube(url)
+    if "error" in result:
+        raise HTTPException(400, result["error"])
+
+    # Se pedir para baixar
+    if dados.get("baixar") and dados.get("output"):
+        try:
+            thumb_url = result.get("thumbnail_url", result.get("thumbnail_hq", ""))
+            downloaded = thumbnail.baixar_imagem(thumb_url, dados["output"])
+            result["local_path"] = downloaded
+        except Exception as e:
+            result["download_error"] = str(e)
+
+    return result
+
+
 # === API: CHAT (CLAUDE CLI) ===
 
 AGENTS_DIR = BASE_DIR / "agents"
@@ -1330,6 +1410,10 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
       Narração
     </a>
+    <a data-page="thumbnail" onclick="showPage('thumbnail')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21,15 16,10 5,21"/></svg>
+      Thumbnail
+    </a>
     <a data-page="templates" onclick="showPage('templates')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
       Templates
@@ -1537,6 +1621,111 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
           <span id="narr-batch-count" style="font-size:11px;color:var(--accent)">0/0</span>
         </div>
         <div id="narr-batch-log" style="margin-top:6px;font-size:10px;color:var(--text-sec);max-height:80px;overflow-y:auto"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- PAGE: THUMBNAIL -->
+  <div id="page-thumbnail" class="page">
+    <div class="page-header">
+      <h2>Thumbnail</h2>
+      <div style="display:flex;align-items:center;gap:12px">
+        <div style="display:flex;gap:6px;align-items:center">
+          <label style="font-size:11px;color:var(--text-sec)">Data:</label>
+          <input type="date" id="thumb-batch-data" style="font-size:11px;padding:3px 6px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text)">
+        </div>
+        <button class="btn btn-secondary btn-sm" onclick="puxarTextosThumb()" style="font-size:11px">Puxar Textos</button>
+        <button class="btn btn-primary btn-sm" onclick="gerarTodasThumbs()" id="btn-thumb-gerar-todas" style="font-size:11px">Gerar Todas</button>
+      </div>
+    </div>
+
+    <!-- CONFIG DE TEXTO (shared) -->
+    <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:12px 16px;margin-bottom:16px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;cursor:pointer" onclick="this.parentElement.querySelector('.thumb-cfg-body').style.display=this.parentElement.querySelector('.thumb-cfg-body').style.display==='none'?'block':'none'; this.querySelector('.cfg-arrow').textContent=this.parentElement.querySelector('.thumb-cfg-body').style.display==='none'?'\\u25B6':'\\u25BC'">
+        <span class="cfg-arrow" style="font-size:10px;color:var(--text-sec)">\\u25BC</span>
+        <span style="font-size:13px;font-weight:600">Configuracao de Texto</span>
+      </div>
+      <div class="thumb-cfg-body">
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr 1fr 1fr;gap:12px;align-items:end">
+          <div class="form-group" style="margin:0">
+            <label style="font-size:10px">Fonte</label>
+            <select id="thumb-cfg-font" style="font-size:11px;padding:4px" onchange="thumbCfgChanged()">
+              <option>Arial Black</option>
+              <option>Impact</option>
+              <option>Arial</option>
+              <option>Segoe UI</option>
+            </select>
+          </div>
+          <div class="form-group" style="margin:0">
+            <label style="font-size:10px">Tamanho</label>
+            <input type="number" id="thumb-cfg-size" value="72" min="20" max="200" style="font-size:11px;padding:4px" onchange="thumbCfgChanged()">
+          </div>
+          <div class="form-group" style="margin:0">
+            <label style="font-size:10px">Cor do Texto</label>
+            <div class="color-row">
+              <input type="color" id="thumb-cfg-color" value="#FFFFFF" onchange="thumbCfgChanged()">
+              <span style="font-size:10px;color:var(--text-sec)" id="thumb-cfg-color-hex">#FFFFFF</span>
+            </div>
+          </div>
+          <div class="form-group" style="margin:0">
+            <label style="font-size:10px">Cor Contorno</label>
+            <div class="color-row">
+              <input type="color" id="thumb-cfg-outline-color" value="#000000" onchange="thumbCfgChanged()">
+              <input type="number" id="thumb-cfg-outline-w" value="4" min="0" max="20" style="font-size:11px;padding:4px;width:50px" onchange="thumbCfgChanged()">
+            </div>
+          </div>
+          <div class="form-group" style="margin:0">
+            <label style="font-size:10px">Posicao</label>
+            <select id="thumb-cfg-position" style="font-size:11px;padding:4px" onchange="thumbCfgChanged()">
+              <option value="top">Topo</option>
+              <option value="center" selected>Centro</option>
+              <option value="bottom">Rodape</option>
+            </select>
+          </div>
+          <div class="form-group" style="margin:0">
+            <label style="font-size:10px">Sombra</label>
+            <div class="checkbox-row">
+              <input type="checkbox" id="thumb-cfg-shadow" checked onchange="thumbCfgChanged()">
+              <label for="thumb-cfg-shadow" style="font-size:11px">Ativa</label>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- CARDS DOS TEMPLATES -->
+    <div id="thumb-batch-cards" class="cards-grid"></div>
+    <div id="thumb-empty" class="empty-state" style="display:none">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21,15 16,10 5,21"/></svg>
+      <h3>Nenhum template configurado</h3>
+      <p>Crie templates na aba Templates para gerar thumbnails.</p>
+    </div>
+
+    <!-- YOUTUBE EXTRACTOR -->
+    <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:12px 16px;margin-top:20px">
+      <h3 style="font-size:14px;margin-bottom:10px">Extrair Thumbnail do YouTube</h3>
+      <div style="display:flex;gap:8px;align-items:end">
+        <div class="form-group" style="margin:0;flex:1">
+          <label style="font-size:10px">URL do Video</label>
+          <input type="text" id="thumb-yt-url" placeholder="https://www.youtube.com/watch?v=..." style="font-size:12px">
+        </div>
+        <button class="btn btn-secondary btn-sm" onclick="extrairThumbYT()" style="white-space:nowrap">Extrair</button>
+      </div>
+      <div id="thumb-yt-result" style="display:none;margin-top:10px">
+        <div style="display:flex;gap:16px;align-items:flex-start">
+          <div style="width:320px;aspect-ratio:16/9;border-radius:6px;overflow:hidden;border:1px solid var(--border);flex-shrink:0">
+            <img id="thumb-yt-img" style="width:100%;height:100%;object-fit:cover">
+          </div>
+          <div>
+            <div id="thumb-yt-title" style="font-size:13px;font-weight:600;margin-bottom:4px"></div>
+            <div id="thumb-yt-author" style="font-size:11px;color:var(--text-sec);margin-bottom:8px"></div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap">
+              <button class="btn btn-secondary btn-sm" onclick="copiarUrlThumbYT('maxres')" style="font-size:10px">Copiar URL (MaxRes)</button>
+              <button class="btn btn-secondary btn-sm" onclick="copiarUrlThumbYT('hq')" style="font-size:10px">Copiar URL (HQ)</button>
+              <button class="btn btn-primary btn-sm" onclick="baixarThumbYT()" style="font-size:10px">Baixar</button>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -1790,6 +1979,25 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
           <input type="text" id="cfg-sheets-tab" value="Temas" placeholder="Temas">
         </div>
         <button class="btn btn-primary btn-sm" onclick="salvarConfig()">Salvar Sync</button>
+      </div>
+      <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:20px;margin-bottom:16px">
+        <h3 style="font-size:15px;margin-bottom:16px">Link Tracker</h3>
+        <div class="form-row">
+          <div class="form-group">
+            <label>URL do Tracker</label>
+            <input type="text" id="cfg-tracker-url" placeholder="https://track.seudominio.com">
+          </div>
+          <div class="form-group">
+            <label>Credenciais (user:pass)</label>
+            <input type="password" id="cfg-tracker-auth" placeholder="admin:senha123">
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Template do Comentário</label>
+          <textarea id="cfg-comment-template" rows="3" placeholder="&#128279; {{link}}&#10;&#10;Texto fixo..." style="font-size:12px"></textarea>
+          <div style="font-size:10px;color:var(--text-sec);margin-top:2px">Variáveis: {{link}}, {{titulo}}, {{canal}}, {{data}}</div>
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="salvarConfig()">Salvar Tracker</button>
       </div>
     </div>
   </div>
@@ -2316,6 +2524,16 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
           <input type="text" id="ed-formato-nome" value="{tag}_{data}_{sequencia}" placeholder="{tag}_{data}_{sequencia}">
           <div style="font-size:11px;color:var(--text-sec);margin-top:4px">Variáveis: {tag}, {nome}, {data}, {sequencia}, {idioma}</div>
         </div>
+        <div class="form-group">
+          <label>Proxy (para upload YouTube)</label>
+          <input type="text" id="ed-proxy" placeholder="http://user:pass@ip:port ou socks5://ip:port">
+          <div style="font-size:10px;color:var(--text-sec);margin-top:2px">Cada canal pode ter proxy diferente para mascarar IP</div>
+        </div>
+        <div class="form-group">
+          <label>URL de Destino (para Link Tracker)</label>
+          <input type="text" id="ed-link-destino" placeholder="https://seusite.com/bio ou https://hotmart.com/...">
+          <div style="font-size:10px;color:var(--text-sec);margin-top:2px">URL para onde o link rastreável redireciona (bio link, Hotmart, etc)</div>
+        </div>
       </div>
     </div>
     <div class="modal-footer">
@@ -2499,6 +2717,7 @@ function showPage(page) {
   else { document.getElementById('chat-toggle-btn').style.display = 'none'; document.getElementById('chat-panel').style.display = 'none'; }
   if (page === 'roteiros') carregarPipelines();
   if (page === 'config') carregarConfig();
+  if (page === 'thumbnail') { carregarThumbPage(); }
 }
 
 // === TEMPLATES ===
@@ -2610,6 +2829,8 @@ async function abrirEditor(id) {
     togglePosicaoCustom();
     document.getElementById('ed-pasta-saida').value = t.pasta_saida || '';
     document.getElementById('ed-formato-nome').value = t.formato_nome_saida || '{tag}_{data}_{sequencia}';
+    document.getElementById('ed-proxy').value = t.proxy || '';
+    document.getElementById('ed-link-destino').value = t.link_destino || '';
 
     // Regras
     var regras = t.regras || {};
@@ -2679,6 +2900,8 @@ async function abrirEditor(id) {
     document.getElementById('legenda-y-val').textContent = '85%';
     togglePosicaoCustom();
     document.getElementById('ed-formato-nome').value = '{tag}_{data}_{sequencia}';
+    document.getElementById('ed-proxy').value = '';
+    document.getElementById('ed-link-destino').value = '';
     document.getElementById('ed-regras-subs').value = '';
     document.getElementById('ed-regras-max-chars').value = 42;
     document.getElementById('ed-regras-max-linhas').value = 2;
@@ -2852,6 +3075,8 @@ async function salvarTemplate() {
     },
     pasta_saida: document.getElementById('ed-pasta-saida').value,
     formato_nome_saida: document.getElementById('ed-formato-nome').value,
+    proxy: document.getElementById('ed-proxy').value,
+    link_destino: document.getElementById('ed-link-destino').value,
     moldura: {
       arquivo: document.getElementById('ed-moldura-arquivo').value,
       tipo: document.getElementById('ed-moldura-tipo').value,
@@ -4299,6 +4524,9 @@ async function carregarConfig() {
   document.getElementById('cfg-sheets-id').value = cfg.sheets_id || '';
   document.getElementById('cfg-sheets-api-key').value = cfg.sheets_api_key || '';
   document.getElementById('cfg-sheets-tab').value = cfg.sheets_tab || 'Temas';
+  document.getElementById('cfg-tracker-url').value = cfg.tracker_url || '';
+  document.getElementById('cfg-tracker-auth').value = cfg.tracker_auth || '';
+  document.getElementById('cfg-comment-template').value = cfg.comment_template || '';
   carregarCredenciais();
 }
 
@@ -4310,6 +4538,9 @@ async function salvarConfig() {
     sheets_id: document.getElementById('cfg-sheets-id').value,
     sheets_api_key: document.getElementById('cfg-sheets-api-key').value,
     sheets_tab: document.getElementById('cfg-sheets-tab').value,
+    tracker_url: document.getElementById('cfg-tracker-url').value,
+    tracker_auth: document.getElementById('cfg-tracker-auth').value,
+    comment_template: document.getElementById('cfg-comment-template').value,
   };
   var res = await fetch('/api/config', { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(dados) });
   if (res.ok) toast('Configurações salvas!', 'success');
@@ -5910,6 +6141,360 @@ async function enviarChat() {
 
   btn.disabled = false;
   btn.textContent = 'Enviar';
+}
+
+// === THUMBNAIL ===
+
+var _thumbYtData = null;
+var _thumbCards = {};
+
+function _getThumbTextConfig() {
+  return {
+    font: document.getElementById('thumb-cfg-font').value,
+    size: parseInt(document.getElementById('thumb-cfg-size').value) || 72,
+    color: document.getElementById('thumb-cfg-color').value,
+    outline_color: document.getElementById('thumb-cfg-outline-color').value,
+    outline_width: parseInt(document.getElementById('thumb-cfg-outline-w').value) || 4,
+    shadow: document.getElementById('thumb-cfg-shadow').checked,
+    position: document.getElementById('thumb-cfg-position').value,
+  };
+}
+
+function thumbCfgChanged() {
+  var hex = document.getElementById('thumb-cfg-color').value;
+  document.getElementById('thumb-cfg-color-hex').textContent = hex;
+}
+
+async function carregarThumbPage() {
+  if (!templates.length) {
+    var r = await fetch('/api/templates');
+    templates = await r.json();
+  }
+  // Carregar fontes para o select
+  try {
+    var fr = await fetch('/api/fonts');
+    var fontes = await fr.json();
+    var sel = document.getElementById('thumb-cfg-font');
+    var current = sel.value;
+    sel.innerHTML = fontes.map(function(f) {
+      return '<option' + (f === current ? ' selected' : '') + '>' + f + '</option>';
+    }).join('');
+    if (!current || fontes.indexOf(current) < 0) sel.value = 'Arial Black';
+  } catch(e) {}
+
+  // Carregar configs salvas do localStorage
+  var savedCfg = JSON.parse(localStorage.getItem('thumbTextConfig') || '{}');
+  if (savedCfg.font) document.getElementById('thumb-cfg-font').value = savedCfg.font;
+  if (savedCfg.size) document.getElementById('thumb-cfg-size').value = savedCfg.size;
+  if (savedCfg.color) document.getElementById('thumb-cfg-color').value = savedCfg.color;
+  if (savedCfg.outline_color) document.getElementById('thumb-cfg-outline-color').value = savedCfg.outline_color;
+  if (savedCfg.outline_width !== undefined) document.getElementById('thumb-cfg-outline-w').value = savedCfg.outline_width;
+  if (savedCfg.shadow !== undefined) document.getElementById('thumb-cfg-shadow').checked = savedCfg.shadow;
+  if (savedCfg.position) document.getElementById('thumb-cfg-position').value = savedCfg.position;
+  thumbCfgChanged();
+
+  renderThumbCards();
+
+  var dateInput = document.getElementById('thumb-batch-data');
+  if (!dateInput.value) {
+    var hoje = new Date();
+    dateInput.value = hoje.toISOString().slice(0, 10);
+  }
+}
+
+function _saveThumbTextConfig() {
+  localStorage.setItem('thumbTextConfig', JSON.stringify(_getThumbTextConfig()));
+}
+
+async function renderThumbCards() {
+  var grid = document.getElementById('thumb-batch-cards');
+  var empty = document.getElementById('thumb-empty');
+
+  if (!templates.length) {
+    grid.innerHTML = '';
+    empty.style.display = 'block';
+    return;
+  }
+  empty.style.display = 'none';
+
+  var savedCards = JSON.parse(localStorage.getItem('thumbCardsData') || '{}');
+
+  grid.innerHTML = templates.map(function(t) {
+    var sc = savedCards[t.id] || {};
+    var texto = (sc.texto || '').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+    var imagem = (sc.imagem || '').replace(/"/g, '&quot;');
+    var modo = sc.modo || 'existente';
+    var prompt = (sc.prompt || '').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+
+    return '<div class="card" style="cursor:default">'
+      + '<div class="card-header">'
+      + '<span class="card-tag">' + (t.tag || t.id).toUpperCase() + '</span>'
+      + '<span class="card-title" style="font-size:13px">' + (t.nome || '') + '</span>'
+      + '</div>'
+      + '<div class="form-group" style="margin:0 0 8px">'
+      + '<label style="font-size:10px">Texto da Thumb</label>'
+      + '<textarea class="tb-texto" data-tid="' + t.id + '" rows="2" placeholder="Texto da thumbnail..." style="font-size:11px;padding:4px 6px" oninput="_saveThumbCardData()">' + texto + '</textarea>'
+      + '</div>'
+      + '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">'
+      + '<label style="font-size:10px;color:var(--text-sec)"><input type="radio" name="tb-modo-' + t.id + '" value="existente" class="tb-modo" data-tid="' + t.id + '" ' + (modo === 'existente' ? 'checked' : '') + ' onchange="thumbModoChanged(\\'' + t.id + '\\')"> Imagem Existente</label>'
+      + '<label style="font-size:10px;color:var(--text-sec)"><input type="radio" name="tb-modo-' + t.id + '" value="prompt" class="tb-modo" data-tid="' + t.id + '" ' + (modo === 'prompt' ? 'checked' : '') + ' onchange="thumbModoChanged(\\'' + t.id + '\\')"> Gerar por Prompt</label>'
+      + '</div>'
+      + '<div class="tb-modo-existente" data-tid="' + t.id + '" style="' + (modo !== 'existente' ? 'display:none' : '') + '">'
+      + '<div class="form-group" style="margin:0 0 8px">'
+      + '<label style="font-size:10px">Imagem de Fundo</label>'
+      + '<div class="input-with-btn">'
+      + '<input type="text" class="tb-imagem" data-tid="' + t.id + '" value="' + imagem + '" placeholder="Caminho da imagem..." style="font-size:11px;padding:4px" onchange="_saveThumbCardData()">'
+      + '<button class="btn btn-secondary btn-sm" style="font-size:10px;padding:2px 6px" onclick="abrirBrowser(\\'tb-imagem-' + t.id + '\\',\\'file\\')">...</button>'
+      + '</div>'
+      + '</div>'
+      + '</div>'
+      + '<div class="tb-modo-prompt" data-tid="' + t.id + '" style="' + (modo !== 'prompt' ? 'display:none' : '') + '">'
+      + '<div class="form-group" style="margin:0 0 8px">'
+      + '<label style="font-size:10px">Prompt para Gerar Imagem <span style="color:var(--warn)">(em breve)</span></label>'
+      + '<textarea class="tb-prompt" data-tid="' + t.id + '" rows="2" placeholder="Descreva a imagem de fundo desejada..." style="font-size:11px;padding:4px 6px" oninput="_saveThumbCardData()">' + prompt + '</textarea>'
+      + '</div>'
+      + '</div>'
+      + '<div class="tb-preview" data-tid="' + t.id + '" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;aspect-ratio:16/9;display:flex;align-items:center;justify-content:center;overflow:hidden;margin-bottom:8px;position:relative">'
+      + '<span style="font-size:11px;color:var(--text-sec)">Preview aparecera aqui</span>'
+      + '</div>'
+      + '<div style="display:flex;gap:6px;align-items:center">'
+      + '<button class="btn btn-secondary btn-sm" onclick="previewThumb(\\'' + t.id + '\\')" style="font-size:10px">Preview</button>'
+      + '<button class="btn btn-primary btn-sm" onclick="gerarThumb(\\'' + t.id + '\\')" style="font-size:10px">Gerar</button>'
+      + '<span class="tb-status badge badge-waiting" data-tid="' + t.id + '" style="font-size:9px;margin-left:auto">--</span>'
+      + '</div></div>';
+  }).join('');
+
+  // Restaurar IDs para o file browser funcionar
+  templates.forEach(function(t) {
+    var el = document.querySelector('.tb-imagem[data-tid="' + t.id + '"]');
+    if (el) el.id = 'tb-imagem-' + t.id;
+  });
+}
+
+function thumbModoChanged(tid) {
+  var radios = document.querySelectorAll('.tb-modo[data-tid="' + tid + '"]');
+  var modo = 'existente';
+  radios.forEach(function(r) { if (r.checked) modo = r.value; });
+  var existente = document.querySelector('.tb-modo-existente[data-tid="' + tid + '"]');
+  var promptDiv = document.querySelector('.tb-modo-prompt[data-tid="' + tid + '"]');
+  if (existente) existente.style.display = modo === 'existente' ? '' : 'none';
+  if (promptDiv) promptDiv.style.display = modo === 'prompt' ? '' : 'none';
+  _saveThumbCardData();
+}
+
+function _saveThumbCardData() {
+  var data = {};
+  templates.forEach(function(t) {
+    var texto = document.querySelector('.tb-texto[data-tid="' + t.id + '"]');
+    var imagem = document.querySelector('.tb-imagem[data-tid="' + t.id + '"]');
+    var prompt = document.querySelector('.tb-prompt[data-tid="' + t.id + '"]');
+    var radios = document.querySelectorAll('.tb-modo[data-tid="' + t.id + '"]');
+    var modo = 'existente';
+    radios.forEach(function(r) { if (r.checked) modo = r.value; });
+    data[t.id] = {
+      texto: texto ? texto.value : '',
+      imagem: imagem ? imagem.value : '',
+      prompt: prompt ? prompt.value : '',
+      modo: modo,
+    };
+  });
+  localStorage.setItem('thumbCardsData', JSON.stringify(data));
+  _saveThumbTextConfig();
+}
+
+async function puxarTextosThumb() {
+  var dateVal = document.getElementById('thumb-batch-data').value;
+  if (!dateVal) { toast('Selecione a data primeiro', 'error'); return; }
+
+  if (!temasData || !temasData.linhas || !temasData.linhas.length) {
+    try { var r = await fetch('/api/temas'); var raw = await r.json(); if (raw && raw.colunas) temasData = raw; } catch(e) {}
+  }
+
+  var dateParts = dateVal.split('-');
+  var dataFormatada = dateParts[2] + '/' + dateParts[1] + '/' + dateParts[0];
+  var ri = -1;
+  (temasData.linhas || []).forEach(function(row, i) {
+    if (row.data === dataFormatada) ri = i;
+  });
+  if (ri < 0) { toast('Data ' + dataFormatada + ' nao encontrada no grid de Temas', 'error'); return; }
+
+  var count = 0;
+  templates.forEach(function(t) {
+    var textarea = document.querySelector('.tb-texto[data-tid="' + t.id + '"]');
+    if (!textarea) return;
+    (temasData.colunas || []).forEach(function(col, ci) {
+      if (col.template_id === t.id) {
+        var key = ri + '_' + ci;
+        var cel = (temasData.celulas || {})[key] || {};
+        if (cel.thumb) {
+          textarea.value = cel.thumb;
+          count++;
+        }
+      }
+    });
+  });
+  _saveThumbCardData();
+  toast(count + ' textos de thumb puxados do grid de Temas', count > 0 ? 'success' : 'error');
+}
+
+async function previewThumb(tid) {
+  var texto = document.querySelector('.tb-texto[data-tid="' + tid + '"]');
+  var imagem = document.querySelector('.tb-imagem[data-tid="' + tid + '"]');
+  if (!texto || !texto.value.trim()) { toast('Digite o texto da thumbnail', 'error'); return; }
+  if (!imagem || !imagem.value.trim()) { toast('Selecione a imagem de fundo', 'error'); return; }
+
+  var cfg = _getThumbTextConfig();
+  var params = new URLSearchParams({
+    imagem: imagem.value,
+    texto: texto.value,
+    font: cfg.font,
+    size: cfg.size,
+    color: cfg.color,
+    outline_color: cfg.outline_color,
+    outline_width: cfg.outline_width,
+    shadow: cfg.shadow,
+    position: cfg.position,
+  });
+
+  var preview = document.querySelector('.tb-preview[data-tid="' + tid + '"]');
+  preview.innerHTML = '<span style="font-size:11px;color:var(--text-sec)">Gerando preview...</span>';
+
+  try {
+    var res = await fetch('/api/thumbnail/preview?' + params.toString());
+    var data = await res.json();
+    if (data.base64) {
+      preview.innerHTML = '<img src="data:image/jpeg;base64,' + data.base64 + '" style="width:100%;height:100%;object-fit:contain">';
+    } else {
+      preview.innerHTML = '<span style="color:var(--danger);font-size:11px">Erro: ' + (data.detail || 'Falha') + '</span>';
+    }
+  } catch(e) {
+    preview.innerHTML = '<span style="color:var(--danger);font-size:11px">Erro: ' + e.message + '</span>';
+  }
+}
+
+async function gerarThumb(tid) {
+  var t = templates.find(function(x) { return x.id === tid; });
+  if (!t) return;
+
+  var texto = document.querySelector('.tb-texto[data-tid="' + tid + '"]');
+  var imagem = document.querySelector('.tb-imagem[data-tid="' + tid + '"]');
+  var badge = document.querySelector('.tb-status[data-tid="' + tid + '"]');
+  if (!texto || !texto.value.trim()) { toast('Digite o texto da thumbnail', 'error'); return; }
+  if (!imagem || !imagem.value.trim()) { toast('Selecione a imagem de fundo', 'error'); return; }
+
+  var dateVal = document.getElementById('thumb-batch-data').value || new Date().toISOString().slice(0, 10);
+  var dateParts = dateVal.split('-');
+  var dataStr = dateParts[0] + dateParts[1] + dateParts[2];
+  var dataPasta = dateVal;
+  var tag = t.tag || t.id;
+  var pasta = t.pasta_saida || 'temp';
+  var output = pasta + '/' + dataPasta + '/' + tag + '_' + dataStr + '_thumb.jpg';
+
+  if (badge) { badge.textContent = 'Gerando...'; badge.className = 'tb-status badge badge-transcribing'; }
+
+  try {
+    var res = await fetch('/api/thumbnail/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        imagem: imagem.value,
+        texto: texto.value,
+        output: output,
+        config: _getThumbTextConfig(),
+      })
+    });
+    var data = await res.json();
+    if (data.ok) {
+      if (badge) { badge.textContent = 'Salvo'; badge.className = 'tb-status badge badge-done'; }
+      toast(tag + ': thumb salva em ' + data.output, 'success');
+      // Atualizar preview
+      previewThumb(tid);
+    } else {
+      if (badge) { badge.textContent = 'Erro'; badge.className = 'tb-status badge badge-error'; }
+      toast(tag + ': ' + (data.detail || 'Erro'), 'error');
+    }
+  } catch(e) {
+    if (badge) { badge.textContent = 'Erro'; badge.className = 'tb-status badge badge-error'; }
+    toast(tag + ': ' + e.message, 'error');
+  }
+}
+
+async function gerarTodasThumbs() {
+  var jobs = [];
+  templates.forEach(function(t) {
+    var texto = document.querySelector('.tb-texto[data-tid="' + t.id + '"]');
+    var imagem = document.querySelector('.tb-imagem[data-tid="' + t.id + '"]');
+    var radios = document.querySelectorAll('.tb-modo[data-tid="' + t.id + '"]');
+    var modo = 'existente';
+    radios.forEach(function(r) { if (r.checked) modo = r.value; });
+    if (modo !== 'existente') return;
+    if (!texto || !texto.value.trim()) return;
+    if (!imagem || !imagem.value.trim()) return;
+    jobs.push(t.id);
+  });
+
+  if (!jobs.length) { toast('Nenhum template pronto para gerar (texto + imagem necessarios)', 'error'); return; }
+
+  for (var i = 0; i < jobs.length; i++) {
+    await gerarThumb(jobs[i]);
+    if (i < jobs.length - 1) await new Promise(function(r) { setTimeout(r, 300); });
+  }
+  toast('Todas as thumbnails geradas (' + jobs.length + ')', 'success');
+}
+
+async function extrairThumbYT() {
+  var url = document.getElementById('thumb-yt-url').value.trim();
+  if (!url) { toast('Cole a URL do YouTube', 'error'); return; }
+
+  try {
+    var res = await fetch('/api/thumbnail/extract-youtube', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: url })
+    });
+    var data = await res.json();
+    if (data.thumbnail_url) {
+      _thumbYtData = data;
+      document.getElementById('thumb-yt-result').style.display = 'block';
+      document.getElementById('thumb-yt-img').src = data.thumbnail_url;
+      document.getElementById('thumb-yt-title').textContent = data.title || data.video_id;
+      document.getElementById('thumb-yt-author').textContent = data.author || '';
+      toast('Thumbnail extraida', 'success');
+    } else {
+      toast('Erro: ' + (data.detail || 'Falha'), 'error');
+    }
+  } catch(e) {
+    toast('Erro: ' + e.message, 'error');
+  }
+}
+
+function copiarUrlThumbYT(qual) {
+  if (!_thumbYtData) return;
+  var url = qual === 'maxres' ? _thumbYtData.thumbnail_url : _thumbYtData.thumbnail_hq;
+  navigator.clipboard.writeText(url);
+  toast('URL copiada', 'success');
+}
+
+async function baixarThumbYT() {
+  if (!_thumbYtData) return;
+  var output = prompt('Salvar como (caminho completo):', 'temp/' + _thumbYtData.video_id + '_thumb.jpg');
+  if (!output) return;
+
+  try {
+    var res = await fetch('/api/thumbnail/extract-youtube', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: document.getElementById('thumb-yt-url').value, baixar: true, output: output })
+    });
+    var data = await res.json();
+    if (data.local_path) {
+      toast('Thumbnail salva em: ' + data.local_path, 'success');
+    } else if (data.download_error) {
+      toast('Erro ao baixar: ' + data.download_error, 'error');
+    }
+  } catch(e) {
+    toast('Erro: ' + e.message, 'error');
+  }
 }
 
 // === INIT ===
