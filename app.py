@@ -1232,19 +1232,20 @@ async def prod_log_finish(request: Request):
 AGENTS_DIR = BASE_DIR / "agents"
 
 @app.get("/api/chat/instructions")
-def obter_instrucoes_chat():
-    """Retorna o CLAUDE.md do agente de temas."""
-    claude_md = AGENTS_DIR / "temas" / "CLAUDE.md"
+def obter_instrucoes_chat(agent: str = "temas"):
+    """Retorna o CLAUDE.md do agente selecionado."""
+    claude_md = AGENTS_DIR / agent / "CLAUDE.md"
     if claude_md.exists():
-        return {"instrucoes": claude_md.read_text(encoding="utf-8")}
-    return {"instrucoes": ""}
+        return {"instrucoes": claude_md.read_text(encoding="utf-8"), "agent": agent}
+    return {"instrucoes": "", "agent": agent}
 
 
 @app.put("/api/chat/instructions")
 async def salvar_instrucoes_chat(request: Request):
-    """Salva o CLAUDE.md do agente de temas."""
+    """Salva o CLAUDE.md do agente selecionado."""
     dados = await request.json()
-    claude_md = AGENTS_DIR / "temas" / "CLAUDE.md"
+    agent = dados.get("agent", "temas")
+    claude_md = AGENTS_DIR / agent / "CLAUDE.md"
     claude_md.parent.mkdir(parents=True, exist_ok=True)
     claude_md.write_text(dados.get("instrucoes", ""), encoding="utf-8")
     return {"ok": True}
@@ -1281,14 +1282,16 @@ def limpar_chat_historico():
 async def chat_claude_cli(request: Request):
     dados = await request.json()
     prompt = dados.get("prompt", "")
+    agent = dados.get("agent", "temas")
     if not prompt:
         raise HTTPException(400, "Prompt é obrigatório")
 
     # Salvar mensagem do usuário no histórico
     historico = _carregar_chat_historico()
-    historico.append({"role": "user", "text": prompt, "ts": datetime.now().isoformat()})
+    historico.append({"role": "user", "text": prompt, "ts": datetime.now().isoformat(), "agent": agent})
 
-    agent_dir = str(AGENTS_DIR / "temas")
+    agent_dir = str(AGENTS_DIR / agent)
+    Path(agent_dir).mkdir(parents=True, exist_ok=True)
     claude_cmd = os.path.join(os.environ.get("APPDATA", ""), "npm", "claude.cmd")
     if not os.path.exists(claude_cmd):
         claude_cmd = "claude"
@@ -2117,7 +2120,10 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
     <!-- FLOATING CHAT PANEL -->
     <div id="chat-panel" style="display:none;position:fixed;right:16px;top:80px;width:380px;bottom:16px;background:var(--panel);border:1px solid var(--border);border-radius:12px;box-shadow:0 8px 32px rgba(0,0,0,0.4);z-index:900;display:none;flex-direction:column">
       <div style="padding:12px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
-        <strong style="font-size:14px">Claude Assistente</strong>
+        <select id="chat-agent-select" onchange="trocarAgente()" style="font-size:12px;padding:3px 6px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--accent);font-weight:600">
+          <option value="temas">Temas</option>
+          <option value="titulos">Títulos</option>
+        </select>
         <div style="display:flex;gap:6px;align-items:center">
           <button class="btn btn-secondary btn-sm" style="font-size:10px;padding:2px 8px" onclick="toggleInstrucoes()">Instruções</button>
           <button class="btn btn-danger btn-sm" style="font-size:10px;padding:2px 6px" onclick="limparChatHistorico()">Limpar</button>
@@ -6450,11 +6456,27 @@ async function produzirDataCompleta() {
 var _chatAberto = false;
 var _instrCarregadas = false;
 
+var _currentAgent = 'temas';
+
+function trocarAgente() {
+  var sel = document.getElementById('chat-agent-select');
+  _currentAgent = sel.value;
+  // Recarregar instruções do novo agente
+  _instrCarregadas = false;
+  fetch('/api/chat/instructions?agent=' + _currentAgent).then(function(r){ return r.json(); }).then(function(d){
+    document.getElementById('chat-instrucoes').value = d.instrucoes || '';
+    _instrCarregadas = true;
+  });
+  // Limpar mensagens visuais (histórico é compartilhado)
+  document.getElementById('chat-messages').innerHTML = '';
+  toast('Agente: ' + _currentAgent, 'success');
+}
+
 function toggleChat() {
   _chatAberto = !_chatAberto;
   document.getElementById('chat-panel').style.display = _chatAberto ? 'flex' : 'none';
   if (_chatAberto && !_instrCarregadas) {
-    fetch('/api/chat/instructions').then(function(r){ return r.json(); }).then(function(d){
+    fetch('/api/chat/instructions?agent=' + _currentAgent).then(function(r){ return r.json(); }).then(function(d){
       document.getElementById('chat-instrucoes').value = d.instrucoes || '';
       _instrCarregadas = true;
     });
@@ -6483,9 +6505,9 @@ async function salvarInstrucoes() {
   var texto = document.getElementById('chat-instrucoes').value;
   var res = await fetch('/api/chat/instructions', {
     method: 'PUT', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ instrucoes: texto })
+    body: JSON.stringify({ instrucoes: texto, agent: _currentAgent })
   });
-  if (res.ok) { toast('Instruções salvas!', 'success'); toggleInstrucoes(); }
+  if (res.ok) { toast('Instruções do agente "' + _currentAgent + '" salvas!', 'success'); toggleInstrucoes(); }
   else toast('Erro ao salvar', 'error');
 }
 
@@ -6553,7 +6575,7 @@ async function enviarChat() {
   try {
     var res = await fetch('/api/chat', {
       method: 'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ prompt: msg })
+      body: JSON.stringify({ prompt: msg, agent: _currentAgent })
     });
     var data = await res.json();
     thinking.remove();
