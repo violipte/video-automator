@@ -229,7 +229,7 @@ After each pipeline execution, a log file is saved to `logs/pipeline_{id}_{times
   - Encoder: try h264_nvenc first, fallback to libx264
   - Save to `cache/{hash}.mp4`
 - Supports two background types: `imagens` (with Ken Burns zoom) and `videos` (with scale+pad+fps, no zoom)
-- **Video background pre-concatenation**: For `tipo_fundo="videos"`, clips are pre-concatenated into a single `bg_concat.mp4` using FFmpeg concat demuxer (`-c copy`, fast). This prevents OOM (was 21GB RAM with 200+ inputs). The shuffled list is written to `bg_concat.txt` then concatenated with `-t duration` to trim.
+- **Video background pre-concatenation**: For `tipo_fundo="videos"`, clips are pre-concatenated into a single `bg_concat.mp4` using FFmpeg concat demuxer. Pre-concatenation now re-encodes with `-vf fps={fps},scale={w}:{h}` and `libx264 -preset ultrafast -crf 18` instead of `-c copy`. This normalizes fps (source videos may be 24fps while template is 30fps) and resolution. Without this, fps mismatch caused video to freeze early. This prevents OOM (was 21GB RAM with 200+ inputs). The shuffled list is written to `bg_concat.txt` then concatenated with `-t duration` to trim.
 - **Video loop option**: `template.video_loop` (boolean, default true). ON: repeats shuffled videos to fill audio duration. OFF: plays videos once and freezes last frame. Checkbox in Fundo tab.
 
 **Pass 2: Final assembly (65-100% progress)**
@@ -327,6 +327,7 @@ Template field: `template.moldura`
 - **`alpha` type**: PNG with transparency. Uses `format=yuva420p` + `colorchannelmixer=aa={opacidade}`
 - **`chromakey` type**: Image with green background. Uses `chromakey=0x00FF00:0.2:0.1` to remove green, then applies opacity
 - Scaled to match video resolution (`scale={w}:{h}`)
+- Filter includes `fps={fps}` and `setpts=PTS-STARTPTS` to ensure the moldura starts from frame 0 and stays synced throughout. Overlay uses `shortest=1`.
 - Applied after subtitles but before CTA overlay in the filter chain
 - Input via `-loop 1 -t {duration}` for static image looping
 
@@ -399,7 +400,7 @@ This is the source of truth for which voice a template uses. The narration batch
 - Date-based naming: `{tag}_{YYYYMMDD}_{sequence}.mp3`
 - Preview mode: generates but does not save to disk
 - Cards are draggable to reorder
-- **Batch MP3 persistence**: Production batch MP3 paths saved in localStorage (key: `batchMp3Values`). Survive page refresh. "Limpar Audios" button clears all.
+- **Batch MP3 persistence**: Production batch MP3 paths saved in localStorage (key: `batchMp3Values`). Survive page refresh. "Limpar Áudios" button clears all. Individual audio clear button (X) per production row.
 
 ---
 
@@ -523,6 +524,9 @@ When a credential is tested/refreshed, the system queries the provider's API for
 ### ai33.pro API key
 - Stored in `config.json` as `ai33_api_key`
 - Used as `xi-api-key` header for all ai33.pro requests
+
+### video_loop in _montar_final()
+- `video_loop` must be read from `self.template` inside `_montar_final()` since it is not passed as a parameter
 
 ### Variable substitution (scriptwriter.py)
 - Uses regex with space tolerance: `\{\{\s*chave\s*\}\}` matches `{{chave}}`, `{{ chave }}`, etc.
