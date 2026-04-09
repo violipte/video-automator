@@ -1955,6 +1955,7 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
       <div style="display:flex;gap:8px">
         <button class="btn btn-secondary btn-sm" onclick="adicionarColunaTemas()">+ Coluna</button>
         <button class="btn btn-primary btn-sm" onclick="adicionarLinhaTemas()">+ Linha</button>
+        <button class="btn btn-secondary btn-sm" onclick="toggleAllRows()" style="font-size:10px">Colapsar/Expandir</button>
         <button class="btn btn-secondary btn-sm" onclick="undoTemas()" id="btn-undo-temas" style="display:none">Desfazer</button>
         <button class="btn btn-secondary btn-sm" onclick="syncTemasSupabase()">Sync Supabase</button>
       </div>
@@ -2026,6 +2027,7 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
         <div class="modal-footer">
           <button class="btn btn-secondary btn-sm" onclick="abrirReplicarTudo()">Replicar Tudo</button>
           <button class="btn btn-primary btn-sm" onclick="gerarRoteiroCelula()" id="cel-gerar-btn">Gerar Roteiro</button>
+          <button class="btn btn-sm" onclick="toggleDone()" id="cel-done-btn" style="background:var(--accent);color:#000;font-size:11px">Done</button>
           <div style="flex:1"></div>
           <button class="btn btn-secondary" onclick="fecharCelula()">Cancelar</button>
           <button class="btn btn-primary" onclick="salvarCelula()">Salvar</button>
@@ -5373,11 +5375,13 @@ function renderTemasGrid() {
   // Rows
   var html = '';
   rows.forEach(function(row, ri) {
-    html += '<tr draggable="true" data-row="' + ri + '" ondragstart="dragRowStart(event)" ondragover="event.preventDefault()" ondrop="dropRow(event)">';
+    var collapsed = row.collapsed ? ' style="display:none"' : '';
+    var collapseIcon = row.collapsed ? '&#9654;' : '&#9660;';
+    html += '<tr draggable="true" data-row="' + ri + '" ondragstart="dragRowStart(event)" ondragover="event.preventDefault()" ondrop="dropRow(event)"' + (row.collapsed ? ' class="row-collapsed"' : '') + '>';
     html += '<td>'
-      + '<div style="display:flex;align-items:center;justify-content:space-between">'
-      + '<span ondblclick="renomearLinha(' + ri + ')">' + row.data + '</span>'
-      + '<span class="badge ' + (row.status==='ok'?'badge-done':'badge-waiting') + '" style="font-size:9px;padding:1px 5px">' + (row.status==='ok'?'Ok':'Pend') + '</span>'
+      + '<div style="display:flex;align-items:center;gap:4px">'
+      + '<button style="background:none;border:none;color:var(--text-sec);cursor:pointer;font-size:10px;padding:0" onclick="toggleRowCollapse(' + ri + ')">' + collapseIcon + '</button>'
+      + '<span ondblclick="renomearLinha(' + ri + ')" style="font-size:11px">' + row.data + '</span>'
       + '</div>'
       + '</td>';
 
@@ -5387,12 +5391,27 @@ function renderTemasGrid() {
       var tema = cel.tema || '';
       var titulo = cel.titulo || '';
       var thumb = cel.thumb || '';
-      html += '<td><div class="tema-cell" onclick="editarCelula(' + ri + ',' + ci + ')">';
-      if (tema || titulo) {
+      // Status de produção da célula
+      var cellStatus = 'empty';
+      if (cel.done) cellStatus = 'done-' + (cel.done_type || 'manual');
+      else if (cel.roteiro) cellStatus = 'roteiro';
+      else if (cel.titulo) cellStatus = 'titulo';
+      else if (cel.tema) cellStatus = 'tema';
+
+      var statusColors = {'empty':'var(--border)','tema':'var(--warn)','titulo':'var(--info)','roteiro':'#9b59b6','done-manual':'var(--accent)','done-auto':'var(--accent)'};
+      var statusTitles = {'empty':'Vazio','tema':'Tema preenchido','titulo':'Título definido','roteiro':'Roteiro gerado','done-manual':'Concluído (manual)','done-auto':'Concluído (automático)'};
+      var dotStyle = 'width:8px;height:8px;border-radius:50%;background:' + (statusColors[cellStatus]||'var(--border)');
+      if (cellStatus === 'done-auto') dotStyle += ';border:2px solid #fff';
+
+      html += '<td><div class="tema-cell" onclick="editarCelula(' + ri + ',' + ci + ')"' + (row.collapsed ? ' style="min-height:20px;padding:4px"' : '') + '>';
+      if (row.collapsed) {
+        // Modo colapsado: só bolinha de status
+        html += '<div style="display:flex;justify-content:center"><div style="' + dotStyle + '" title="' + (statusTitles[cellStatus]||'') + '"></div></div>';
+      } else if (tema || titulo) {
         if (tema) html += '<div style="font-size:10px;color:var(--accent);margin-bottom:2px;font-style:italic">' + tema.substring(0, 60).replace(/</g,'&lt;') + '</div>';
         if (titulo) html += '<div class="tc-titulo">' + titulo.substring(0, 60).replace(/</g,'&lt;') + '</div>';
         if (thumb) html += '<div class="tc-thumb">' + thumb.substring(0, 40).replace(/</g,'&lt;') + '</div>';
-        html += '<div class="tc-status ' + (cel.synced ? 'synced' : 'pending') + '"></div>';
+        html += '<div style="position:absolute;top:4px;right:4px;' + dotStyle + '" title="' + (statusTitles[cellStatus]||'') + '"></div>';
       } else {
         html += '<div class="tc-empty">Clique para adicionar</div>';
       }
@@ -5497,6 +5516,41 @@ function salvarColuna(ci) {
   renderTemasGrid();
   atualizarLoteDataSelect();
   toast('Coluna atualizada', 'success');
+}
+
+function toggleAllRows() {
+  var anyExpanded = temasData.linhas.some(function(r){ return !r.collapsed; });
+  temasData.linhas.forEach(function(r){ r.collapsed = anyExpanded; });
+  salvarTemasLocal();
+  renderTemasGrid();
+}
+
+function toggleRowCollapse(ri) {
+  temasData.linhas[ri].collapsed = !temasData.linhas[ri].collapsed;
+  salvarTemasLocal();
+  renderTemasGrid();
+}
+
+function toggleDone() {
+  if (!_celulaEditando) return;
+  var key = _celulaEditando.row + '_' + _celulaEditando.col;
+  if (!temasData.celulas) temasData.celulas = {};
+  if (!temasData.celulas[key]) temasData.celulas[key] = {};
+  var cel = temasData.celulas[key];
+  if (cel.done) {
+    cel.done = false;
+    cel.done_type = '';
+    document.getElementById('cel-done-btn').textContent = 'Done';
+    document.getElementById('cel-done-btn').style.background = 'var(--accent)';
+    toast('Done removido', 'success');
+  } else {
+    cel.done = true;
+    cel.done_type = 'manual';
+    document.getElementById('cel-done-btn').textContent = 'Done (manual)';
+    document.getElementById('cel-done-btn').style.background = 'var(--border)';
+    toast('Marcado como Done (manual)', 'success');
+  }
+  salvarTemasLocal();
 }
 
 function renomearLinha(ri) {
@@ -5608,6 +5662,16 @@ function editarCelula(ri, ci) {
   sel.innerHTML = '<option value="">Nenhuma</option>' + pipelines.map(function(p) {
     return '<option value="' + p.id + '"' + (cel.pipeline_id===p.id?' selected':'') + '>' + p.nome + '</option>';
   }).join('');
+  // Atualizar botão Done
+  var doneBtn = document.getElementById('cel-done-btn');
+  if (cel.done) {
+    doneBtn.textContent = 'Done (' + (cel.done_type || 'manual') + ')';
+    doneBtn.style.background = 'var(--border)';
+  } else {
+    doneBtn.textContent = 'Done';
+    doneBtn.style.background = 'var(--accent)';
+  }
+
   document.getElementById('modal-celula').classList.add('active');
   _initCaseBtns();
 }
@@ -5618,12 +5682,15 @@ function salvarCelula() {
   if (!_celulaEditando) return;
   var key = _celulaEditando.row + '_' + _celulaEditando.col;
   if (!temasData.celulas) temasData.celulas = {};
+  var existingCel = temasData.celulas[key] || {};
   temasData.celulas[key] = {
     tema: document.getElementById('cel-tema').value,
     titulo: document.getElementById('cel-titulo').value,
     thumb: document.getElementById('cel-thumb').value,
     roteiro: document.getElementById('cel-roteiro').value,
     pipeline_id: document.getElementById('cel-pipeline').value,
+    done: existingCel.done || false,
+    done_type: existingCel.done_type || '',
     synced: false,
   };
   fecharCelula();
