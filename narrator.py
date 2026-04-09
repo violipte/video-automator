@@ -244,6 +244,10 @@ def iniciar_narracao(api_key: str, provider: str, voice_id: str, texto: str, nom
     """Inicia geração de narração e retorna task_id."""
     global estado_narracao
 
+    # Prevenir duplicação — não iniciar se já tem uma ativa
+    if estado_narracao.get("ativo"):
+        return {"ok": False, "erro": "Já existe uma narração em andamento. Aguarde."}
+
     if provider in ("minimax", "minimax_clone"):
         result = gerar_narracao_minimax(
             api_key, voice_id, texto,

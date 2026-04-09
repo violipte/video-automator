@@ -312,6 +312,18 @@
     Aplicar em: geração de roteiro, narração TTS, produção de vídeo.
     Prioridade: ALTA
 
+[ ] BOTÃO DE EMERGÊNCIA EM TODAS AS OPERAÇÕES
+    Adicionar cancelar/pular individual + cancelar lote em:
+    - Geração de roteiros em lote (já tem "Gerar Roteiros" mas sem cancel)
+    - "Produzir Tudo" (roteiro+narração+vídeo)
+    - Produção de vídeo em lote
+    - Narração em lote (já implementado)
+    Cada operação precisa:
+    - Botão "Cancelar Tudo" no header (para o lote inteiro)
+    - Botão "Pular" individual por item (pula e vai pro próximo)
+    - Estado visual: Cancelado/Pulado com badge
+    Prioridade: ALTA
+
 [ ] WATCHDOG DO SERVIDOR
     Se o Python/uvicorn morrer, reiniciar automaticamente.
     Opções: Windows Service (nssm), ou script .bat com loop,

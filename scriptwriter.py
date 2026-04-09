@@ -144,7 +144,7 @@ def _chamar_claude(system_msg: str, user_msg: str, api_key: str, model: str) -> 
             "system": system_msg,
             "messages": [{"role": "user", "content": user_msg}],
         },
-        timeout=120.0,
+        timeout=300.0,
     )
     resp.raise_for_status()
     data = resp.json()
@@ -166,7 +166,7 @@ def _chamar_gpt(system_msg: str, user_msg: str, api_key: str, model: str) -> str
                 {"role": "user", "content": user_msg},
             ],
         },
-        timeout=120.0,
+        timeout=300.0,
     )
     resp.raise_for_status()
     data = resp.json()
@@ -182,7 +182,7 @@ def _chamar_gemini(system_msg: str, user_msg: str, api_key: str, model: str) -> 
             "contents": [{"parts": [{"text": user_msg}]}],
             "generationConfig": {"maxOutputTokens": 32000},
         },
-        timeout=120.0,
+        timeout=300.0,
     )
     resp.raise_for_status()
     data = resp.json()
@@ -356,6 +356,21 @@ def executar_pipeline(pipeline_id: str, entrada: str, contexto_extra: dict = Non
         traceback.print_exc()
     finally:
         estado_execucao["ativo"] = False
+        # Salvar log persistente
+        try:
+            logs_dir = BASE_DIR / "logs"
+            logs_dir.mkdir(exist_ok=True)
+            log_data = datetime.now().strftime("%Y%m%d_%H%M%S")
+            log_file = logs_dir / f"pipeline_{pipeline_id}_{log_data}.log"
+            lines = [f"Pipeline: {pipeline_id}", f"Data: {log_data}", ""]
+            for i, e in enumerate(estado_execucao.get("etapas", [])):
+                lines.append(f"Etapa {i+1} [{e.get('nome','')}]: {e.get('status','')} | {len(e.get('resultado',''))} chars")
+                if e.get("erro"):
+                    lines.append(f"  ERRO: {e['erro']}")
+            lines.append(f"\nResultado final: {len(estado_execucao.get('resultado_final',''))} chars")
+            log_file.write_text("\n".join(lines), encoding="utf-8")
+        except Exception:
+            pass
 
 
 # === SYNC SUPABASE / GOOGLE SHEETS ===

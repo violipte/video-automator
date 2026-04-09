@@ -4,9 +4,10 @@ temp/
 __pycache__/
 *.pyc
 
-# Narrações e scripts gerados
+# Narrações, scripts e logs gerados
 narracoes/
 scripts/
+logs/
 
 # Dados sensíveis
 config.json

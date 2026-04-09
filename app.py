@@ -1463,7 +1463,8 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
           </div>
         </div>
         <button class="btn btn-secondary btn-sm" onclick="puxarRoteirosBatch()" style="font-size:11px">Puxar Roteiros</button>
-        <button class="btn btn-primary btn-sm" onclick="iniciarBatchNarracao()" style="font-size:11px">Gerar Todos</button>
+        <button class="btn btn-primary btn-sm" onclick="iniciarBatchNarracao()" id="btn-narr-batch-start" style="font-size:11px">Gerar Todos</button>
+        <button class="btn btn-danger btn-sm" onclick="cancelarBatchNarracao()" id="btn-narr-batch-cancel" style="font-size:11px;display:none">Cancelar Tudo</button>
       </div>
       <div id="narr-batch-cards" class="cards-grid"></div>
       <div id="narr-batch-status" style="display:none;margin-top:8px;background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:10px">
@@ -4474,12 +4475,13 @@ async function renderBatchCards() {
       + '</div>'
       + '<div class="form-group" style="margin:0 0 6px">'
       + '<label style="font-size:10px">Roteiro</label>'
-      + '<textarea class="nb-texto" data-tid="' + t.id + '" rows="3" placeholder="Cole o roteiro aqui..." style="font-size:11px;padding:4px 6px" oninput="this.nextElementSibling.textContent=this.value.length+\\' chars\\'"></textarea>'
-      + '<span style="font-size:9px;color:var(--text-sec)">0 chars</span>'
+      + '<textarea class="nb-texto" data-tid="' + t.id + '" rows="3" placeholder="Cole o roteiro aqui..." style="font-size:11px;padding:4px 6px" oninput="this.nextElementSibling.textContent=this.value.length+\\' chars\\'">' + (cfg.texto || '').replace(/</g,'&lt;') + '</textarea>'
+      + '<span style="font-size:9px;color:var(--text-sec)">' + (cfg.texto ? cfg.texto.length + ' chars' : '0 chars') + '</span>'
       + '</div>'
       + '<div style="display:flex;gap:4px;align-items:center">'
       + '<label style="font-size:10px;color:var(--text-sec)"><input type="checkbox" class="nb-ativo" data-tid="' + t.id + '" ' + (cfg.ativo !== false ? 'checked' : '') + '> Ativo</label>'
       + '<span class="nb-timer" data-tid="' + t.id + '" style="font-size:10px;color:var(--text-sec);font-family:monospace;margin-left:auto">--:--</span>'
+      + '<button class="btn btn-danger btn-sm nb-skip" data-tid="' + t.id + '" style="font-size:9px;padding:1px 6px;display:none" onclick="skipNarrJob(this)">Pular</button>'
       + '<span class="badge badge-waiting nb-status" data-tid="' + t.id + '" style="font-size:9px">Aguardando</span>'
       + '</div></div>';
   }).join('');
@@ -4496,10 +4498,12 @@ function _salvarBatchConfigs() {
   var saved = {};
   document.querySelectorAll('.nb-voz').forEach(function(el) {
     var tid = el.dataset.tid;
+    var textoEl = document.querySelector('.nb-texto[data-tid="' + tid + '"]');
     saved[tid] = {
       voice_id: el.value,
       provider: el.dataset.provider || '',
       ativo: document.querySelector('.nb-ativo[data-tid="' + tid + '"]').checked,
+      texto: textoEl ? textoEl.value : '',
     };
   });
   localStorage.setItem('narrBatchConfigs', JSON.stringify(saved));
@@ -4557,7 +4561,26 @@ function nbDrop(e) {
   renderBatchCards();
 }
 
+var _batchNarrRunning = false;
+var _batchNarrCancelled = false;
+var _narrSkipJobs = {};
+
+function cancelarBatchNarracao() {
+  _batchNarrCancelled = true;
+  toast('Cancelando após job atual...', 'error');
+}
+
+function skipNarrJob(btn) {
+  _narrSkipJobs[btn.dataset.tid] = true;
+  btn.textContent = 'Pulando...';
+  btn.disabled = true;
+}
+
 async function iniciarBatchNarracao() {
+  if (_batchNarrRunning) { toast('Batch já em andamento', 'error'); return; }
+  _batchNarrRunning = true;
+  _batchNarrCancelled = false;
+  _narrSkipJobs = {};
   _salvarBatchConfigs();
   var dateVal = document.getElementById('narr-batch-data').value;
   if (!dateVal) { toast('Selecione a data', 'error'); return; }
@@ -4597,6 +4620,9 @@ async function iniciarBatchNarracao() {
   var batchStartTime = Date.now();
 
   // Timer total que atualiza a cada segundo
+  document.getElementById('btn-narr-batch-start').style.display = 'none';
+  document.getElementById('btn-narr-batch-cancel').style.display = 'inline-flex';
+
   var _batchTimerInterval = setInterval(function() {
     var elapsed = Math.floor((Date.now() - batchStartTime) / 1000);
     var m = Math.floor(elapsed / 60), s = elapsed % 60;
@@ -4604,10 +4630,26 @@ async function iniciarBatchNarracao() {
   }, 1000);
 
   for (var i = 0; i < jobs.length; i++) {
+    // Checar cancelamento
+    if (_batchNarrCancelled) {
+      log.innerHTML += '<div style="color:var(--danger);font-weight:600">Cancelado pelo usuário</div>';
+      break;
+    }
     var job = jobs[i];
+
+    // Checar skip individual
+    if (_narrSkipJobs[job.template_id]) {
+      log.innerHTML += '<div style="color:var(--text-sec)">' + job.tag + ': Pulado pelo usuário</div>';
+      var skipBadge = document.querySelector('.nb-status[data-tid="' + job.template_id + '"]');
+      if (skipBadge) { skipBadge.textContent = 'Pulado'; skipBadge.className = 'badge badge-cancelled nb-status'; }
+      continue;
+    }
+
     var badge = document.querySelector('.nb-status[data-tid="' + job.template_id + '"]');
     var timerEl = document.querySelector('.nb-timer[data-tid="' + job.template_id + '"]');
+    var skipBtn = document.querySelector('.nb-skip[data-tid="' + job.template_id + '"]');
     if (badge) { badge.textContent = 'Gerando...'; badge.className = 'badge badge-transcribing nb-status'; }
+    if (skipBtn) skipBtn.style.display = 'inline-flex';
     document.getElementById('narr-batch-count').textContent = (i+1) + '/' + jobs.length;
     document.getElementById('narr-batch-fill').style.width = ((i) / jobs.length * 100) + '%';
     var jobStart = Date.now();
@@ -4620,6 +4662,23 @@ async function iniciarBatchNarracao() {
         if (el) el.textContent = (m < 10 ? '0' : '') + m + ':' + (s < 10 ? '0' : '') + s;
       };
     })(timerEl, jobStart), 1000);
+    // Verificar se MP3 já existe
+    var mp3Nome = job.nome + '.mp3';
+    var mp3Existe = false;
+    try {
+      var chkRes = await fetch('/api/browse?path=' + encodeURIComponent(pasta));
+      var chkFiles = await chkRes.json();
+      mp3Existe = chkFiles.some(function(f){ return f.name === mp3Nome; });
+    } catch(e) {}
+
+    if (mp3Existe) {
+      log.innerHTML += '<div style="color:var(--text-sec)">' + job.tag + ': existe (' + mp3Nome + ') - pulando</div>';
+      if (badge) { badge.textContent = 'Existe'; badge.className = 'badge badge-done nb-status'; }
+      clearInterval(_jobTimerInterval);
+      if (timerEl) { timerEl.textContent = 'OK'; timerEl.style.color = 'var(--accent)'; }
+      continue;
+    }
+
     log.innerHTML += '<div style="color:var(--text-sec)">' + job.tag + ': Enviando (' + job.chars + ' chars)...</div>';
     log.scrollTop = 99999;
 
@@ -4674,8 +4733,12 @@ async function iniciarBatchNarracao() {
   var totalTime = ((Date.now() - batchStartTime) / 1000).toFixed(0);
   log.innerHTML += '<div style="font-weight:600;margin-top:6px;padding-top:6px;border-top:1px solid var(--border)">Concluído | Tempo total: ' + totalTime + 's | Créditos gastos: ' + totalCreditsUsed.toLocaleString() + '</div>';
   log.scrollTop = 99999;
-  toast('Lote concluído!', 'success');
+  toast(_batchNarrCancelled ? 'Lote cancelado' : 'Lote concluído!', _batchNarrCancelled ? 'error' : 'success');
   carregarCreditos();
+  _batchNarrRunning = false;
+  document.getElementById('btn-narr-batch-start').style.display = 'inline-flex';
+  document.getElementById('btn-narr-batch-cancel').style.display = 'none';
+  document.querySelectorAll('.nb-skip').forEach(function(b){ b.style.display = 'none'; });
 }
 
 // === TEMAS (GRID) ===
