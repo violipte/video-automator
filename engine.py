@@ -263,6 +263,7 @@ class VideoEngine:
     def _montar_final(self, clips, tipo_fundo, zoom, srt_path, w, h, fps, callback_progresso, callback_etapa=None):
         """Passo 2: concatena clips + overlay + ajustes + legenda + áudio."""
         t = self.template
+        video_loop = t.get("video_loop", True)
         inputs = []
         filtros = []
         input_idx = 0
@@ -295,8 +296,11 @@ class VideoEngine:
                 concat_cmd = [
                     "ffmpeg", "-y", "-f", "concat", "-safe", "0",
                     "-i", str(concat_list),
+                    "-vf", f"fps={fps},scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
+                    "-pix_fmt", "yuv420p", "-an",
                     "-t", f"{self.duracao_total:.2f}",
-                    "-c", "copy", bg_video
+                    bg_video
                 ]
                 ret = _rodar_ffmpeg(concat_cmd)
                 if ret != 0:
@@ -306,20 +310,25 @@ class VideoEngine:
                 input_idx += 1
                 n_clips = 1
             else:
-                # SEM LOOP: concatenar vídeos sem repetir, congela no último frame
+                # SEM LOOP: concatenar todos os vídeos disponíveis, sem repetição
                 if callback_etapa:
                     callback_etapa("Pré-concatenando vídeos de fundo (sem loop)...")
 
+                todos_videos = self._listar_arquivos_fundo()
+                random.shuffle(todos_videos)
                 concat_list = TEMP_DIR / "bg_concat.txt"
                 with open(concat_list, "w", encoding="utf-8") as f:
-                    for arquivo, dur in clips:
+                    for arquivo in todos_videos:
                         f.write(f"file '{Path(arquivo).as_posix()}'\n")
 
                 bg_video = str(TEMP_DIR / "bg_concat.mp4")
                 concat_cmd = [
                     "ffmpeg", "-y", "-f", "concat", "-safe", "0",
                     "-i", str(concat_list),
-                    "-c", "copy", bg_video
+                    "-vf", f"fps={fps},scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
+                    "-pix_fmt", "yuv420p", "-an",
+                    bg_video
                 ]
                 ret = _rodar_ffmpeg(concat_cmd)
                 if ret != 0:
@@ -373,11 +382,9 @@ class VideoEngine:
 
         # Concatenar clips
         if n_clips == 1:
-            # Vídeo pré-concatenado ou único — só scale+trim
+            # Vídeo pré-concatenado — já está no fps/resolução correto, só trim
             filtros.append(
-                f"[0:v]scale={w}:{h}:force_original_aspect_ratio=decrease,"
-                f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setpts=PTS-STARTPTS,"
-                f"fps={fps},trim=0:{self.duracao_total:.2f},setpts=PTS-STARTPTS[trimmed]"
+                f"[0:v]setpts=PTS-STARTPTS,trim=0:{self.duracao_total:.2f},setpts=PTS-STARTPTS[trimmed]"
             )
         elif tipo_fundo == "imagens" and zoom:
             for i in range(n_clips):
@@ -544,21 +551,21 @@ class VideoEngine:
             moldura_opac = moldura.get("opacidade", 1.0)
 
             if moldura_tipo == "alpha":
-                # PNG com transparência
                 filtros.append(
-                    f"[{idx_moldura}:v]scale={w}:{h},format=yuva420p,"
+                    f"[{idx_moldura}:v]fps={fps},scale={w}:{h},format=yuva420p,"
+                    f"setpts=PTS-STARTPTS,"
                     f"colorchannelmixer=aa={moldura_opac}[moldura]"
                 )
             else:
-                # Chroma key (fundo verde)
                 filtros.append(
-                    f"[{idx_moldura}:v]scale={w}:{h},"
+                    f"[{idx_moldura}:v]fps={fps},scale={w}:{h},"
+                    f"setpts=PTS-STARTPTS,"
                     f"chromakey=0x00FF00:0.2:0.1,format=yuva420p,"
                     f"colorchannelmixer=aa={moldura_opac}[moldura]"
                 )
 
             filtros.append(
-                f"[{ultimo_video}][moldura]overlay=0:0,format=yuv420p[with_moldura]"
+                f"[{ultimo_video}][moldura]overlay=0:0:shortest=1,format=yuv420p[with_moldura]"
             )
             ultimo_video = "with_moldura"
 

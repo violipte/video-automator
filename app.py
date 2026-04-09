@@ -3352,6 +3352,7 @@ async function carregarBatch() {
     + '<td><div class="input-with-btn">'
     + '<input type="text" class="batch-mp3" data-tid="' + t.id + '" placeholder="Caminho do MP3..." style="font-size:12px">'
     + '<button class="btn btn-secondary btn-sm batch-browse-btn" type="button">...</button>'
+    + '<button class="btn btn-danger btn-sm batch-clear-btn" type="button" style="font-size:10px;padding:2px 6px" title="Remover áudio">X</button>'
     + '</div></td>'
     + '<td><button class="btn btn-primary btn-sm batch-play-btn" data-tid="' + t.id + '" type="button" title="Produzir este template">&#9654;</button></td>'
     + '<td><span class="badge badge-waiting" id="badge-' + t.id + '">Aguardando</span></td>'
@@ -3366,6 +3367,17 @@ async function carregarBatch() {
   // Bind play individual buttons
   tbody.querySelectorAll('.batch-play-btn').forEach(function(btn){
     btn.addEventListener('click', function(){ iniciarIndividual(btn.dataset.tid); });
+  });
+  // Bind clear individual buttons
+  tbody.querySelectorAll('.batch-clear-btn').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      var inp = btn.parentElement.querySelector('input');
+      if (inp) {
+        inp.value = '';
+        delete _batchMp3Values[inp.dataset.tid];
+        localStorage.setItem('batchMp3Values', JSON.stringify(_batchMp3Values));
+      }
+    });
   });
 
   // Restaurar caminhos MP3 salvos

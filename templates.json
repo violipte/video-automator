@@ -252,92 +252,7 @@
     "fps": 30,
     "pasta_imagens": "F:/Canal Dark/Imagens/Chosen One/Estilo Chosen One/CO3",
     "tipo_fundo": "videos",
-    "duracao_por_imagem": 10,
-    "efeito_zoom": false,
-    "zoom_ratio": 1.09,
-    "overlays": [
-      {
-        "caminho": "F:/Canal Dark/Video/Glowing particles overlay free to use.mp4",
-        "opacidade": 0.5
-      }
-    ],
-    "ajustes": {
-      "randomizar": true,
-      "exposicao": 0,
-      "contraste": 1,
-      "realces": 0,
-      "sombras": 0,
-      "brancos": 0,
-      "pretos": 0,
-      "temperatura": 0,
-      "tonalidade": 0,
-      "saturacao": 1,
-      "brilho": 0,
-      "vinheta": 0
-    },
-    "narracao_voz": {
-      "voice_id": "2585483",
-      "provider": "minimax_clone",
-      "speed": 1,
-      "pitch": 0
-    },
-    "trilha_sonora": "F:/Canal Dark/Music/Chosen One (1).mp3",
-    "trilha_volume": 0.25,
-    "narracao_volume": 1,
-    "estilo_legenda": 2,
-    "legenda_config": {
-      "fonte": "Montserrat Black",
-      "tamanho": 24,
-      "max_linhas": 2,
-      "max_chars": 30,
-      "cor": "#ffffff",
-      "cor_outline": "#000000",
-      "cor_primaria": "&H00FFFFFF",
-      "cor_outline_ass": "&H00000000",
-      "outline_espessura": 4,
-      "sombra": 2,
-      "maiuscula": false,
-      "bold": true,
-      "posicao": "center",
-      "posicao_x": 50,
-      "posicao_y": 85
-    },
-    "pasta_saida": "F:/Canal Dark/",
-    "formato_nome_saida": "{tag}_{data}_{sequencia}",
-    "moldura": {
-      "arquivo": "F:/Canal Dark/Imagens/Chosen One/Frames/god said (1).png",
-      "tipo": "chromakey",
-      "opacidade": 1
-    },
-    "cta": {
-      "arquivo": "F:/Canal Dark/Video/subscribe green screen.mp4",
-      "inicio": 30,
-      "duracao": 8,
-      "intervalo": 300,
-      "escala": 0.3,
-      "posicao": "bottom-center"
-    },
-    "regras": {
-      "substituicoes": {},
-      "max_chars_linha": 42,
-      "max_linhas": 2,
-      "remover_hesitacoes": true,
-      "capitalizar_inicio": true,
-      "palavras_remover": []
-    }
-  },
-  "co-copia-copia-copia": {
-    "id": "co-copia-copia-copia",
-    "nome": "Divine Chosen Order 2",
-    "tag": "CO4",
-    "idioma": "en",
-    "resolucao": [
-      1920,
-      1080
-    ],
-    "fps": 30,
-    "pasta_imagens": "F:/Canal Dark/Imagens/Chosen One/Estilo Chosen One/CO4",
-    "tipo_fundo": "videos",
+    "video_loop": false,
     "duracao_por_imagem": 10,
     "efeito_zoom": false,
     "zoom_ratio": 1.09,
@@ -392,6 +307,93 @@
     "formato_nome_saida": "{tag}_{data}_{sequencia}",
     "moldura": {
       "arquivo": "F:/Canal Dark/Imagens/Chosen One/Frames/god said (2).png",
+      "tipo": "chromakey",
+      "opacidade": 1
+    },
+    "cta": {
+      "arquivo": "F:/Canal Dark/Video/subscribe green screen.mp4",
+      "inicio": 30,
+      "duracao": 8,
+      "intervalo": 300,
+      "escala": 0.3,
+      "posicao": "bottom-center"
+    },
+    "regras": {
+      "substituicoes": {},
+      "max_chars_linha": 42,
+      "max_linhas": 2,
+      "remover_hesitacoes": true,
+      "capitalizar_inicio": true,
+      "palavras_remover": []
+    }
+  },
+  "co-copia-copia-copia": {
+    "id": "co-copia-copia-copia",
+    "nome": "Divine Chosen Order 2",
+    "tag": "CO4",
+    "idioma": "en",
+    "resolucao": [
+      1920,
+      1080
+    ],
+    "fps": 30,
+    "pasta_imagens": "F:/Canal Dark/Imagens/Chosen One/Estilo Chosen One/CO4",
+    "tipo_fundo": "videos",
+    "video_loop": false,
+    "duracao_por_imagem": 10,
+    "efeito_zoom": false,
+    "zoom_ratio": 1.09,
+    "overlays": [
+      {
+        "caminho": "F:/Canal Dark/Video/Glowing particles overlay free to use.mp4",
+        "opacidade": 0.5
+      }
+    ],
+    "ajustes": {
+      "randomizar": true,
+      "exposicao": 0,
+      "contraste": 1,
+      "realces": 0,
+      "sombras": 0,
+      "brancos": 0,
+      "pretos": 0,
+      "temperatura": 0,
+      "tonalidade": 0,
+      "saturacao": 1,
+      "brilho": 0,
+      "vinheta": 0
+    },
+    "narracao_voz": {
+      "voice_id": "2585483",
+      "provider": "minimax_clone",
+      "speed": 1,
+      "pitch": 0
+    },
+    "trilha_sonora": "F:/Canal Dark/Music/Chosen One (1).mp3",
+    "trilha_volume": 0.25,
+    "narracao_volume": 1,
+    "estilo_legenda": 2,
+    "legenda_config": {
+      "fonte": "Montserrat Black",
+      "tamanho": 24,
+      "max_linhas": 2,
+      "max_chars": 30,
+      "cor": "#ffffff",
+      "cor_outline": "#000000",
+      "cor_primaria": "&H00FFFFFF",
+      "cor_outline_ass": "&H00000000",
+      "outline_espessura": 4,
+      "sombra": 2,
+      "maiuscula": false,
+      "bold": true,
+      "posicao": "center",
+      "posicao_x": 50,
+      "posicao_y": 85
+    },
+    "pasta_saida": "F:/Canal Dark/",
+    "formato_nome_saida": "{tag}_{data}_{sequencia}",
+    "moldura": {
+      "arquivo": "F:/Canal Dark/Imagens/Chosen One/Frames/god said (1).png",
       "tipo": "chromakey",
       "opacidade": 1
     },
