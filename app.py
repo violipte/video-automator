@@ -1841,8 +1841,18 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
           </select>
         </div>
         <div class="form-group" id="opcoes-video-loop" style="display:none">
-          <label><input type="checkbox" id="ed-video-loop" checked> Loop de vídeos (repete até o final do áudio)</label>
-          <div style="font-size:10px;color:var(--text-sec);margin-top:2px">Desmarcado: congela no último frame quando os vídeos acabam</div>
+          <div style="display:flex;align-items:center;gap:8px">
+            <label><input type="checkbox" id="ed-video-loop" checked> Loop de vídeos</label>
+            <span style="position:relative;cursor:help" onmouseenter="this.querySelector('.tooltip-box').style.display='block'" onmouseleave="this.querySelector('.tooltip-box').style.display='none'">
+              <span style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:50%;background:var(--border);color:var(--text-sec);font-size:11px;font-weight:700">!</span>
+              <div class="tooltip-box" style="display:none;position:absolute;left:24px;top:-10px;background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:10px 12px;width:280px;z-index:100;box-shadow:0 4px 12px rgba(0,0,0,0.4);font-size:11px;line-height:1.5">
+                <div style="font-weight:600;margin-bottom:4px;color:var(--accent)">Marcado (Loop)</div>
+                <div style="color:var(--text-sec)">Repete os vídeos randomizados até cobrir toda a duração do áudio. Cada produção gera uma ordem diferente.</div>
+                <div style="font-weight:600;margin:8px 0 4px;color:var(--warn)">Desmarcado (Sem Loop)</div>
+                <div style="color:var(--text-sec)">Roda os vídeos uma vez na ordem e congela no último frame quando acabar.</div>
+              </div>
+            </span>
+          </div>
         </div>
         <div class="form-group">
           <label>Pasta de Imagens/Vídeos</label>

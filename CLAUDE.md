@@ -229,6 +229,8 @@ After each pipeline execution, a log file is saved to `logs/pipeline_{id}_{times
   - Encoder: try h264_nvenc first, fallback to libx264
   - Save to `cache/{hash}.mp4`
 - Supports two background types: `imagens` (with Ken Burns zoom) and `videos` (with scale+pad+fps, no zoom)
+- **Video background pre-concatenation**: For `tipo_fundo="videos"`, clips are pre-concatenated into a single `bg_concat.mp4` using FFmpeg concat demuxer (`-c copy`, fast). This prevents OOM (was 21GB RAM with 200+ inputs). The shuffled list is written to `bg_concat.txt` then concatenated with `-t duration` to trim.
+- **Video loop option**: `template.video_loop` (boolean, default true). ON: repeats shuffled videos to fill audio duration. OFF: plays videos once and freezes last frame. Checkbox in Fundo tab.
 
 **Pass 2: Final assembly (65-100% progress)**
 - Concatenate all cached clips with FFmpeg concat filter
@@ -249,6 +251,12 @@ After each pipeline execution, a log file is saved to `logs/pipeline_{id}_{times
   - `weights=1 0.5` gives narration full volume, background music half
 - Write filter graph to `temp/filter_complex.txt` (avoids cmd line length limits)
 - Output: H.264 NVENC, CQ 20, AAC 192k, faststart
+- **Metadata stripping**: After successful render, runs `ffmpeg -map_metadata -1 -fflags +bitexact` to strip encoder/software/timestamps from final MP4. Prevents YouTube automation detection.
+
+### FFmpeg Resilience
+- **Auto-retry on failure**: Up to 2 retries with 5s delay. Corrupted files auto-deleted before retry.
+- **FFmpeg watchdog**: If no progress for 10 minutes (`stall_timeout=600s`), kills the process. Prevents infinite hangs.
+- **Orphan FFmpeg cleanup**: On fatal thread crash, runs `taskkill /F /IM ffmpeg.exe` to clean up stuck processes.
 
 ### FFmpeg Priority
 All FFmpeg processes get `BELOW_NORMAL_PRIORITY_CLASS` via psutil or ctypes fallback. Prevents server/system from becoming unresponsive during heavy renders.
@@ -360,9 +368,14 @@ Template field: `template.moldura`
 4. Download audio to output folder (or skip if preview mode)
 5. Track remaining credits via `ec_remain_credits`
 
+### TTS chunking (Minimax):
+- For texts >8000 chars, auto-splits into chunks by paragraph
+- Sends each chunk as a separate TTS task, downloads all audio files
+- Concatenates with FFmpeg using `concat_list.txt` with relative paths (avoids encoding issues)
+
 ### Anti-duplication:
 - **Backend**: `iniciar_narracao()` checks `estado_narracao["ativo"]` and returns error if already active. Prevents concurrent TTS jobs.
-- **Frontend**: Should also have a flag to prevent double-click on generate button.
+- **Frontend**: Flag prevents double-click on batch generate button.
 
 ### Voice Config Per Template
 Each template stores voice settings in `template.narracao_voz`:
@@ -380,12 +393,13 @@ This is the source of truth for which voice a template uses. The narration batch
 - Per-template cards in the Narracao tab
 - Voice comes fixed from template's `narracao_voz` config
 - Skip existing MP3s (checks output folder)
-- Cancel/skip individual items during batch
+- Cancel/skip individual items during batch ("Cancelar Tudo" button + "Pular" per card)
 - Timer per job tracking generation time
 - Credits tracking and display
 - Date-based naming: `{tag}_{YYYYMMDD}_{sequence}.mp3`
 - Preview mode: generates but does not save to disk
 - Cards are draggable to reorder
+- **Batch MP3 persistence**: Production batch MP3 paths saved in localStorage (key: `batchMp3Values`). Survive page refresh. "Limpar Audios" button clears all.
 
 ---
 
@@ -400,7 +414,7 @@ The "Produzir Tudo" button in the Temas tab runs the complete production pipelin
 
 ### Key behaviors:
 - **Skip existing files**: Each step checks for existing output before running
-- **Pipeline queue**: Waits for previous pipeline to finish before starting next (polls up to 30 times at 2s intervals)
+- **Pipeline execution queue**: Both batch roteiro and "Produzir Tudo" wait for previous pipeline to finish before starting next (prevents 409 conflicts). Polls up to 30 times at 2s intervals.
 - **Error handling**: If any step fails for a column, logs the error and `continue` to next column
 - **Progress UI**: Shows count (e.g., "2/6"), progress bar, and detailed log per step per column
 - **Auto-save**: After completion, saves temas grid (with roteiro data) and re-renders
@@ -476,7 +490,7 @@ When a credential is tested/refreshed, the system queries the provider's API for
 
 ## Known Issues
 
-- **FFmpeg memory with large filter graphs**: Very long videos with many overlays + CTA can cause FFmpeg to use excessive memory. Filter graph is written to file (`-filter_complex_script`) to avoid command-line length limits but memory usage still scales.
+- **FFmpeg memory with large filter graphs**: Very long videos with many overlays + CTA can cause FFmpeg to use excessive memory. Filter graph is written to file (`-filter_complex_script`) to avoid command-line length limits but memory usage still scales. (Video background OOM with 200+ inputs was fixed via pre-concatenation - see engine section.)
 - **Server timeout during heavy rendering**: Long renders (30+ min videos) may cause HTTP timeouts on the polling side. The render continues in background thread but the UI may need manual refresh.
 - **GPU overlay disabled**: `_tem_cuda_filters()` returns False. The chromakey_cuda/overlay_cuda path exists but was disabled because CPU colorkey is stable and fast (~141fps).
 - **VRAM contention**: Whisper GPU and FFmpeg NVENC both need GPU. Transcriber releases VRAM after use but if both run simultaneously, OOM is possible.
@@ -513,6 +527,9 @@ When a credential is tested/refreshed, the system queries the provider's API for
 ### Variable substitution (scriptwriter.py)
 - Uses regex with space tolerance: `\{\{\s*chave\s*\}\}` matches `{{chave}}`, `{{ chave }}`, etc.
 - Variables are substituted in both `system_message` and `prompt` fields
+
+### Date-based output folders
+- Videos now saved to `{pasta_saida}/{YYYY-MM-DD}/{TAG}_{DATA}_{SEQ}.mp4`. Subfolders created automatically.
 
 ### File naming
 - Output videos: `{tag}_{YYYYMMDD}_{sequence}.mp4`
