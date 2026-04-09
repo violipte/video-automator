@@ -340,6 +340,42 @@
     [ ] Retry automático em caso de falha
     Prioridade: MEDIA
 
+    [ ] INTEGRAÇÃO LINK TRACKER (COMENTÁRIO COM LINK RASTREÁVEL)
+        O Link Tracker roda em "F:\Canal Dark\Automação\link-tracker"
+        É uma FastAPI com SQLite. API endpoints relevantes:
+        - POST /api/links → criar_link(slug, url_destino, titulo, grupo, repassar_params)
+        - POST /api/links/bulk → criar_links_em_lote (modo automatico ou manual)
+        - GET /{slug} → redireciona + registra clique com UTMs
+
+        FLUXO AUTOMÁTICO NO UPLOAD:
+        1. Antes do upload, o Video Automator chama a API do Link Tracker
+        2. Cria um link rastreável com formato:
+           slug: {canal}-{DDMM} (ex: "en-0904", "co2-0904")
+           url_destino: URL de destino configurada por canal (bio link, Hotmart, etc)
+           titulo: título do vídeo
+           grupo: canal/tag do template
+        3. Monta o link completo: https://{dominio_tracker}/{slug}
+           Com UTMs: ?utm_source=youtube&utm_medium={canal}&utm_campaign={data}
+        4. Insere o link no template do comentário:
+           Template: "🔗 Link exclusivo: {link_rastreavel}\n\n{texto_fixo}"
+        5. Posta o comentário no vídeo após upload
+        6. Fixa o comentário (via Selenium/Playwright)
+
+        CONFIGURAÇÃO NECESSÁRIA:
+        [ ] URL base do Link Tracker (ex: https://track.seudominio.com)
+        [ ] Credenciais do tracker (user/password para session cookie)
+        [ ] URL de destino padrão por canal
+        [ ] Template de comentário com variáveis:
+            {{link}}, {{titulo}}, {{canal}}, {{data}}
+        [ ] Formato do slug: configurável (default: {canal}-{DDMM})
+
+        WEBHOOK ALTERNATIVO:
+        [ ] Em vez de chamar a API do tracker direto, pode usar webhook
+            que o tracker recebe e cria o link automaticamente
+        [ ] Útil se tracker estiver em servidor remoto (Contabo)
+
+        Prioridade: ALTA (faz parte do fluxo completo de produção)
+
 --- DISTRIBUICAO ---
 
 [ ] YOUTUBE UPLOAD INTEGRATION
