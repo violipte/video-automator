@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 import uuid
+import shutil
 from datetime import datetime
 from pathlib import Path
 
@@ -43,6 +44,8 @@ TEMP_DIR = BASE_DIR / "temp"
 TEMP_DIR.mkdir(exist_ok=True)
 
 app = FastAPI(title="Video Automator")
+
+SERVER_START_TIME = time.time()
 
 # === ESTADO GLOBAL ===
 ESTADO_BATCH_FILE = BASE_DIR / "estado_batch.json"
@@ -1097,6 +1100,108 @@ async def extrair_thumb_youtube_endpoint(request: Request):
     return result
 
 
+# === API: MONITOR ===
+
+@app.get("/api/monitor")
+def monitor_status():
+    """Dashboard de monitoramento geral."""
+    # Batch status
+    batch = dict(estado_batch)
+
+    # Narração status
+    narracao = {k: v for k, v in narrator.estado_narracao.items() if k != "api_key"}
+
+    # Pipeline status
+    pipeline = dict(scriptwriter.estado_execucao)
+
+    # Créditos
+    creditos = narrator.ultimo_creditos
+
+    # Histórico summary
+    historico = carregar_historico()
+    por_status = {}
+    por_data = {}
+    por_tag = {}
+    for h in historico:
+        s = h.get("status", "desconhecido")
+        por_status[s] = por_status.get(s, 0) + 1
+        d = h.get("data", "")[:10]
+        if d:
+            por_data[d] = por_data.get(d, 0) + 1
+        t = h.get("tag", "")
+        if t:
+            por_tag[t] = por_tag.get(t, 0) + 1
+
+    # Últimos 10 vídeos
+    ultimos = historico[:10]
+
+    # Uptime
+    uptime_seg = time.time() - SERVER_START_TIME
+    horas = int(uptime_seg // 3600)
+    minutos = int((uptime_seg % 3600) // 60)
+    segundos = int(uptime_seg % 60)
+    uptime_str = f"{horas:02d}:{minutos:02d}:{segundos:02d}"
+
+    # Disk usage
+    disco = {}
+    pastas_disco = {
+        "cache": BASE_DIR / "cache",
+        "narracoes": BASE_DIR / "narracoes",
+        "temp": TEMP_DIR,
+    }
+    # Adicionar pastas de saída dos templates
+    try:
+        templates = carregar_templates()
+        for t in templates.values():
+            p = t.get("pasta_saida", "")
+            if p:
+                disco_key = f"output ({t.get('tag', t.get('id', '?'))})"
+                pastas_disco[disco_key] = Path(p)
+    except Exception:
+        pass
+
+    for nome, pasta in pastas_disco.items():
+        try:
+            if pasta.exists():
+                total = sum(f.stat().st_size for f in pasta.rglob("*") if f.is_file())
+                disco[nome] = {"bytes": total, "humano": f"{total / (1024*1024):.1f} MB" if total < 1024**3 else f"{total / (1024**3):.2f} GB"}
+            else:
+                disco[nome] = {"bytes": 0, "humano": "0 MB"}
+        except Exception:
+            disco[nome] = {"bytes": -1, "humano": "erro"}
+
+    # Estatísticas calculadas
+    hoje = datetime.now().strftime("%Y-%m-%d")
+    import datetime as _dt
+    inicio_semana = (datetime.now() - _dt.timedelta(days=datetime.now().weekday())).strftime("%Y-%m-%d")
+    videos_hoje = sum(1 for h in historico if h.get("data", "")[:10] == hoje and h.get("status") == "concluido")
+    videos_semana = sum(1 for h in historico if h.get("data", "")[:10] >= inicio_semana and h.get("status") == "concluido")
+    videos_total = sum(1 for h in historico if h.get("status") == "concluido")
+    tempos = [h.get("duracao_producao", 0) for h in historico if h.get("status") == "concluido" and h.get("duracao_producao")]
+    tempo_medio = round(sum(tempos) / len(tempos), 1) if tempos else 0
+
+    return {
+        "batch": batch,
+        "narracao": narracao,
+        "pipeline": pipeline,
+        "creditos": creditos,
+        "historico_resumo": {
+            "por_status": por_status,
+            "por_data": por_data,
+            "por_tag": por_tag,
+        },
+        "ultimos": ultimos,
+        "uptime": uptime_str,
+        "disco": disco,
+        "estatisticas": {
+            "videos_hoje": videos_hoje,
+            "videos_semana": videos_semana,
+            "videos_total": videos_total,
+            "tempo_medio": tempo_medio,
+        },
+    }
+
+
 # === API: CHAT (CLAUDE CLI) ===
 
 AGENTS_DIR = BASE_DIR / "agents"
@@ -1444,6 +1549,10 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12,6 12,12 16,14"/></svg>
       Histórico
     </a>
+    <a data-page="monitor" onclick="showPage('monitor')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+      Monitor
+    </a>
     <a data-page="config" onclick="showPage('config')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
       Config
@@ -1527,6 +1636,97 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><polyline points="12,6 12,12 16,14"/></svg>
       <h3>Nenhum vídeo produzido ainda</h3>
       <p>O histórico aparecerá aqui após produzir vídeos.</p>
+    </div>
+  </div>
+
+  <!-- PAGE: MONITOR -->
+  <div id="page-monitor" class="page">
+    <div class="page-header">
+      <h2>Monitor</h2>
+      <div style="display:flex;align-items:center;gap:12px">
+        <span id="mon-uptime" style="font-size:12px;color:var(--text-sec)">Uptime: --:--:--</span>
+        <span id="mon-refresh-indicator" style="font-size:10px;color:var(--text-sec)">Auto-refresh: 5s</span>
+      </div>
+    </div>
+
+    <!-- STATUS CARDS -->
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:24px">
+      <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:16px">
+        <div style="font-size:11px;color:var(--text-sec);margin-bottom:6px">Produção</div>
+        <span id="mon-batch-badge" class="badge badge-waiting">Inativo</span>
+        <div id="mon-batch-job" style="font-size:11px;color:var(--text-sec);margin-top:6px"></div>
+      </div>
+      <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:16px">
+        <div style="font-size:11px;color:var(--text-sec);margin-bottom:6px">Narração</div>
+        <span id="mon-narr-badge" class="badge badge-waiting">Inativo</span>
+        <div id="mon-narr-task" style="font-size:11px;color:var(--text-sec);margin-top:6px"></div>
+      </div>
+      <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:16px">
+        <div style="font-size:11px;color:var(--text-sec);margin-bottom:6px">Roteiros</div>
+        <span id="mon-pipe-badge" class="badge badge-waiting">Inativo</span>
+        <div id="mon-pipe-task" style="font-size:11px;color:var(--text-sec);margin-top:6px"></div>
+      </div>
+      <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:16px">
+        <div style="font-size:11px;color:var(--text-sec);margin-bottom:6px">Créditos TTS</div>
+        <div id="mon-credits" style="font-size:22px;font-weight:700;color:var(--accent)">--</div>
+      </div>
+    </div>
+
+    <!-- PRODUÇÃO ATUAL -->
+    <div id="mon-producao-atual" style="display:none;background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:24px">
+      <h3 style="font-size:14px;margin-bottom:12px">Produção Atual</h3>
+      <div style="display:flex;align-items:center;gap:16px;margin-bottom:12px">
+        <div class="progress-bar" style="flex:1;height:10px"><div id="mon-batch-fill" class="progress-fill" style="width:0%"></div></div>
+        <span id="mon-batch-pct" style="font-size:14px;font-weight:600;color:var(--accent)">0%</span>
+        <span id="mon-batch-timer" style="font-size:13px;font-family:monospace;color:var(--text)">00:00:00</span>
+      </div>
+      <div id="mon-batch-template" style="font-size:12px;color:var(--text-sec);margin-bottom:10px"></div>
+      <table class="batch-table" style="font-size:12px">
+        <thead><tr><th style="width:30px">#</th><th>Template</th><th style="width:120px">Status</th><th style="width:80px">Progresso</th></tr></thead>
+        <tbody id="mon-batch-jobs"></tbody>
+      </table>
+    </div>
+
+    <!-- ESTATÍSTICAS -->
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:24px">
+      <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:16px;text-align:center">
+        <div style="font-size:28px;font-weight:700;color:var(--accent)" id="mon-stat-hoje">0</div>
+        <div style="font-size:11px;color:var(--text-sec)">Vídeos hoje</div>
+      </div>
+      <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:16px;text-align:center">
+        <div style="font-size:28px;font-weight:700;color:var(--info)" id="mon-stat-semana">0</div>
+        <div style="font-size:11px;color:var(--text-sec)">Esta semana</div>
+      </div>
+      <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:16px;text-align:center">
+        <div style="font-size:28px;font-weight:700;color:var(--text)" id="mon-stat-total">0</div>
+        <div style="font-size:11px;color:var(--text-sec)">Total produzidos</div>
+      </div>
+      <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:16px;text-align:center">
+        <div style="font-size:28px;font-weight:700;color:var(--warn)" id="mon-stat-tempo">0s</div>
+        <div style="font-size:11px;color:var(--text-sec)">Tempo médio</div>
+      </div>
+    </div>
+
+    <!-- DISCO -->
+    <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:24px">
+      <h3 style="font-size:14px;margin-bottom:12px">Uso de Disco</h3>
+      <div id="mon-disco" style="display:flex;gap:16px;flex-wrap:wrap"></div>
+    </div>
+
+    <!-- ÚLTIMOS 10 VÍDEOS -->
+    <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:16px">
+      <h3 style="font-size:14px;margin-bottom:12px">Últimos 10 Vídeos</h3>
+      <table class="batch-table" style="font-size:12px">
+        <thead><tr>
+          <th style="width:140px">Data</th>
+          <th style="width:50px">Tag</th>
+          <th>Template</th>
+          <th style="width:70px">Tempo</th>
+          <th style="width:70px">Status</th>
+        </tr></thead>
+        <tbody id="mon-ultimos-tbody"></tbody>
+      </table>
+      <div id="mon-ultimos-empty" style="display:none;color:var(--text-sec);font-size:12px;text-align:center;padding:16px">Nenhum vídeo produzido ainda</div>
     </div>
   </div>
 
@@ -1881,9 +2081,9 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
           </select>
         </div>
         <button class="btn btn-primary btn-sm" onclick="gerarLoteRoteiros()" id="btn-lote-roteiros" style="font-size:11px">Gerar Roteiros</button>
-        <button class="btn btn-danger btn-sm" onclick="_loteRoteiroCancelled=true" id="btn-lote-roteiros-cancel" style="font-size:11px;display:none">Cancelar</button>
+        <button class="btn btn-danger btn-sm" onclick="cancelarLoteRoteiros()" id="btn-lote-roteiros-cancel" style="font-size:11px;display:none">Cancelar</button>
         <button class="btn btn-primary btn-sm" onclick="produzirDataCompleta()" id="btn-produzir-tudo" style="font-size:11px;background:var(--warn);color:#000">Produzir Tudo</button>
-        <button class="btn btn-danger btn-sm" onclick="_produzirTudoCancelled=true" id="btn-produzir-tudo-cancel" style="font-size:11px;display:none">Cancelar</button>
+        <button class="btn btn-danger btn-sm" onclick="cancelarProduzirTudo()" id="btn-produzir-tudo-cancel" style="font-size:11px;display:none">Cancelar</button>
       </div>
       <div id="lote-preview" style="font-size:11px;color:var(--text-sec);margin-bottom:8px"></div>
       <div id="lote-status" style="display:none">
@@ -2736,6 +2936,8 @@ function showPage(page) {
   if (page === 'roteiros') carregarPipelines();
   if (page === 'config') carregarConfig();
   if (page === 'thumbnail') { carregarThumbPage(); }
+  if (page === 'monitor') { refreshMonitor(); startMonitorPolling(); }
+  else { stopMonitorPolling(); }
 }
 
 // === TEMPLATES ===
@@ -5021,14 +5223,24 @@ async function iniciarBatchNarracao() {
         if (el) el.textContent = (m < 10 ? '0' : '') + m + ':' + (s < 10 ? '0' : '') + s;
       };
     })(timerEl, jobStart), 1000);
-    // Verificar se MP3 já existe
+    // Verificar se MP3 já existe (na subpasta por data)
     var mp3Nome = job.nome + '.mp3';
+    var narrDateParts = dataFormatada.split('-');
+    var narrSubpasta = pasta + '/2026-' + narrDateParts[1] + '-' + narrDateParts[0];
     var mp3Existe = false;
     try {
-      var chkRes = await fetch('/api/browse?path=' + encodeURIComponent(pasta));
+      var chkRes = await fetch('/api/browse?path=' + encodeURIComponent(narrSubpasta));
       var chkFiles = await chkRes.json();
       mp3Existe = chkFiles.some(function(f){ return f.name === mp3Nome; });
     } catch(e) {}
+    if (!mp3Existe) {
+      // Também checar na pasta raiz (retrocompatibilidade)
+      try {
+        var chkRes2 = await fetch('/api/browse?path=' + encodeURIComponent(pasta));
+        var chkFiles2 = await chkRes2.json();
+        mp3Existe = chkFiles2.some(function(f){ return f.name === mp3Nome; });
+      } catch(e) {}
+    }
 
     if (mp3Existe) {
       log.innerHTML += '<div style="color:var(--text-sec)">' + job.tag + ': existe (' + mp3Nome + ') - pulando</div>';
@@ -5737,6 +5949,19 @@ function previewLote() {
 }
 
 var _loteRoteiroCancelled = false;
+
+function cancelarLoteRoteiros() {
+  _loteRoteiroCancelled = true;
+  var btn = document.getElementById('btn-lote-roteiros-cancel');
+  btn.textContent = 'Cancelando...';
+  btn.style.opacity = '0.6';
+  btn.disabled = true;
+  var log = document.getElementById('lote-log');
+  log.innerHTML += '<div style="color:var(--danger);font-weight:600;padding:4px 0;border-top:1px solid var(--danger)">⛔ CANCELAMENTO SOLICITADO — finalizando job atual...</div>';
+  log.scrollTop = 99999;
+  toast('Cancelando após job atual terminar...', 'error');
+}
+
 async function gerarLoteRoteiros() {
   _loteRoteiroCancelled = false;
   document.getElementById('btn-lote-roteiros').style.display = 'none';
@@ -5766,7 +5991,12 @@ async function gerarLoteRoteiros() {
 
   for (var i = 0; i < jobs.length; i++) {
     var job = jobs[i];
-    if (_loteRoteiroCancelled) { log.innerHTML += '<div style="color:var(--danger);font-weight:600">Cancelado</div>'; break; }
+    if (_loteRoteiroCancelled) {
+      var restantes = jobs.length - i;
+      log.innerHTML += '<div style="color:var(--danger);font-weight:600;padding:4px 0">⛔ CANCELADO | ' + i + '/' + jobs.length + ' concluídos | ' + restantes + ' pulados</div>';
+      log.scrollTop = 99999;
+      break;
+    }
     document.getElementById('lote-count').textContent = (i+1) + '/' + jobs.length;
     document.getElementById('lote-fill').style.width = (i / jobs.length * 100) + '%';
     log.innerHTML += '<div>' + job.col.nome + ': Iniciando pipeline...</div>';
@@ -5831,13 +6061,32 @@ async function gerarLoteRoteiros() {
   document.getElementById('lote-count').textContent = jobs.length + '/' + jobs.length;
   var totalTime = ((Date.now() - startTime) / 1000).toFixed(0);
   log.innerHTML += '<div style="font-weight:600;margin-top:4px;border-top:1px solid var(--border);padding-top:4px">Concluído | ' + totalTime + 's total</div>';
+  var btnCancel = document.getElementById('btn-lote-roteiros-cancel');
+  btnCancel.style.display = 'none';
+  btnCancel.textContent = 'Cancelar';
+  btnCancel.style.opacity = '1';
+  btnCancel.disabled = false;
   document.getElementById('btn-lote-roteiros').style.display = 'inline-flex';
-  document.getElementById('btn-lote-roteiros-cancel').style.display = 'none';
   toast(_loteRoteiroCancelled ? 'Lote cancelado' : 'Lote concluído!', _loteRoteiroCancelled ? 'error' : 'success');
 }
 
 // === PRODUÇÃO COMPLETA ===
 var _produzirTudoCancelled = false;
+
+function cancelarProduzirTudo() {
+  _produzirTudoCancelled = true;
+  var btn = document.getElementById('btn-produzir-tudo-cancel');
+  btn.textContent = 'Cancelando...';
+  btn.style.opacity = '0.6';
+  btn.disabled = true;
+  var log = document.getElementById('lote-log');
+  log.innerHTML += '<div style="color:var(--danger);font-weight:600;padding:4px 0;border-top:1px solid var(--danger)">⛔ CANCELAMENTO SOLICITADO — finalizando etapa atual...</div>';
+  log.scrollTop = 99999;
+  toast('Cancelando produção após etapa atual...', 'error');
+  // Também matar FFmpeg se estiver rodando
+  fetch('/api/batch/cancel', { method: 'POST' }).catch(function(){});
+}
+
 async function produzirDataCompleta() {
   _produzirTudoCancelled = false;
   var ri = parseInt(document.getElementById('lote-data-select').value);
@@ -5904,7 +6153,13 @@ async function produzirDataCompleta() {
   var startTime = Date.now();
 
   for (var i = 0; i < jobs.length; i++) {
-    if (_produzirTudoCancelled) { log.innerHTML += '<div style="color:var(--danger);font-weight:600">Cancelado pelo usuário</div>'; break; }
+    if (_produzirTudoCancelled) {
+      var restantes = jobs.length - i;
+      log.innerHTML += '<div style="color:var(--danger);font-weight:600;padding:6px 0">⛔ PRODUÇÃO CANCELADA | ' + i + '/' + jobs.length + ' processados | ' + restantes + ' canais pulados: '
+        + jobs.slice(i).map(function(j){ return j.tag; }).join(', ') + '</div>';
+      log.scrollTop = 99999;
+      break;
+    }
     var job = jobs[i];
     document.getElementById('lote-count').textContent = (i+1) + '/' + jobs.length;
     document.getElementById('lote-fill').style.width = (i / jobs.length * 100) + '%';
@@ -6072,8 +6327,19 @@ async function produzirDataCompleta() {
   var totalTime = ((Date.now() - startTime) / 1000 / 60).toFixed(1);
   log.innerHTML += '<div style="font-weight:600;margin-top:6px;border-top:1px solid var(--border);padding-top:6px">CONCLUÍDO | ' + totalTime + ' min total</div>';
   log.scrollTop = 99999;
+  var btnC = document.getElementById('btn-produzir-tudo-cancel');
+  btnC.style.display = 'none';
+  btnC.textContent = 'Cancelar';
+  btnC.style.opacity = '1';
+  btnC.disabled = false;
   document.getElementById('btn-produzir-tudo').style.display = 'inline-flex';
-  document.getElementById('btn-produzir-tudo-cancel').style.display = 'none';
+
+  if (_produzirTudoCancelled) {
+    log.innerHTML += '<div style="font-weight:600;margin-top:6px;border-top:1px solid var(--danger);padding-top:6px;color:var(--danger)">⛔ CANCELADO | ' + totalTime + ' min decorridos</div>';
+  } else {
+    log.innerHTML += '<div style="font-weight:600;margin-top:6px;border-top:1px solid var(--accent);padding-top:6px;color:var(--accent)">✅ CONCLUÍDO | ' + totalTime + ' min total</div>';
+  }
+  log.scrollTop = 99999;
   toast(_produzirTudoCancelled ? 'Produção cancelada' : 'Produção finalizada!', _produzirTudoCancelled ? 'error' : 'success');
 }
 
@@ -6571,6 +6837,184 @@ window.addEventListener('unhandledrejection', function(event) {
 carregarPipelines();
 carregarTemas().then(function(){ atualizarLoteDataSelect(); });
 document.getElementById('chat-toggle-btn').style.display = 'block';
+
+// === MONITOR ===
+var _monitorInterval = null;
+
+function startMonitorPolling() {
+  stopMonitorPolling();
+  _monitorInterval = setInterval(refreshMonitor, 5000);
+}
+
+function stopMonitorPolling() {
+  if (_monitorInterval) { clearInterval(_monitorInterval); _monitorInterval = null; }
+}
+
+function _badgeClass(active, status) {
+  if (!active) return 'badge-waiting';
+  if (status === 'error' || status === 'erro') return 'badge-error';
+  if (status === 'done' || status === 'concluido') return 'badge-done';
+  return 'badge-encoding';
+}
+
+function _badgeText(active, status) {
+  if (!active) return 'Inativo';
+  if (status === 'error' || status === 'erro') return 'Erro';
+  if (status === 'done' || status === 'concluido') return 'Concluído';
+  if (status === 'processing') return 'Processando';
+  return status || 'Ativo';
+}
+
+function _statusBadge(s) {
+  if (s === 'concluido') return '<span class="badge badge-done">OK</span>';
+  if (s === 'erro') return '<span class="badge badge-error">Erro</span>';
+  if (s === 'cancelado') return '<span class="badge badge-cancelled">Cancel</span>';
+  if (s === 'transcrevendo') return '<span class="badge badge-transcribing">Transcr.</span>';
+  if (s === 'corrigindo') return '<span class="badge badge-fixing">Corrig.</span>';
+  if (s === 'montando') return '<span class="badge badge-encoding">Montando</span>';
+  if (s === 'aguardando') return '<span class="badge badge-waiting">Aguard.</span>';
+  return '<span class="badge badge-waiting">' + (s || '--') + '</span>';
+}
+
+function _fmtTempo(seg) {
+  if (!seg || seg <= 0) return '--';
+  if (seg < 60) return Math.round(seg) + 's';
+  if (seg < 3600) return Math.floor(seg / 60) + 'm ' + Math.round(seg % 60) + 's';
+  return Math.floor(seg / 3600) + 'h ' + Math.floor((seg % 3600) / 60) + 'm';
+}
+
+async function refreshMonitor() {
+  try {
+    var res = await fetch('/api/monitor');
+    var d = await res.json();
+
+    // Uptime
+    document.getElementById('mon-uptime').textContent = 'Uptime: ' + d.uptime;
+
+    // Batch card
+    var bAtivo = d.batch && d.batch.ativo;
+    var bBadge = document.getElementById('mon-batch-badge');
+    bBadge.className = 'badge ' + (bAtivo ? 'badge-encoding' : 'badge-waiting');
+    bBadge.textContent = bAtivo ? 'Ativo' : 'Inativo';
+    var bJob = document.getElementById('mon-batch-job');
+    if (bAtivo && d.batch.jobs && d.batch.job_atual >= 0) {
+      var cj = d.batch.jobs[d.batch.job_atual];
+      bJob.textContent = cj ? (cj.etapa || cj.template_id || '') : '';
+    } else { bJob.textContent = ''; }
+
+    // Narração card
+    var nAtivo = d.narracao && d.narracao.ativo;
+    var nBadge = document.getElementById('mon-narr-badge');
+    nBadge.className = 'badge ' + _badgeClass(nAtivo, d.narracao.status);
+    nBadge.textContent = _badgeText(nAtivo, d.narracao.status);
+    document.getElementById('mon-narr-task').textContent = nAtivo ? (d.narracao.nome_saida || '') : '';
+
+    // Pipeline card
+    var pAtivo = d.pipeline && d.pipeline.ativo;
+    var pBadge = document.getElementById('mon-pipe-badge');
+    pBadge.className = 'badge ' + _badgeClass(pAtivo, d.pipeline.status);
+    pBadge.textContent = _badgeText(pAtivo, d.pipeline.status);
+    var pTask = document.getElementById('mon-pipe-task');
+    if (pAtivo && d.pipeline.etapa_atual >= 0 && d.pipeline.etapas) {
+      var et = d.pipeline.etapas[d.pipeline.etapa_atual];
+      pTask.textContent = et ? (et.nome || 'Etapa ' + (d.pipeline.etapa_atual + 1)) : '';
+    } else { pTask.textContent = ''; }
+
+    // Credits
+    var credEl = document.getElementById('mon-credits');
+    credEl.textContent = d.creditos != null ? d.creditos : '--';
+
+    // Produção Atual
+    var prodPanel = document.getElementById('mon-producao-atual');
+    if (bAtivo && d.batch.jobs) {
+      prodPanel.style.display = 'block';
+      var jobs = d.batch.jobs;
+      var done = jobs.filter(function(j){ return j.status === 'concluido'; }).length;
+      var total = jobs.length;
+      var pctGlobal = total > 0 ? Math.round(done / total * 100) : 0;
+      if (d.batch.job_atual >= 0 && d.batch.job_atual < total) {
+        var curJ = jobs[d.batch.job_atual];
+        pctGlobal = Math.round(((done + (curJ.progresso || 0) / 100) / total) * 100);
+      }
+      document.getElementById('mon-batch-fill').style.width = pctGlobal + '%';
+      document.getElementById('mon-batch-pct').textContent = pctGlobal + '%';
+      // Timer
+      if (d.batch.inicio) {
+        var elapsed = (Date.now() - new Date(d.batch.inicio).getTime()) / 1000;
+        var hh = String(Math.floor(elapsed / 3600)).padStart(2, '0');
+        var mm = String(Math.floor((elapsed % 3600) / 60)).padStart(2, '0');
+        var ss = String(Math.floor(elapsed % 60)).padStart(2, '0');
+        document.getElementById('mon-batch-timer').textContent = hh + ':' + mm + ':' + ss;
+      }
+      // Template atual
+      if (d.batch.job_atual >= 0 && d.batch.job_atual < total) {
+        var cur = jobs[d.batch.job_atual];
+        document.getElementById('mon-batch-template').textContent = 'Processando: ' + (cur.template_id || '') + ' - ' + (cur.etapa || '');
+      }
+      // Jobs table
+      var html = '';
+      for (var i = 0; i < jobs.length; i++) {
+        var j = jobs[i];
+        html += '<tr><td>' + (i + 1) + '</td><td>' + (j.template_id || '') + '</td><td>' + _statusBadge(j.status) + '</td><td>';
+        html += '<div class="progress-bar" style="height:6px"><div class="progress-fill" style="width:' + (j.progresso || 0) + '%"></div></div>';
+        html += '</td></tr>';
+      }
+      document.getElementById('mon-batch-jobs').innerHTML = html;
+    } else {
+      prodPanel.style.display = 'none';
+    }
+
+    // Estatísticas
+    var st = d.estatisticas || {};
+    document.getElementById('mon-stat-hoje').textContent = st.videos_hoje || 0;
+    document.getElementById('mon-stat-semana').textContent = st.videos_semana || 0;
+    document.getElementById('mon-stat-total').textContent = st.videos_total || 0;
+    document.getElementById('mon-stat-tempo').textContent = _fmtTempo(st.tempo_medio);
+
+    // Disco
+    var discoEl = document.getElementById('mon-disco');
+    var dHtml = '';
+    if (d.disco) {
+      var keys = Object.keys(d.disco);
+      for (var di = 0; di < keys.length; di++) {
+        var dk = keys[di];
+        var dv = d.disco[dk];
+        dHtml += '<div style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px 14px;min-width:120px">';
+        dHtml += '<div style="font-size:10px;color:var(--text-sec);margin-bottom:4px">' + dk + '</div>';
+        dHtml += '<div style="font-size:14px;font-weight:600;color:var(--text)">' + (dv.humano || '?') + '</div>';
+        dHtml += '</div>';
+      }
+    }
+    discoEl.innerHTML = dHtml;
+
+    // Últimos 10
+    var ultimos = d.ultimos || [];
+    var uBody = document.getElementById('mon-ultimos-tbody');
+    var uEmpty = document.getElementById('mon-ultimos-empty');
+    if (ultimos.length === 0) {
+      uBody.innerHTML = '';
+      uEmpty.style.display = 'block';
+    } else {
+      uEmpty.style.display = 'none';
+      var uHtml = '';
+      for (var ui = 0; ui < ultimos.length; ui++) {
+        var u = ultimos[ui];
+        var dataStr = u.data ? new Date(u.data).toLocaleString('pt-BR') : '--';
+        uHtml += '<tr>';
+        uHtml += '<td>' + dataStr + '</td>';
+        uHtml += '<td><span class="card-tag">' + (u.tag || '--') + '</span></td>';
+        uHtml += '<td>' + (u.nome || u.template_id || '--') + '</td>';
+        uHtml += '<td>' + _fmtTempo(u.duracao_producao) + '</td>';
+        uHtml += '<td>' + _statusBadge(u.status) + '</td>';
+        uHtml += '</tr>';
+      }
+      uBody.innerHTML = uHtml;
+    }
+  } catch (e) {
+    // Silently ignore fetch errors during polling
+  }
+}
+
 </script>
 </body>
 </html>"""

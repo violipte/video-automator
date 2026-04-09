@@ -13,6 +13,20 @@ BASE_DIR = Path(__file__).parent
 NARRACOES_DIR = BASE_DIR / "narracoes"
 NARRACOES_DIR.mkdir(exist_ok=True)
 
+
+def _output_path_com_data(output_dir: Path, nome: str) -> str:
+    """Cria subpasta por data e retorna path. Nome: 'TAG DD-MM' → '2026-MM-DD/TAG DD-MM.mp3'"""
+    import re
+    from datetime import datetime as dt
+    match = re.search(r'(\d{2})-(\d{2})$', nome)
+    if match:
+        dd, mm = match.group(1), match.group(2)
+        ano = dt.now().strftime("%Y")
+        subpasta = output_dir / f"{ano}-{mm}-{dd}"
+        subpasta.mkdir(parents=True, exist_ok=True)
+        return str(subpasta / f"{nome}.mp3")
+    return str(output_dir / f"{nome}.mp3")
+
 API_BASE = "https://api.ai33.pro"
 
 
@@ -456,7 +470,7 @@ def poll_narracao() -> dict:
                         chunk_paths.append(chunk_path)
 
                     # Concatenar
-                    destino = str(output_dir / f"{nome}.mp3")
+                    destino = _output_path_com_data(output_dir, nome)
                     _concatenar_audios(chunk_paths, destino)
 
                     # Limpar chunks temporários
