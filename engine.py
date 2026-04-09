@@ -301,6 +301,15 @@ class VideoEngine:
                 inputs.extend(["-stream_loop", "-1", "-i", caminho])
                 input_idx += 1
 
+        # Moldura (imagem estática como overlay permanente)
+        moldura = t.get("moldura", {})
+        idx_moldura = None
+        moldura_path = moldura.get("arquivo", "")
+        if moldura_path and Path(moldura_path).exists():
+            idx_moldura = input_idx
+            inputs.extend(["-loop", "1", "-t", f"{self.duracao_total:.2f}", "-i", moldura_path])
+            input_idx += 1
+
         # CTA overlay (fundo verde)
         cta = t.get("cta", {})
         idx_cta = None
@@ -470,6 +479,30 @@ class VideoEngine:
                 f"[{ultimo_video}]ass='{ass_escapado}'[subtitled]"
             )
             ultimo_video = "subtitled"
+
+        # Moldura (imagem estática overlay - fica permanentemente por cima)
+        if idx_moldura is not None and moldura:
+            moldura_tipo = moldura.get("tipo", "chromakey")
+            moldura_opac = moldura.get("opacidade", 1.0)
+
+            if moldura_tipo == "alpha":
+                # PNG com transparência
+                filtros.append(
+                    f"[{idx_moldura}:v]scale={w}:{h},format=yuva420p,"
+                    f"colorchannelmixer=aa={moldura_opac}[moldura]"
+                )
+            else:
+                # Chroma key (fundo verde)
+                filtros.append(
+                    f"[{idx_moldura}:v]scale={w}:{h},"
+                    f"chromakey=0x00FF00:0.2:0.1,format=yuva420p,"
+                    f"colorchannelmixer=aa={moldura_opac}[moldura]"
+                )
+
+            filtros.append(
+                f"[{ultimo_video}][moldura]overlay=0:0,format=yuv420p[with_moldura]"
+            )
+            ultimo_video = "with_moldura"
 
         # CTA overlay (chroma key verde → transparente, aparece em intervalos)
         if idx_cta is not None and cta:

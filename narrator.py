@@ -25,6 +25,33 @@ def _headers(api_key: str) -> dict:
 
 # === VOZES ===
 
+def listar_vozes_elevenlabs_shared(api_key: str) -> list:
+    """Lista vozes compartilhadas (Voice Library) do ElevenLabs."""
+    try:
+        resp = httpx.get(
+            f"{API_BASE}/v1/shared-voices?page_size=100",
+            headers={"xi-api-key": api_key},
+            timeout=15.0,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        vozes = data.get("voices", [])
+        return [
+            {
+                "voice_id": v.get("voice_id", ""),
+                "name": v.get("name", ""),
+                "labels": v.get("labels", {}),
+                "preview_url": v.get("preview_url", ""),
+                "category": "shared",
+                "bookmarked": False,
+                "provider": "elevenlabs_shared",
+            }
+            for v in vozes
+        ]
+    except Exception as e:
+        return [{"error": str(e)}]
+
+
 def listar_vozes_elevenlabs(api_key: str) -> list:
     """Lista vozes do ElevenLabs. Marca favoritos/bookmarked."""
     try:
@@ -293,6 +320,7 @@ def poll_narracao() -> dict:
 
         estado_narracao["audio_url"] = audio_url
         estado_narracao["srt_url"] = srt_url
+        estado_narracao["credit_cost"] = task.get("credit_cost", 0)
         estado_narracao["status"] = "done"
         estado_narracao["progresso"] = 100
         estado_narracao["ativo"] = False

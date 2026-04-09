@@ -602,6 +602,116 @@ async def executar_pipeline(pipeline_id: str, request: Request):
     return {"ok": True}
 
 
+@app.post("/api/pipelines/testar-etapa")
+async def testar_etapa(request: Request):
+    """Testa uma etapa individual com entrada de teste."""
+    dados = await request.json()
+    etapa = dados.get("etapa", {})
+    entrada = dados.get("entrada", "")
+
+    variaveis = {
+        "entrada": entrada,
+        "tema": entrada,
+        "saida_anterior": entrada,
+        "roteiro_atual": entrada,
+        "canal": "Teste",
+        "data": "",
+        "titulo": "",
+        "thumb": "",
+    }
+
+    tipo = etapa.get("tipo", "llm")
+    try:
+        if tipo == "texto":
+            resultado = scriptwriter._substituir_variaveis(etapa.get("prompt", ""), variaveis)
+        elif tipo == "code":
+            code = scriptwriter._substituir_variaveis(etapa.get("prompt", ""), variaveis)
+            import re as _re
+            exec_globals = {
+                "entrada": entrada, "saida_anterior": entrada,
+                "roteiro_atual": entrada, "variaveis": variaveis,
+                "resultado": "", "len": len, "str": str, "int": int,
+                "float": float, "re": _re,
+            }
+            exec(code, exec_globals)
+            resultado = str(exec_globals.get("resultado", ""))
+        else:
+            cred_id = etapa.get("credencial", "")
+            cred = scriptwriter.obter_credencial(cred_id)
+            if not cred:
+                return {"ok": False, "erro": f"Credencial não encontrada: {cred_id}"}
+            provedor = cred.get("provedor", "claude")
+            api_key = cred.get("api_key", "")
+            modelo = etapa.get("modelo", "")
+            system_msg = scriptwriter._substituir_variaveis(etapa.get("system_message", ""), variaveis)
+            user_msg = scriptwriter._substituir_variaveis(etapa.get("prompt", ""), variaveis)
+            fn = scriptwriter.CHAMADAS.get(provedor)
+            if not fn:
+                return {"ok": False, "erro": f"Provedor desconhecido: {provedor}"}
+            resultado = fn(system_msg, user_msg, api_key, modelo)
+
+        return {"ok": True, "resultado": resultado}
+    except Exception as e:
+        return {"ok": False, "erro": str(e)}
+
+
+@app.post("/api/pipelines/testar-cadeia")
+async def testar_cadeia(request: Request):
+    """Testa uma cadeia de etapas sequencialmente."""
+    dados = await request.json()
+    etapas = dados.get("etapas", [])
+    entrada = dados.get("entrada", "")
+
+    variaveis = {
+        "entrada": entrada, "tema": entrada,
+        "saida_anterior": entrada, "roteiro_atual": entrada,
+        "canal": "", "data": "", "titulo": "", "thumb": "",
+    }
+
+    resultados = []
+    try:
+        for i, etapa in enumerate(etapas):
+            tipo = etapa.get("tipo", "llm")
+            resultado = ""
+            status = "ok"
+            try:
+                if tipo == "texto":
+                    resultado = scriptwriter._substituir_variaveis(etapa.get("prompt", ""), variaveis)
+                elif tipo == "code":
+                    code = scriptwriter._substituir_variaveis(etapa.get("prompt", ""), variaveis)
+                    import re as _re
+                    exec_globals = {
+                        "entrada": variaveis["entrada"], "saida_anterior": variaveis["saida_anterior"],
+                        "roteiro_atual": variaveis["roteiro_atual"], "variaveis": variaveis,
+                        "resultado": "", "len": len, "str": str, "int": int, "float": float, "re": _re,
+                    }
+                    exec(code, exec_globals)
+                    resultado = str(exec_globals.get("resultado", ""))
+                else:
+                    cred = scriptwriter.obter_credencial(etapa.get("credencial", ""))
+                    if not cred:
+                        raise ValueError(f"Credencial não encontrada")
+                    fn = scriptwriter.CHAMADAS.get(cred["provedor"])
+                    if not fn:
+                        raise ValueError(f"Provedor desconhecido: {cred['provedor']}")
+                    system_msg = scriptwriter._substituir_variaveis(etapa.get("system_message", ""), variaveis)
+                    user_msg = scriptwriter._substituir_variaveis(etapa.get("prompt", ""), variaveis)
+                    resultado = fn(system_msg, user_msg, cred["api_key"], etapa.get("modelo", ""))
+
+                variaveis["saida_anterior"] = resultado
+                variaveis[f"saida_etapa_{i+1}"] = resultado
+                variaveis["roteiro_atual"] = resultado
+            except Exception as e:
+                resultado = f"ERRO: {e}"
+                status = "erro"
+
+            resultados.append({"resultado": resultado, "status": status})
+
+        return {"ok": True, "resultados": resultados}
+    except Exception as e:
+        return {"ok": False, "erro": str(e)}
+
+
 @app.get("/api/pipelines/execucao")
 def status_execucao():
     return scriptwriter.estado_execucao
@@ -765,6 +875,7 @@ def listar_vozes():
     vozes = []
     vozes.extend(narrator.listar_vozes_clonadas(api_key))
     vozes.extend(narrator.listar_vozes_elevenlabs(api_key))
+    vozes.extend(narrator.listar_vozes_elevenlabs_shared(api_key))
     vozes.extend(narrator.listar_vozes_minimax(api_key))
     # Filtrar erros
     return [v for v in vozes if "error" not in v]
@@ -1145,7 +1256,19 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
     <span>Produção automatizada</span>
   </div>
   <div class="sidebar-nav">
-    <a data-page="templates" class="active" onclick="showPage('templates')">
+    <a data-page="temas" class="active" onclick="showPage('temas')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
+      Temas
+    </a>
+    <a data-page="roteiros" onclick="showPage('roteiros')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14,2 14,8 20,8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+      Roteiros
+    </a>
+    <a data-page="narracao" onclick="showPage('narracao')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+      Narração
+    </a>
+    <a data-page="templates" onclick="showPage('templates')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
       Templates
     </a>
@@ -1153,25 +1276,9 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5,3 19,12 5,21"/></svg>
       Produção
     </a>
-    <a data-page="rules" onclick="showPage('rules')">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
-      Regras
-    </a>
     <a data-page="historico" onclick="showPage('historico')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12,6 12,12 16,14"/></svg>
       Histórico
-    </a>
-    <a data-page="narracao" onclick="showPage('narracao')">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
-      Narração
-    </a>
-    <a data-page="temas" onclick="showPage('temas')">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
-      Temas
-    </a>
-    <a data-page="roteiros" onclick="showPage('roteiros')">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14,2 14,8 20,8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
-      Roteiros
     </a>
     <a data-page="config" onclick="showPage('config')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
@@ -1184,7 +1291,7 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
 <div class="main">
 
   <!-- PAGE: TEMPLATES -->
-  <div id="page-templates" class="page active">
+  <div id="page-templates" class="page">
     <div class="page-header">
       <h2>Templates</h2>
       <button class="btn btn-primary" onclick="abrirEditor()">+ Novo Template</button>
@@ -1271,10 +1378,20 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
 
     <!-- GERADOR INDIVIDUAL (compacto) -->
     <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:20px">
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+        <label style="font-size:11px;color:var(--text-sec)">Puxar roteiro:</label>
+        <select id="narr-pull-data" style="font-size:11px;padding:3px 6px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text)">
+          <option value="">Data...</option>
+        </select>
+        <select id="narr-pull-canal" style="font-size:11px;padding:3px 6px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text)">
+          <option value="">Canal...</option>
+        </select>
+        <button class="btn btn-secondary btn-sm" style="font-size:10px;padding:2px 8px" onclick="puxarRoteiroNarracao()">Puxar</button>
+      </div>
       <div style="display:grid;grid-template-columns:1fr 200px 200px auto;gap:12px;align-items:end">
         <div class="form-group" style="margin:0">
           <label style="font-size:11px">Texto</label>
-          <textarea id="narr-texto" rows="3" placeholder="Cole o roteiro..." style="font-size:12px" oninput="document.getElementById('narr-char-count').textContent=this.value.length+' chars'"></textarea>
+          <textarea id="narr-texto" rows="3" placeholder="Cole o roteiro ou puxe de uma célula..." style="font-size:12px" oninput="document.getElementById('narr-char-count').textContent=this.value.length+' chars'"></textarea>
           <span id="narr-char-count" style="font-size:10px;color:var(--text-sec)">0 chars</span>
         </div>
         <div>
@@ -1285,6 +1402,7 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
               <option value="minimax_clone">Minimax (Clonadas)</option>
               <option value="minimax">Minimax (Banco)</option>
               <option value="elevenlabs">ElevenLabs</option>
+              <option value="elevenlabs_shared">ElevenLabs (Library)</option>
               <option value="elevenlabs_fav">ElevenLabs (Fav)</option>
             </select>
           </div>
@@ -1344,12 +1462,14 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
             <button class="btn btn-secondary btn-sm" style="font-size:10px;padding:2px 5px" onclick="abrirBrowser('narr-batch-pasta','folder')">...</button>
           </div>
         </div>
+        <button class="btn btn-secondary btn-sm" onclick="puxarRoteirosBatch()" style="font-size:11px">Puxar Roteiros</button>
         <button class="btn btn-primary btn-sm" onclick="iniciarBatchNarracao()" style="font-size:11px">Gerar Todos</button>
       </div>
       <div id="narr-batch-cards" class="cards-grid"></div>
       <div id="narr-batch-status" style="display:none;margin-top:8px;background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:10px">
         <div style="display:flex;align-items:center;gap:12px">
           <div class="progress-bar" style="flex:1;height:6px"><div id="narr-batch-fill" class="progress-fill" style="width:0%"></div></div>
+          <span id="narr-batch-timer-total" style="font-size:12px;color:var(--text);font-family:monospace;font-weight:600">00:00</span>
           <span id="narr-batch-count" style="font-size:11px;color:var(--accent)">0/0</span>
         </div>
         <div id="narr-batch-log" style="margin-top:6px;font-size:10px;color:var(--text-sec);max-height:80px;overflow-y:auto"></div>
@@ -1358,12 +1478,13 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
   </div>
 
   <!-- PAGE: TEMAS -->
-  <div id="page-temas" class="page">
+  <div id="page-temas" class="page active">
     <div class="page-header">
       <h2>Temas</h2>
       <div style="display:flex;gap:8px">
         <button class="btn btn-secondary btn-sm" onclick="adicionarColunaTemas()">+ Coluna</button>
         <button class="btn btn-primary btn-sm" onclick="adicionarLinhaTemas()">+ Linha</button>
+        <button class="btn btn-secondary btn-sm" onclick="undoTemas()" id="btn-undo-temas" style="display:none">Desfazer</button>
         <button class="btn btn-secondary btn-sm" onclick="syncTemasSupabase()">Sync Supabase</button>
       </div>
     </div>
@@ -1391,25 +1512,36 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
             <label>Tema do Vídeo</label>
             <textarea id="cel-tema" rows="2" placeholder="Ex: Someone from the past is returning with a request..." style="font-size:12px;color:var(--accent)"></textarea>
             <div style="display:flex;justify-content:space-between;align-items:center;margin-top:2px">
-              <span style="font-size:10px;color:var(--text-sec)">Gancho central — usado pelo roteirista como input</span>
-              <span class="case-btns" data-target="cel-tema"></span>
+              <span style="font-size:10px;color:var(--text-sec)">Gancho central</span>
+              <div style="display:flex;gap:4px;align-items:center"><span class="case-btns" data-target="cel-tema"></span>
+              <button type="button" class="btn btn-secondary btn-sm" style="font-size:9px;padding:1px 6px" onclick="abrirReplicar('tema')">Replicar &rarr;</button></div>
             </div>
           </div>
           <div class="form-group">
             <label>Título do Vídeo</label>
             <textarea id="cel-titulo" rows="2" placeholder="Título completo para o YouTube..."></textarea>
-            <div style="text-align:right;margin-top:2px"><span class="case-btns" data-target="cel-titulo"></span></div>
+            <div style="display:flex;justify-content:flex-end;gap:4px;margin-top:2px"><span class="case-btns" data-target="cel-titulo"></span>
+            <button type="button" class="btn btn-secondary btn-sm" style="font-size:9px;padding:1px 6px" onclick="abrirReplicar('titulo')">Replicar &rarr;</button></div>
           </div>
           <div class="form-group">
             <label>Texto da Thumbnail</label>
             <textarea id="cel-thumb" rows="1" placeholder="Texto curto da thumb..."></textarea>
-            <div style="text-align:right;margin-top:2px"><span class="case-btns" data-target="cel-thumb"></span></div>
+            <div style="display:flex;justify-content:flex-end;gap:4px;margin-top:2px"><span class="case-btns" data-target="cel-thumb"></span>
+            <button type="button" class="btn btn-secondary btn-sm" style="font-size:9px;padding:1px 6px" onclick="abrirReplicar('thumb')">Replicar &rarr;</button></div>
           </div>
           <div class="form-group">
             <label>Pipeline (para geração)</label>
             <select id="cel-pipeline">
               <option value="">Nenhuma</option>
             </select>
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Roteiro Gerado</label>
+          <textarea id="cel-roteiro" rows="6" placeholder="O roteiro aparecerá aqui após gerar..." style="font-size:11px;background:var(--bg)"></textarea>
+          <div style="display:flex;justify-content:space-between;margin-top:2px">
+            <span id="cel-roteiro-chars" style="font-size:10px;color:var(--text-sec)">0 chars</span>
+            <button type="button" class="btn btn-secondary btn-sm" style="font-size:9px" onclick="navigator.clipboard.writeText(document.getElementById('cel-roteiro').value);toast('Copiado!','success')">Copiar Roteiro</button>
           </div>
         </div>
         <!-- Status de geração -->
@@ -1421,11 +1553,48 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
           <div id="cel-gen-etapas" style="font-size:10px;color:var(--text-sec);margin-top:4px"></div>
         </div>
         <div class="modal-footer">
-          <button class="btn btn-secondary btn-sm" onclick="copiarCelula()">Copiar Tudo</button>
+          <button class="btn btn-secondary btn-sm" onclick="abrirReplicarTudo()">Replicar Tudo</button>
           <button class="btn btn-primary btn-sm" onclick="gerarRoteiroCelula()" id="cel-gerar-btn">Gerar Roteiro</button>
           <div style="flex:1"></div>
           <button class="btn btn-secondary" onclick="fecharCelula()">Cancelar</button>
           <button class="btn btn-primary" onclick="salvarCelula()">Salvar</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- MODAL: REPLICAR PARA -->
+    <div class="modal-overlay" id="modal-replicar">
+      <div class="modal" style="max-width:420px">
+        <div class="modal-header">
+          <h3 id="replicar-title">Replicar para...</h3>
+          <button class="modal-close" onclick="document.getElementById('modal-replicar').classList.remove('active')">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="form-group">
+            <label>Conteúdo a replicar</label>
+            <textarea id="replicar-valor" rows="2" readonly style="font-size:12px;background:var(--bg);color:var(--accent)"></textarea>
+          </div>
+          <div class="form-group">
+            <label>Data de destino</label>
+            <select id="replicar-data" style="font-size:12px"></select>
+          </div>
+          <div class="form-group">
+            <label>Canais de destino</label>
+            <div id="replicar-canais" style="display:flex;flex-direction:column;gap:4px;max-height:200px;overflow-y:auto"></div>
+          </div>
+          <div class="form-group">
+            <label>Campo de destino</label>
+            <select id="replicar-campo-destino" style="font-size:12px">
+              <option value="mesmo">Mesmo campo</option>
+              <option value="tema">Tema</option>
+              <option value="titulo">Título</option>
+              <option value="thumb">Thumbnail</option>
+            </select>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary btn-sm" onclick="replicarTodos()">Replicar para Todos</button>
+          <button class="btn btn-primary btn-sm" onclick="replicarSelecionados()">Replicar Selecionados</button>
         </div>
       </div>
     </div>
@@ -1675,6 +1844,33 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
         <button class="btn btn-secondary btn-sm" onclick="previewOverlay()" style="margin-top:8px" id="btn-overlay-preview">Visualizar Overlay</button>
 
         <div style="margin-top:24px;padding-top:16px;border-top:1px solid var(--border)">
+          <h4 style="font-size:14px;margin-bottom:12px">Moldura (Frame Overlay)</h4>
+          <div class="form-group">
+            <label>Arquivo da Moldura</label>
+            <div class="input-with-btn">
+              <input type="text" id="ed-moldura-arquivo" placeholder="Caminho da imagem (PNG ou fundo verde)...">
+              <button class="btn btn-secondary btn-sm" onclick="abrirBrowser('ed-moldura-arquivo','file')">Buscar</button>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>Tipo</label>
+              <select id="ed-moldura-tipo">
+                <option value="chromakey">Chroma Key (fundo verde)</option>
+                <option value="alpha">PNG com transparência</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Opacidade</label>
+              <div class="slider-group">
+                <input type="range" id="ed-moldura-opacidade" min="0.1" max="1.0" step="0.05" value="1.0" oninput="document.getElementById('moldura-op-val').textContent=Math.round(this.value*100)+'%'">
+                <span class="slider-val" id="moldura-op-val">100%</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div style="margin-top:24px;padding-top:16px;border-top:1px solid var(--border)">
           <h4 style="font-size:14px;margin-bottom:12px">CTA (Call to Action)</h4>
           <div class="form-group">
             <label>Arquivo CTA (vídeo com fundo verde)</label>
@@ -1822,6 +2018,43 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
 
       <!-- TAB: AUDIO -->
       <div class="tab-content" id="tab-audio">
+        <div style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:12px;margin-bottom:16px">
+          <div style="font-size:12px;font-weight:600;margin-bottom:8px;color:var(--info)">Voz de Narração (TTS)</div>
+          <div class="form-row">
+            <div class="form-group" style="margin:0">
+              <label>Provedor</label>
+              <select id="ed-voz-provider" onchange="filtrarVozesTemplate()" style="font-size:12px">
+                <option value="all">Todos</option>
+                <option value="minimax_clone">Minimax (Clonadas)</option>
+                <option value="minimax">Minimax (Banco)</option>
+                <option value="elevenlabs">ElevenLabs</option>
+              </select>
+            </div>
+            <div class="form-group" style="margin:0">
+              <label>Voz</label>
+              <select id="ed-voz-id" style="font-size:12px">
+                <option value="">Nenhuma (manual)</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-row" style="margin-top:8px">
+            <div class="form-group" style="margin:0">
+              <label>Velocidade</label>
+              <div class="slider-group">
+                <input type="range" id="ed-voz-speed" min="0.5" max="2.0" step="0.05" value="1.0" oninput="document.getElementById('voz-speed-val').textContent=this.value+'x'">
+                <span class="slider-val" id="voz-speed-val">1.0x</span>
+              </div>
+            </div>
+            <div class="form-group" style="margin:0">
+              <label>Tom (pitch)</label>
+              <div class="slider-group">
+                <input type="range" id="ed-voz-pitch" min="-6" max="6" step="1" value="0" oninput="document.getElementById('voz-pitch-val').textContent=this.value">
+                <span class="slider-val" id="voz-pitch-val">0</span>
+              </div>
+            </div>
+          </div>
+          <div style="font-size:10px;color:var(--text-sec);margin-top:4px">Voz e ajustes usados na narração automática</div>
+        </div>
         <div class="form-group">
           <label>Trilha Sonora</label>
           <div class="input-with-btn">
@@ -2023,9 +2256,13 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
       <div class="form-row">
         <div class="form-group">
           <label>Nome da Pipeline</label>
-          <input type="text" id="pip-nome" placeholder="Ex: Arcturiano Elder EN">
+          <input type="text" id="pip-nome" placeholder="Ex: Whispers from Arcturus">
         </div>
-        <div class="form-group">
+        <div class="form-group" style="max-width:100px">
+          <label>Tag</label>
+          <input type="text" id="pip-tag" placeholder="EN" style="text-transform:uppercase">
+        </div>
+        <div class="form-group" style="max-width:120px">
           <label>Idioma</label>
           <select id="pip-idioma">
             <option value="en">Inglês</option>
@@ -2080,13 +2317,62 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
       <button class="modal-close" onclick="document.getElementById('modal-exec-input').classList.remove('active')">&times;</button>
     </div>
     <div class="modal-body">
+      <div class="form-row" style="margin-bottom:12px">
+        <div class="form-group" style="margin:0">
+          <label>Data</label>
+          <select id="exec-data" onchange="atualizarExecPreview()" style="font-size:12px">
+            <option value="">Selecione...</option>
+          </select>
+        </div>
+        <div class="form-group" style="margin:0">
+          <label>Canal</label>
+          <select id="exec-canal" onchange="atualizarExecPreview()" style="font-size:12px">
+            <option value="">Selecione...</option>
+          </select>
+        </div>
+      </div>
       <div class="form-group">
-        <label>Tema / Entrada</label>
-        <textarea id="exec-entrada" rows="4" placeholder="Descreva o tema do roteiro..."></textarea>
+        <label>Tema (puxado da célula)</label>
+        <textarea id="exec-entrada" rows="3" style="font-size:12px;color:var(--accent)"></textarea>
+        <div style="font-size:10px;color:var(--text-sec);margin-top:2px">Editável — ou preencha manualmente se não tiver no grid</div>
       </div>
     </div>
     <div class="modal-footer">
       <button class="btn btn-primary" onclick="executarPipeline()">Gerar Roteiro</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL: INPUT DE TESTE -->
+<div class="modal-overlay" id="modal-test-input">
+  <div class="modal" style="max-width:450px">
+    <div class="modal-header">
+      <h3>Entrada de Teste</h3>
+      <button class="modal-close" onclick="document.getElementById('modal-test-input').classList.remove('active')">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-row" style="margin-bottom:8px">
+        <div class="form-group" style="margin:0">
+          <label style="font-size:11px">Data</label>
+          <select id="test-input-data" onchange="atualizarTestInput()" style="font-size:12px">
+            <option value="">--</option>
+          </select>
+        </div>
+        <div class="form-group" style="margin:0">
+          <label style="font-size:11px">Canal</label>
+          <select id="test-input-canal" onchange="atualizarTestInput()" style="font-size:12px">
+            <option value="">--</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-group">
+        <label style="font-size:11px">Tema / Entrada</label>
+        <textarea id="test-input-texto" rows="4" placeholder="Puxe de uma célula acima ou digite manualmente..." style="font-size:12px"></textarea>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="document.getElementById('modal-test-input').classList.remove('active');if(_testInputResolve){_testInputResolve(null);_testInputResolve=null;}">Cancelar</button>
+      <button class="btn btn-primary" onclick="_resolverTestInput()">Usar</button>
     </div>
   </div>
 </div>
@@ -2203,6 +2489,19 @@ async function abrirEditor(id) {
     _setAjuste('saturacao', aj.saturacao || 1.0);
     _setAjuste('brilho', aj.brilho || t.ajuste_brilho || 0);
     _setAjuste('vinheta', aj.vinheta || 0);
+    // Voz
+    var voz = t.narracao_voz || {};
+    if (voz.provider) {
+      document.getElementById('ed-voz-provider').value = voz.provider;
+    }
+    filtrarVozesTemplate();
+    if (voz.voice_id) {
+      setTimeout(function(){ document.getElementById('ed-voz-id').value = voz.voice_id; }, 200);
+    }
+    document.getElementById('ed-voz-speed').value = voz.speed || 1.0;
+    document.getElementById('voz-speed-val').textContent = (voz.speed || 1.0) + 'x';
+    document.getElementById('ed-voz-pitch').value = voz.pitch || 0;
+    document.getElementById('voz-pitch-val').textContent = voz.pitch || 0;
     document.getElementById('ed-trilha').value = t.trilha_sonora || '';
     document.getElementById('ed-trilha-vol').value = t.trilha_volume || 0.15;
     document.getElementById('trilha-vol-val').textContent = Math.round((t.trilha_volume||0.15)*100)+'%';
@@ -2246,6 +2545,13 @@ async function abrirEditor(id) {
 
     // CTA
     var cta = t.cta || {};
+    // Moldura
+    var moldura = t.moldura || {};
+    document.getElementById('ed-moldura-arquivo').value = moldura.arquivo || '';
+    document.getElementById('ed-moldura-tipo').value = moldura.tipo || 'chromakey';
+    document.getElementById('ed-moldura-opacidade').value = moldura.opacidade || 1.0;
+    document.getElementById('moldura-op-val').textContent = Math.round((moldura.opacidade || 1.0) * 100) + '%';
+
     document.getElementById('ed-cta-arquivo').value = cta.arquivo || '';
     document.getElementById('ed-cta-inicio').value = cta.inicio || 30;
     document.getElementById('ed-cta-duracao').value = cta.duracao || 8;
@@ -2262,6 +2568,12 @@ async function abrirEditor(id) {
     document.getElementById('zoom-val').textContent = '1.04';
     document.getElementById('ed-efeito-zoom').checked = true;
     resetAjustes();
+    document.getElementById('ed-voz-provider').value = 'all';
+    document.getElementById('ed-voz-id').innerHTML = '<option value="">Nenhuma (manual)</option>';
+    document.getElementById('ed-voz-speed').value = 1.0;
+    document.getElementById('voz-speed-val').textContent = '1.0x';
+    document.getElementById('ed-voz-pitch').value = 0;
+    document.getElementById('voz-pitch-val').textContent = '0';
     document.getElementById('ed-trilha-vol').value = 0.15;
     document.getElementById('trilha-vol-val').textContent = '15%';
     document.getElementById('ed-narracao-vol').value = 1.0;
@@ -2293,6 +2605,10 @@ async function abrirEditor(id) {
     document.getElementById('ed-regras-capitalizar').checked = true;
     document.getElementById('ed-regras-remover').value = '';
     renderOverlays([]);
+    document.getElementById('ed-moldura-arquivo').value = '';
+    document.getElementById('ed-moldura-tipo').value = 'chromakey';
+    document.getElementById('ed-moldura-opacidade').value = 1.0;
+    document.getElementById('moldura-op-val').textContent = '100%';
     document.getElementById('ed-cta-arquivo').value = '';
     document.getElementById('ed-cta-inicio').value = 30;
     document.getElementById('ed-cta-duracao').value = 8;
@@ -2424,6 +2740,12 @@ async function salvarTemplate() {
       brilho: parseFloat(document.getElementById('ed-brilho').value),
       vinheta: parseFloat(document.getElementById('ed-vinheta').value),
     },
+    narracao_voz: {
+      voice_id: document.getElementById('ed-voz-id').value,
+      provider: document.getElementById('ed-voz-provider').value,
+      speed: parseFloat(document.getElementById('ed-voz-speed').value) || 1.0,
+      pitch: parseInt(document.getElementById('ed-voz-pitch').value) || 0,
+    },
     trilha_sonora: document.getElementById('ed-trilha').value,
     trilha_volume: parseFloat(document.getElementById('ed-trilha-vol').value),
     narracao_volume: parseFloat(document.getElementById('ed-narracao-vol').value),
@@ -2447,6 +2769,11 @@ async function salvarTemplate() {
     },
     pasta_saida: document.getElementById('ed-pasta-saida').value,
     formato_nome_saida: document.getElementById('ed-formato-nome').value,
+    moldura: {
+      arquivo: document.getElementById('ed-moldura-arquivo').value,
+      tipo: document.getElementById('ed-moldura-tipo').value,
+      opacidade: parseFloat(document.getElementById('ed-moldura-opacidade').value) || 1.0,
+    },
     cta: {
       arquivo: document.getElementById('ed-cta-arquivo').value,
       inicio: parseInt(document.getElementById('ed-cta-inicio').value) || 30,
@@ -2481,7 +2808,8 @@ async function deletarTemplate(id) {
 async function duplicarTemplate(id) {
   const t = templates.find(x => x.id === id);
   if (!t) return;
-  const novo = {...t, id: t.id + '-copia', nome: t.nome + ' (cópia)', tag: t.tag + '2'};
+  const novoId = t.tag.toLowerCase().replace(/[^a-z0-9]/g,'-') + '-' + Math.random().toString(36).substring(2,6);
+  const novo = {...t, id: novoId, nome: t.nome + ' (cópia)', tag: t.tag + '2'};
   const res = await fetch('/api/templates', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(novo) });
   if (res.ok) { toast('Template duplicado', 'success'); carregarTemplates(); }
 }
@@ -2922,6 +3250,18 @@ function selecionarArquivo(path) {
 // === BATCH PRODUCTION ===
 var _batchMp3Values = {};  // Preserva caminhos MP3 entre recarregamentos
 
+var _batchDragIdx = -1;
+function _batchDragStart(e) { _batchDragIdx = parseInt(e.target.closest('tr').dataset.bidx); e.dataTransfer.effectAllowed = 'move'; }
+function _batchDrop(e) {
+  var targetIdx = parseInt(e.target.closest('tr').dataset.bidx);
+  if (_batchDragIdx < 0 || _batchDragIdx === targetIdx) return;
+  var t = templates.splice(_batchDragIdx, 1)[0];
+  templates.splice(targetIdx, 0, t);
+  localStorage.setItem('batchOrdem', JSON.stringify(templates.map(function(x){ return x.id; })));
+  _batchDragIdx = -1;
+  carregarBatch();
+}
+
 async function carregarBatch() {
   // Salvar valores atuais antes de reconstruir
   document.querySelectorAll('.batch-mp3').forEach(function(inp) {
@@ -2936,8 +3276,18 @@ async function carregarBatch() {
   if (!templates.length) { tbody.innerHTML = ''; empty.style.display = 'block'; return; }
   empty.style.display = 'none';
 
+  // Ordenar pela ordem salva
+  var batchOrdem = JSON.parse(localStorage.getItem('batchOrdem') || '[]');
+  if (batchOrdem.length) {
+    templates.sort(function(a, b) {
+      var ia = batchOrdem.indexOf(a.id), ib = batchOrdem.indexOf(b.id);
+      if (ia < 0) ia = 999; if (ib < 0) ib = 999;
+      return ia - ib;
+    });
+  }
+
   tbody.innerHTML = templates.map((t, i) =>
-    '<tr data-tid="' + t.id + '">'
+    '<tr data-tid="' + t.id + '" data-bidx="' + i + '" draggable="true" ondragstart="_batchDragStart(event)" ondragover="event.preventDefault()" ondrop="_batchDrop(event)" style="cursor:grab">'
     + '<td>' + (i+1) + '</td>'
     + '<td><strong>' + (t.tag||t.id) + '</strong><br><span style="color:var(--text-sec);font-size:12px">' + (t.nome||'') + '</span></td>'
     + '<td><div class="input-with-btn">'
@@ -3270,7 +3620,7 @@ function renderPipelines() {
     return '<div class="card" onclick="editarPipeline(\\'' + p.id + '\\')">'
       + '<div class="card-header">'
       + '<span class="card-title">' + (p.nome || 'Sem nome') + '</span>'
-      + '<span class="card-tag">' + (p.idioma || 'en').toUpperCase() + '</span>'
+      + '<span class="card-tag">' + (p.tag || p.idioma || 'en').toUpperCase() + '</span>'
       + '</div>'
       + '<div class="card-info">'
       + nEtapas + ' etapa(s) | Modelos: ' + modelosUniq + '</div>'
@@ -3292,16 +3642,23 @@ function _etapaHTML(i, etapa) {
   div.style.cssText = 'background:var(--bg);border:1px solid var(--border);border-left:3px solid ' + (tipoColors[tipo]||'var(--border)') + ';border-radius:6px;padding:12px;margin-bottom:8px';
   div.dataset.idx = i;
 
-  // Header com nome + tipo + X
-  var header = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">'
+  // Header com nome + tipo + collapse + test + X
+  var header = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px" class="pip-et-header">'
     + '<div style="display:flex;align-items:center;gap:8px">'
+    + '<button type="button" class="pip-et-toggle" style="background:none;border:none;color:var(--text-sec);cursor:pointer;font-size:14px;padding:0 4px" onclick="toggleEtapa(this)">&#9660;</button>'
     + '<strong style="font-size:13px">Etapa ' + (i+1) + '</strong>'
     + '<select class="pip-et-tipo" style="font-size:10px;padding:2px 6px;background:var(--panel);border:1px solid var(--border);border-radius:4px;color:' + (tipoColors[tipo]||'var(--text)') + ';font-weight:600" onchange="mudarTipoEtapa(this)">'
     + '<option value="llm"' + (tipo==='llm'?' selected':'') + '>LLM</option>'
     + '<option value="code"' + (tipo==='code'?' selected':'') + '>Code</option>'
     + '<option value="texto"' + (tipo==='texto'?' selected':'') + '>Texto Fixo</option>'
-    + '</select></div>'
-    + '<button class="btn btn-danger btn-sm" type="button" style="padding:2px 8px">X</button></div>';
+    + '</select>'
+    + '<span class="pip-et-nome-preview" style="font-size:11px;color:var(--text-sec);display:none"></span>'
+    + '</div>'
+    + '<div style="display:flex;gap:4px">'
+    + '<button type="button" class="btn btn-secondary btn-sm" style="font-size:10px;padding:2px 8px" onclick="testarEtapa(this,false)">Testar</button>'
+    + '<button type="button" class="btn btn-secondary btn-sm" style="font-size:10px;padding:2px 8px;color:var(--accent)" onclick="testarEtapa(this,true)">Testar até aqui</button>'
+    + '<button class="btn btn-danger btn-sm" type="button" style="padding:2px 8px">X</button>'
+    + '</div></div>';
 
   // Nome
   var nome = '<div class="form-group" style="margin:0 0 8px"><label style="font-size:11px">Nome</label>'
@@ -3319,8 +3676,6 @@ function _etapaHTML(i, etapa) {
     + '<select class="pip-et-modelo" style="font-size:12px">'
     + _opcoesModelo(etapa.credencial, etapa.modelo)
     + '</select></div></div>'
-    + '<div class="form-group" style="margin:0 0 8px"><label style="font-size:11px">System Message</label>'
-    + '<textarea class="pip-et-system" rows="3" placeholder="Papel e instruções do agente..." style="font-size:12px">' + (etapa.system_message||'').replace(/</g,'&lt;') + '</textarea></div>'
     + '</div>';
 
   // Campo Code
@@ -3346,9 +3701,179 @@ function _etapaHTML(i, etapa) {
     + '<textarea class="pip-et-prompt" rows="4" placeholder="' + (promptPlaceholder[tipo]||'') + '" style="font-size:12px;font-family:' + (tipo==='code'?'monospace':'inherit') + '">' + (etapa.prompt||'').replace(/</g,'&lt;') + '</textarea>'
     + '</div>';
 
-  div.innerHTML = header + nome + llmFields + codeFields + textoFields + prompt;
+  // System Message (só pra LLM, aparece depois do prompt como no n8n)
+  var systemField = '<div class="pip-fields-llm-system"' + (tipo!=='llm'?' style="display:none"':'') + '>'
+    + '<div class="form-group" style="margin:8px 0 0"><label style="font-size:11px">System Message</label>'
+    + '<textarea class="pip-et-system" rows="3" placeholder="Papel e instruções do agente..." style="font-size:12px">' + (etapa.system_message||'').replace(/</g,'&lt;') + '</textarea></div>'
+    + '</div>';
+
+  // Área de resultado do teste
+  var testArea = '<div class="pip-et-test-result" style="display:none;margin-top:8px">'
+    + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">'
+    + '<label style="font-size:11px;font-weight:600;color:var(--accent)">Resultado do Teste</label>'
+    + '<div style="display:flex;gap:4px">'
+    + '<span class="pip-et-test-info" style="font-size:10px;color:var(--text-sec)"></span>'
+    + '<button type="button" class="btn btn-secondary btn-sm" style="font-size:9px;padding:1px 5px" onclick="copiarTexto(this)" data-text="">Copiar</button>'
+    + '</div></div>'
+    + '<textarea class="pip-et-test-output" readonly rows="5" style="font-size:11px;background:var(--panel);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:8px;width:100%;resize:vertical"></textarea>'
+    + '</div>';
+
+  div.innerHTML = header + '<div class="pip-et-body">' + nome + llmFields + codeFields + textoFields + prompt + systemField + testArea + '</div>';
   div.querySelector('.btn-danger').addEventListener('click', function(){ div.remove(); });
   return div;
+}
+
+function toggleEtapa(btn) {
+  var div = btn.closest('div[data-idx]');
+  var body = div.querySelector('.pip-et-body');
+  var preview = div.querySelector('.pip-et-nome-preview');
+  var nome = div.querySelector('.pip-et-nome');
+  if (body.style.display === 'none') {
+    body.style.display = '';
+    btn.innerHTML = '&#9660;';
+    if (preview) preview.style.display = 'none';
+  } else {
+    body.style.display = 'none';
+    btn.innerHTML = '&#9654;';
+    if (preview && nome) { preview.textContent = nome.value || ''; preview.style.display = 'inline'; }
+  }
+}
+
+// === INPUT DE TESTE (modal) ===
+var _testInputResolve = null;
+
+async function pedirTestInput() {
+  // Garantir que dados de Temas estejam carregados
+  if (!temasData || !temasData.linhas || !temasData.linhas.length) {
+    try {
+      var r = await fetch('/api/temas');
+      var raw = await r.json();
+      if (raw && raw.colunas) temasData = raw;
+    } catch(e) {}
+  }
+  return new Promise(function(resolve) {
+    _testInputResolve = resolve;
+    var rows = (temasData && temasData.linhas) || [];
+    var cols = (temasData && temasData.colunas) || [];
+    document.getElementById('test-input-data').innerHTML = '<option value="">--</option>'
+      + rows.map(function(r, i){ return '<option value="' + i + '">' + r.data + '</option>'; }).join('');
+    document.getElementById('test-input-canal').innerHTML = '<option value="">--</option>'
+      + cols.map(function(c, i){ return '<option value="' + i + '">' + c.nome + '</option>'; }).join('');
+    document.getElementById('test-input-texto').value = '';
+    document.getElementById('modal-test-input').classList.add('active');
+  });
+}
+
+function atualizarTestInput() {
+  var ri = document.getElementById('test-input-data').value;
+  var ci = document.getElementById('test-input-canal').value;
+  if (ri === '' || ci === '') return;
+  var key = ri + '_' + ci;
+  var cel = (temasData.celulas || {})[key] || {};
+  if (cel.tema) document.getElementById('test-input-texto').value = cel.tema;
+}
+
+function _resolverTestInput() {
+  var val = document.getElementById('test-input-texto').value.trim();
+  document.getElementById('modal-test-input').classList.remove('active');
+  if (_testInputResolve) _testInputResolve(val || null);
+  _testInputResolve = null;
+}
+
+function _coletarEtapaDe(div) {
+  var tipo = div.querySelector('.pip-et-tipo') ? div.querySelector('.pip-et-tipo').value : 'llm';
+  var etapa = {
+    tipo: tipo,
+    nome: div.querySelector('.pip-et-nome') ? div.querySelector('.pip-et-nome').value : '',
+    prompt: div.querySelector('.pip-et-prompt') ? div.querySelector('.pip-et-prompt').value : '',
+  };
+  if (tipo === 'llm') {
+    etapa.credencial = div.querySelector('.pip-et-cred') ? div.querySelector('.pip-et-cred').value : '';
+    etapa.modelo = div.querySelector('.pip-et-modelo') ? div.querySelector('.pip-et-modelo').value : '';
+    etapa.system_message = div.querySelector('.pip-et-system') ? div.querySelector('.pip-et-system').value : '';
+  }
+  return etapa;
+}
+
+async function testarEtapa(btn, ateAqui) {
+  var div = btn.closest('div[data-idx]');
+  var idx = parseInt(div.dataset.idx);
+  var resultArea = div.querySelector('.pip-et-test-result');
+  var outputEl = div.querySelector('.pip-et-test-output');
+  var infoEl = div.querySelector('.pip-et-test-info');
+  var copyBtn = resultArea.querySelector('[data-text]');
+
+  var testInput = await pedirTestInput();
+  if (!testInput) return;
+
+  btn.disabled = true;
+  btn.textContent = '...';
+  resultArea.style.display = 'block';
+
+  if (ateAqui) {
+    // Rodar todas as etapas de 0 até idx
+    var allDivs = document.querySelectorAll('#pip-etapas-list > div');
+    var etapas = [];
+    for (var i = 0; i <= idx && i < allDivs.length; i++) {
+      etapas.push(_coletarEtapaDe(allDivs[i]));
+    }
+    outputEl.value = 'Rodando ' + etapas.length + ' etapas...';
+
+    var startTime = Date.now();
+    try {
+      var res = await fetch('/api/pipelines/testar-cadeia', {
+        method: 'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ etapas: etapas, entrada: testInput })
+      });
+      var data = await res.json();
+      var elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+
+      if (data.ok) {
+        // Mostrar resultado de cada etapa no respectivo div
+        (data.resultados || []).forEach(function(r, i) {
+          if (i < allDivs.length) {
+            var ra = allDivs[i].querySelector('.pip-et-test-result');
+            var oe = allDivs[i].querySelector('.pip-et-test-output');
+            var ie = allDivs[i].querySelector('.pip-et-test-info');
+            var cb = ra.querySelector('[data-text]');
+            ra.style.display = 'block';
+            oe.value = r.resultado || '(vazio)';
+            ie.textContent = (r.resultado||'').length + ' chars | ' + (r.status||'');
+            if (cb) cb.dataset.text = r.resultado || '';
+          }
+        });
+        infoEl.textContent = (data.resultados[idx]||{resultado:''}).resultado.length + ' chars | ' + elapsed + 's total';
+      } else {
+        outputEl.value = 'ERRO: ' + (data.erro || 'Falha');
+        infoEl.textContent = elapsed + 's';
+      }
+    } catch(e) {
+      outputEl.value = 'ERRO: ' + e.message;
+    }
+  } else {
+    // Rodar só esta etapa
+    var etapa = _coletarEtapaDe(div);
+    outputEl.value = 'Processando...';
+    var startTime = Date.now();
+    try {
+      var res = await fetch('/api/pipelines/testar-etapa', {
+        method: 'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ etapa: etapa, entrada: testInput })
+      });
+      var data = await res.json();
+      var elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+      if (data.ok) {
+        outputEl.value = data.resultado || '(vazio)';
+        infoEl.textContent = data.resultado.length + ' chars | ' + elapsed + 's';
+        if (copyBtn) copyBtn.dataset.text = data.resultado;
+      } else {
+        outputEl.value = 'ERRO: ' + (data.erro || 'Falha');
+        infoEl.textContent = elapsed + 's';
+      }
+    } catch(e) { outputEl.value = 'ERRO: ' + e.message; }
+  }
+  btn.disabled = false;
+  btn.textContent = ateAqui ? 'Testar até aqui' : 'Testar';
 }
 
 function mudarTipoEtapa(sel) {
@@ -3359,9 +3884,11 @@ function mudarTipoEtapa(sel) {
   sel.style.color = colors[tipo] || 'var(--text)';
   // Toggle campos
   var llm = div.querySelector('.pip-fields-llm');
+  var llmSys = div.querySelector('.pip-fields-llm-system');
   var code = div.querySelector('.pip-fields-code');
   var texto = div.querySelector('.pip-fields-texto');
   if (llm) llm.style.display = tipo === 'llm' ? '' : 'none';
+  if (llmSys) llmSys.style.display = tipo === 'llm' ? '' : 'none';
   if (code) code.style.display = tipo === 'code' ? '' : 'none';
   if (texto) texto.style.display = tipo === 'texto' ? '' : 'none';
   // Atualizar label e font do prompt
@@ -3406,10 +3933,12 @@ async function abrirEditorPipeline(id) {
     var p = pipelines.find(function(x){ return x.id === id; });
     if (!p) return;
     document.getElementById('pip-nome').value = p.nome || '';
+    document.getElementById('pip-tag').value = p.tag || '';
     document.getElementById('pip-idioma').value = p.idioma || 'en';
     (p.etapas || []).forEach(function(et, i) { list.appendChild(_etapaHTML(i, et)); });
   } else {
     document.getElementById('pip-nome').value = '';
+    document.getElementById('pip-tag').value = '';
     document.getElementById('pip-idioma').value = 'en';
   }
   document.getElementById('modal-pipeline').classList.add('active');
@@ -3440,6 +3969,7 @@ async function salvarPipeline() {
   var dados = {
     id: editandoPipelineId || document.getElementById('pip-nome').value.toLowerCase().replace(/[^a-z0-9]/g,'-') || undefined,
     nome: document.getElementById('pip-nome').value,
+    tag: document.getElementById('pip-tag').value.toUpperCase(),
     idioma: document.getElementById('pip-idioma').value,
     etapas: _coletarEtapas(),
   };
@@ -3461,8 +3991,9 @@ async function duplicarPipeline(id) {
   var p = pipelines.find(function(x){ return x.id === id; });
   if (!p) return;
   var novo = JSON.parse(JSON.stringify(p));
-  novo.id = p.id + '-copia';
+  novo.id = (p.tag || p.id).toLowerCase().replace(/[^a-z0-9]/g,'-') + '-' + Math.random().toString(36).substring(2,6);
   novo.nome = p.nome + ' (cópia)';
+  novo.tag = (p.tag || '') + '2';
   await fetch('/api/pipelines', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(novo) });
   toast('Pipeline duplicada', 'success');
   carregarPipelines();
@@ -3471,17 +4002,41 @@ async function duplicarPipeline(id) {
 function abrirExecucao(id) {
   _execPipelineId = id;
   document.getElementById('exec-entrada').value = '';
+
+  // Popular dropdowns com dados do grid de Temas
+  var rows = (temasData && temasData.linhas) || [];
+  var cols = (temasData && temasData.colunas) || [];
+  document.getElementById('exec-data').innerHTML = '<option value="">Selecione...</option>'
+    + rows.map(function(r, i){ return '<option value="' + i + '">' + r.data + '</option>'; }).join('');
+  document.getElementById('exec-canal').innerHTML = '<option value="">Selecione...</option>'
+    + cols.map(function(c, i){ return '<option value="' + i + '">' + c.nome + '</option>'; }).join('');
+
   document.getElementById('modal-exec-input').classList.add('active');
+}
+
+function atualizarExecPreview() {
+  var ri = document.getElementById('exec-data').value;
+  var ci = document.getElementById('exec-canal').value;
+  if (ri === '' || ci === '') return;
+  var key = ri + '_' + ci;
+  var cel = (temasData.celulas || {})[key] || {};
+  if (cel.tema) {
+    document.getElementById('exec-entrada').value = cel.tema;
+  }
 }
 
 async function executarPipeline() {
   var entrada = document.getElementById('exec-entrada').value.trim();
   if (!entrada) { toast('Informe o tema/entrada', 'error'); return; }
+  var ciVal = document.getElementById('exec-canal').value;
+  var riVal = document.getElementById('exec-data').value;
+  var canal = ciVal !== '' && temasData.colunas[ciVal] ? temasData.colunas[ciVal].nome : '';
+  var data = riVal !== '' && temasData.linhas[riVal] ? temasData.linhas[riVal].data : '';
   document.getElementById('modal-exec-input').classList.remove('active');
 
   var res = await fetch('/api/pipelines/' + _execPipelineId + '/executar', {
     method: 'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ entrada: entrada })
+    body: JSON.stringify({ entrada: entrada, tema: entrada, canal: canal, data: data })
   });
   if (!res.ok) { var err = await res.json(); toast('Erro: ' + (err.detail||'Falha'), 'error'); return; }
 
@@ -3667,6 +4222,42 @@ async function carregarNarracao() {
   await carregarVozes();
   carregarCreditos();
   renderNarrHistorico();
+  // Popular dropdowns de puxar roteiro
+  _popularNarrPullDropdowns();
+}
+
+async function _popularNarrPullDropdowns() {
+  if (!temasData || !temasData.linhas || !temasData.linhas.length) {
+    try { var r = await fetch('/api/temas'); var raw = await r.json(); if (raw && raw.colunas) temasData = raw; } catch(e){}
+  }
+  var rows = (temasData && temasData.linhas) || [];
+  var cols = (temasData && temasData.colunas) || [];
+  document.getElementById('narr-pull-data').innerHTML = '<option value="">Data...</option>'
+    + rows.map(function(r, i){ return '<option value="' + i + '">' + r.data + '</option>'; }).join('');
+  document.getElementById('narr-pull-canal').innerHTML = '<option value="">Canal...</option>'
+    + cols.map(function(c, i){ return '<option value="' + i + '">' + c.nome + '</option>'; }).join('');
+}
+
+function puxarRoteiroNarracao() {
+  var ri = document.getElementById('narr-pull-data').value;
+  var ci = document.getElementById('narr-pull-canal').value;
+  if (ri === '' || ci === '') { toast('Selecione data e canal', 'error'); return; }
+  var key = ri + '_' + ci;
+  var cel = (temasData.celulas || {})[key] || {};
+  if (cel.roteiro) {
+    document.getElementById('narr-texto').value = cel.roteiro;
+    document.getElementById('narr-char-count').textContent = cel.roteiro.length + ' chars';
+    // Auto-preencher nome de saída
+    var col = temasData.colunas[ci] || {};
+    var row = temasData.linhas[ri] || {};
+    var dateParts = (row.data || '').split('/');
+    if (dateParts.length >= 2) {
+      document.getElementById('narr-nome').value = (col.nome || '') + ' ' + dateParts[0] + '-' + dateParts[1];
+    }
+    toast('Roteiro puxado! ' + cel.roteiro.length + ' chars', 'success');
+  } else {
+    toast('Nenhum roteiro nessa célula', 'error');
+  }
 }
 
 async function carregarCreditos() {
@@ -3679,17 +4270,42 @@ async function carregarCreditos() {
   } catch(e) {}
 }
 
+async function filtrarVozesTemplate() {
+  // Carregar vozes se vazio (cache local ou API)
+  if (!_vozes.length) {
+    var cached = localStorage.getItem('vozesCache');
+    if (cached) { try { _vozes = JSON.parse(cached); } catch(e){} }
+    if (!_vozes.length) {
+      try { var r = await fetch('/api/narration/voices'); _vozes = await r.json(); localStorage.setItem('vozesCache', JSON.stringify(_vozes)); } catch(e){}
+    }
+  }
+  var provider = document.getElementById('ed-voz-provider').value;
+  var sel = document.getElementById('ed-voz-id');
+  var filtradas;
+  if (provider === 'all') filtradas = _vozes;
+  else filtradas = _vozes.filter(function(v){ return v.provider === provider; });
+  sel.innerHTML = '<option value="">Nenhuma (manual)</option>' + filtradas.map(function(v) {
+    return '<option value="' + v.voice_id + '" data-provider="' + v.provider + '">' + v.name + ' (' + v.provider + ')</option>';
+  }).join('');
+}
+
 async function carregarVozes() {
   var sel = document.getElementById('narr-voice');
-  sel.innerHTML = '<option value="">Carregando vozes...</option>';
-  sel.style.color = 'var(--text-sec)';
+  // Carregar cache local primeiro (instantâneo)
+  var cached = localStorage.getItem('vozesCache');
+  if (cached && !_vozes.length) {
+    try { _vozes = JSON.parse(cached); filtrarVozes(); } catch(e){}
+  }
+  // Buscar da API em background
+  sel.innerHTML = _vozes.length ? sel.innerHTML : '<option value="">Carregando vozes...</option>';
   try {
     var res = await fetch('/api/narration/voices');
     _vozes = await res.json();
+    localStorage.setItem('vozesCache', JSON.stringify(_vozes));
     sel.style.color = '';
     filtrarVozes();
   } catch(e) {
-    sel.innerHTML = '<option value="">Erro ao carregar</option>';
+    if (!_vozes.length) sel.innerHTML = '<option value="">Erro ao carregar</option>';
   }
 }
 
@@ -3841,19 +4457,21 @@ async function renderBatchCards() {
 
   grid.innerHTML = templates.map(function(t, idx) {
     var cfg = saved[t.id] || {};
-    var vozId = cfg.voice_id || '';
+    // Voz: template sempre ganha
+    var tmplVoz = (t.narracao_voz || {});
+    var vozId = tmplVoz.voice_id || '';
     var provider = cfg.provider || 'minimax_clone';
     return '<div class="card" style="cursor:grab" draggable="true" data-nb-idx="' + idx + '" data-nb-tid="' + t.id + '" ondragstart="nbDragStart(event)" ondragover="event.preventDefault()" ondrop="nbDrop(event)">'
       + '<div class="card-header">'
       + '<span class="card-title">' + (t.tag||t.id) + '</span>'
-      + '<span class="card-tag">' + (t.idioma||'en').toUpperCase() + '</span>'
+      + '<span class="card-tag">' + (t.tag||t.idioma||'en').toUpperCase() + '</span>'
       + '</div>'
       + '<div style="font-size:11px;color:var(--text-sec);margin-bottom:8px">' + (t.nome||'') + '</div>'
-      + '<div class="form-group" style="margin:0 0 6px">'
-      + '<label style="font-size:10px">Voz</label>'
-      + '<select class="nb-voz" data-tid="' + t.id + '" style="font-size:11px;padding:4px 6px">'
-      + _vozes.map(function(v){ return '<option value="' + v.voice_id + '" data-provider="' + v.provider + '"' + (v.voice_id===vozId?' selected':'') + '>' + v.name.substring(0,25) + ' (' + v.provider + ')</option>'; }).join('')
-      + '</select></div>'
+      + '<div style="font-size:10px;margin-bottom:6px">'
+      + '<span style="color:var(--text-sec)">Voz: </span>'
+      + (function(){ var v = _vozes.find(function(x){ return x.voice_id === vozId; }); return v ? '<span style="color:var(--info)">' + v.name + '</span>' : '<span style="color:var(--danger)">Não configurada (edite o template)</span>'; })()
+      + '<input type="hidden" class="nb-voz" data-tid="' + t.id + '" value="' + vozId + '" data-provider="' + (tmplVoz.provider||'') + '">'
+      + '</div>'
       + '<div class="form-group" style="margin:0 0 6px">'
       + '<label style="font-size:10px">Roteiro</label>'
       + '<textarea class="nb-texto" data-tid="' + t.id + '" rows="3" placeholder="Cole o roteiro aqui..." style="font-size:11px;padding:4px 6px" oninput="this.nextElementSibling.textContent=this.value.length+\\' chars\\'"></textarea>'
@@ -3861,7 +4479,8 @@ async function renderBatchCards() {
       + '</div>'
       + '<div style="display:flex;gap:4px;align-items:center">'
       + '<label style="font-size:10px;color:var(--text-sec)"><input type="checkbox" class="nb-ativo" data-tid="' + t.id + '" ' + (cfg.ativo !== false ? 'checked' : '') + '> Ativo</label>'
-      + '<span class="badge badge-waiting nb-status" data-tid="' + t.id + '" style="font-size:9px;margin-left:auto">Aguardando</span>'
+      + '<span class="nb-timer" data-tid="' + t.id + '" style="font-size:10px;color:var(--text-sec);font-family:monospace;margin-left:auto">--:--</span>'
+      + '<span class="badge badge-waiting nb-status" data-tid="' + t.id + '" style="font-size:9px">Aguardando</span>'
       + '</div></div>';
   }).join('');
 
@@ -3875,16 +4494,56 @@ async function renderBatchCards() {
 
 function _salvarBatchConfigs() {
   var saved = {};
-  document.querySelectorAll('.nb-voz').forEach(function(sel) {
-    var tid = sel.dataset.tid;
-    var opt = sel.selectedOptions[0];
+  document.querySelectorAll('.nb-voz').forEach(function(el) {
+    var tid = el.dataset.tid;
     saved[tid] = {
-      voice_id: sel.value,
-      provider: opt ? opt.dataset.provider : '',
+      voice_id: el.value,
+      provider: el.dataset.provider || '',
       ativo: document.querySelector('.nb-ativo[data-tid="' + tid + '"]').checked,
     };
   });
   localStorage.setItem('narrBatchConfigs', JSON.stringify(saved));
+}
+
+async function puxarRoteirosBatch() {
+  var dateVal = document.getElementById('narr-batch-data').value;
+  if (!dateVal) { toast('Selecione a data primeiro', 'error'); return; }
+
+  // Garantir dados de Temas carregados
+  if (!temasData || !temasData.linhas || !temasData.linhas.length) {
+    try { var r = await fetch('/api/temas'); var raw = await r.json(); if (raw && raw.colunas) temasData = raw; } catch(e){}
+  }
+
+  // Encontrar a linha pela data
+  var dateParts = dateVal.split('-');
+  var dataFormatada = dateParts[2] + '/' + dateParts[1] + '/' + dateParts[0];
+  var ri = -1;
+  (temasData.linhas || []).forEach(function(row, i) {
+    if (row.data === dataFormatada) ri = i;
+  });
+  if (ri < 0) { toast('Data ' + dataFormatada + ' não encontrada no grid de Temas', 'error'); return; }
+
+  var count = 0;
+  templates.forEach(function(t) {
+    var textarea = document.querySelector('.nb-texto[data-tid="' + t.id + '"]');
+    if (!textarea) return;
+
+    // Encontrar coluna que tem esse template associado
+    (temasData.colunas || []).forEach(function(col, ci) {
+      if (col.template_id === t.id) {
+        var key = ri + '_' + ci;
+        var cel = (temasData.celulas || {})[key] || {};
+        if (cel.roteiro) {
+          textarea.value = cel.roteiro;
+          var charSpan = textarea.nextElementSibling;
+          if (charSpan) charSpan.textContent = cel.roteiro.length + ' chars';
+          count++;
+        }
+      }
+    });
+  });
+
+  toast(count + ' roteiros puxados do grid de Temas', count > 0 ? 'success' : 'error');
 }
 
 var _nbDragIdx = -1;
@@ -3911,16 +4570,19 @@ async function iniciarBatchNarracao() {
     var ativo = document.querySelector('.nb-ativo[data-tid="' + t.id + '"]');
     if (!ativo || !ativo.checked) return;
     var texto = document.querySelector('.nb-texto[data-tid="' + t.id + '"]');
-    var vozSel = document.querySelector('.nb-voz[data-tid="' + t.id + '"]');
+    var vozEl = document.querySelector('.nb-voz[data-tid="' + t.id + '"]');
     if (!texto || !texto.value.trim()) return;
-    var opt = vozSel.selectedOptions[0];
+    if (!vozEl || !vozEl.value) { toast(t.tag + ': sem voz configurada', 'error'); return; }
+    var tmplVozCfg = (t.narracao_voz || {});
     jobs.push({
       template_id: t.id,
       tag: t.tag || t.id,
       texto: texto.value.trim(),
       chars: texto.value.trim().length,
-      voice_id: vozSel.value,
-      provider: opt ? opt.dataset.provider : 'elevenlabs',
+      voice_id: vozEl.value,
+      provider: vozEl.dataset ? (vozEl.dataset.provider || 'elevenlabs') : 'elevenlabs',
+      speed: tmplVozCfg.speed || 1.0,
+      pitch: tmplVozCfg.pitch || 0,
       nome: (t.tag || t.id) + ' ' + dataFormatada,
       pasta: pasta,
     });
@@ -3934,20 +4596,34 @@ async function iniciarBatchNarracao() {
   var totalCreditsUsed = 0;
   var batchStartTime = Date.now();
 
+  // Timer total que atualiza a cada segundo
+  var _batchTimerInterval = setInterval(function() {
+    var elapsed = Math.floor((Date.now() - batchStartTime) / 1000);
+    var m = Math.floor(elapsed / 60), s = elapsed % 60;
+    document.getElementById('narr-batch-timer-total').textContent = (m < 10 ? '0' : '') + m + ':' + (s < 10 ? '0' : '') + s;
+  }, 1000);
+
   for (var i = 0; i < jobs.length; i++) {
     var job = jobs[i];
     var badge = document.querySelector('.nb-status[data-tid="' + job.template_id + '"]');
+    var timerEl = document.querySelector('.nb-timer[data-tid="' + job.template_id + '"]');
     if (badge) { badge.textContent = 'Gerando...'; badge.className = 'badge badge-transcribing nb-status'; }
     document.getElementById('narr-batch-count').textContent = (i+1) + '/' + jobs.length;
     document.getElementById('narr-batch-fill').style.width = ((i) / jobs.length * 100) + '%';
     var jobStart = Date.now();
+
+    // Timer individual que atualiza a cada segundo
+    var _jobTimerInterval = setInterval((function(el, start) {
+      return function() {
+        var elapsed = Math.floor((Date.now() - start) / 1000);
+        var m = Math.floor(elapsed / 60), s = elapsed % 60;
+        if (el) el.textContent = (m < 10 ? '0' : '') + m + ':' + (s < 10 ? '0' : '') + s;
+      };
+    })(timerEl, jobStart), 1000);
     log.innerHTML += '<div style="color:var(--text-sec)">' + job.tag + ': Enviando (' + job.chars + ' chars)...</div>';
     log.scrollTop = 99999;
 
     try {
-      var creditsBefore = 0;
-      try { var cr = await (await fetch('/api/narration/credits')).json(); creditsBefore = cr.credits || 0; } catch(e){}
-
       var res = await fetch('/api/narration/generate', {
         method: 'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify(job)
@@ -3969,9 +4645,7 @@ async function iniciarBatchNarracao() {
         if (st.status === 'done') {
           done = true;
           var jobTime = ((Date.now() - jobStart) / 1000).toFixed(1);
-          var creditsAfter = 0;
-          try { var cr2 = await (await fetch('/api/narration/credits')).json(); creditsAfter = cr2.credits || 0; } catch(e){}
-          var creditsUsed = creditsBefore > 0 && creditsAfter > 0 ? (creditsBefore - creditsAfter) : 0;
+          var creditsUsed = st.credit_cost || 0;
           totalCreditsUsed += creditsUsed;
           log.innerHTML += '<div style="color:var(--accent)">' + job.tag + ': OK | ' + jobTime + 's | ' + (creditsUsed > 0 ? creditsUsed + ' créditos' : '') + ' | ' + (st.audio_local||'').split('/').pop() + '</div>';
           if (badge) { badge.textContent = 'OK'; badge.className = 'badge badge-done nb-status'; }
@@ -3984,8 +4658,17 @@ async function iniciarBatchNarracao() {
     } catch(e) {
       log.innerHTML += '<div style="color:var(--danger)">' + job.tag + ': ' + e.message + '</div>';
     }
+    clearInterval(_jobTimerInterval);
+    // Mostrar tempo final do job
+    if (timerEl) {
+      var jobElapsed = Math.floor((Date.now() - jobStart) / 1000);
+      var jm = Math.floor(jobElapsed / 60), js = jobElapsed % 60;
+      timerEl.textContent = (jm < 10 ? '0' : '') + jm + ':' + (js < 10 ? '0' : '') + js;
+      timerEl.style.color = 'var(--accent)';
+    }
   }
 
+  clearInterval(_batchTimerInterval);
   document.getElementById('narr-batch-fill').style.width = '100%';
   document.getElementById('narr-batch-count').textContent = jobs.length + '/' + jobs.length;
   var totalTime = ((Date.now() - batchStartTime) / 1000).toFixed(0);
@@ -4272,6 +4955,11 @@ function editarCelula(ri, ci) {
   document.getElementById('cel-tema').value = cel.tema || '';
   document.getElementById('cel-titulo').value = cel.titulo || '';
   document.getElementById('cel-thumb').value = cel.thumb || '';
+  document.getElementById('cel-roteiro').value = cel.roteiro || '';
+  document.getElementById('cel-roteiro-chars').textContent = (cel.roteiro || '').length + ' chars';
+  document.getElementById('cel-roteiro').oninput = function() {
+    document.getElementById('cel-roteiro-chars').textContent = this.value.length + ' chars';
+  };
   // Pipelines dropdown
   var sel = document.getElementById('cel-pipeline');
   sel.innerHTML = '<option value="">Nenhuma</option>' + pipelines.map(function(p) {
@@ -4291,12 +4979,151 @@ function salvarCelula() {
     tema: document.getElementById('cel-tema').value,
     titulo: document.getElementById('cel-titulo').value,
     thumb: document.getElementById('cel-thumb').value,
+    roteiro: document.getElementById('cel-roteiro').value,
     pipeline_id: document.getElementById('cel-pipeline').value,
     synced: false,
   };
   fecharCelula();
   salvarTemasLocal();
   renderTemasGrid();
+}
+
+var _replicarCampo = '';
+var _temasUndo = []; // pilha de undo
+
+function abrirReplicar(campo) {
+  if (!_celulaEditando) return;
+  _replicarCampo = campo;
+  var valor = document.getElementById('cel-' + campo).value;
+  if (!valor.trim()) { toast('Campo vazio', 'error'); return; }
+
+  document.getElementById('replicar-title').textContent = 'Replicar ' + {tema:'Tema',titulo:'Título',thumb:'Thumbnail'}[campo] + ' para...';
+  document.getElementById('replicar-valor').value = valor;
+  document.getElementById('replicar-campo-destino').value = 'mesmo';
+  document.getElementById('replicar-campo-destino').closest('.form-group').style.display = '';
+
+  // Preencher datas
+  var dataSel = document.getElementById('replicar-data');
+  var rows = temasData.linhas || [];
+  dataSel.innerHTML = rows.map(function(r, i) {
+    return '<option value="' + i + '"' + (i === _celulaEditando.row ? ' selected' : '') + '>' + r.data + '</option>';
+  }).join('');
+
+  // Preencher canais (excluir o atual)
+  var cols = temasData.colunas || [];
+  var canaisDiv = document.getElementById('replicar-canais');
+  canaisDiv.innerHTML = cols.map(function(col, ci) {
+    if (ci === _celulaEditando.col) return '';
+    return '<label style="display:flex;align-items:center;gap:8px;padding:4px 8px;background:var(--bg);border:1px solid var(--border);border-radius:4px;cursor:pointer;font-size:12px">'
+      + '<input type="checkbox" class="replicar-check" value="' + ci + '">'
+      + '<span>' + col.nome + '</span></label>';
+  }).join('');
+
+  document.getElementById('modal-replicar').classList.add('active');
+}
+
+function _executarReplicar(colunas) {
+  // Salvar snapshot para undo
+  _temasUndo.push(JSON.stringify(temasData));
+  if (_temasUndo.length > 10) _temasUndo.shift(); // max 10 undos
+
+  var ri = parseInt(document.getElementById('replicar-data').value);
+  var count = 0;
+
+  if (_replicarCampo === '_all') {
+    // Replicar todos os campos
+    var tema = document.getElementById('cel-tema').value;
+    var titulo = document.getElementById('cel-titulo').value;
+    var thumb = document.getElementById('cel-thumb').value;
+    colunas.forEach(function(ci) {
+      var key = ri + '_' + ci;
+      if (!temasData.celulas) temasData.celulas = {};
+      if (!temasData.celulas[key]) temasData.celulas[key] = {};
+      if (tema) temasData.celulas[key].tema = tema;
+      if (titulo) temasData.celulas[key].titulo = titulo;
+      if (thumb) temasData.celulas[key].thumb = thumb;
+      temasData.celulas[key].synced = false;
+      count++;
+    });
+  } else {
+    // Replicar campo individual
+    var valor = document.getElementById('replicar-valor').value;
+    var campoOrigem = _replicarCampo;
+    var campoDestino = document.getElementById('replicar-campo-destino').value;
+    var campo = campoDestino === 'mesmo' ? campoOrigem : campoDestino;
+    colunas.forEach(function(ci) {
+      var key = ri + '_' + ci;
+      if (!temasData.celulas) temasData.celulas = {};
+      if (!temasData.celulas[key]) temasData.celulas[key] = {};
+      temasData.celulas[key][campo] = valor;
+      temasData.celulas[key].synced = false;
+      count++;
+    });
+  }
+
+  // Restaurar visibilidade do campo destino
+  document.getElementById('replicar-campo-destino').closest('.form-group').style.display = '';
+
+  salvarTemasLocal();
+  renderTemasGrid();
+  document.getElementById('modal-replicar').classList.remove('active');
+  document.getElementById('btn-undo-temas').style.display = 'inline-flex';
+  toast('Replicado para ' + count + ' canais', 'success');
+}
+
+function undoTemas() {
+  if (!_temasUndo.length) { toast('Nada para desfazer', 'error'); return; }
+  temasData = JSON.parse(_temasUndo.pop());
+  salvarTemasLocal();
+  renderTemasGrid();
+  if (!_temasUndo.length) document.getElementById('btn-undo-temas').style.display = 'none';
+  toast('Desfeito!', 'success');
+}
+
+function replicarSelecionados() {
+  var checks = document.querySelectorAll('.replicar-check:checked');
+  var colunas = Array.from(checks).map(function(c){ return parseInt(c.value); });
+  if (!colunas.length) { toast('Selecione ao menos um canal', 'error'); return; }
+  _executarReplicar(colunas);
+}
+
+function replicarTodos() {
+  var cols = temasData.colunas || [];
+  var colunas = [];
+  cols.forEach(function(col, ci) {
+    if (ci !== _celulaEditando.col) colunas.push(ci);
+  });
+  _executarReplicar(colunas);
+}
+
+function abrirReplicarTudo() {
+  if (!_celulaEditando) return;
+  var tema = document.getElementById('cel-tema').value;
+  var titulo = document.getElementById('cel-titulo').value;
+  var thumb = document.getElementById('cel-thumb').value;
+  if (!tema && !titulo && !thumb) { toast('Todos os campos estão vazios', 'error'); return; }
+
+  _replicarCampo = '_all';
+  document.getElementById('replicar-title').textContent = 'Replicar Tudo para...';
+  document.getElementById('replicar-valor').value = (tema ? 'Tema: ' + tema.substring(0,50) : '') + (titulo ? '\\nTítulo: ' + titulo.substring(0,50) : '') + (thumb ? '\\nThumb: ' + thumb.substring(0,30) : '');
+  document.getElementById('replicar-campo-destino').closest('.form-group').style.display = 'none';
+
+  var dataSel = document.getElementById('replicar-data');
+  var rows = temasData.linhas || [];
+  dataSel.innerHTML = rows.map(function(r, i) {
+    return '<option value="' + i + '"' + (i === _celulaEditando.row ? ' selected' : '') + '>' + r.data + '</option>';
+  }).join('');
+
+  var cols = temasData.colunas || [];
+  var canaisDiv = document.getElementById('replicar-canais');
+  canaisDiv.innerHTML = cols.map(function(col, ci) {
+    if (ci === _celulaEditando.col) return '';
+    return '<label style="display:flex;align-items:center;gap:8px;padding:4px 8px;background:var(--bg);border:1px solid var(--border);border-radius:4px;cursor:pointer;font-size:12px">'
+      + '<input type="checkbox" class="replicar-check" value="' + ci + '">'
+      + '<span>' + col.nome + '</span></label>';
+  }).join('');
+
+  document.getElementById('modal-replicar').classList.add('active');
 }
 
 function _initCaseBtns() {
@@ -4353,9 +5180,12 @@ async function gerarRoteiroCelula() {
   });
   if (!res.ok) {
     var err = await res.json();
-    toast('Erro: ' + (err.detail||''), 'error');
+    var erroMsg = err.detail || 'Falha ao iniciar pipeline';
     document.getElementById('cel-gerar-btn').disabled = false;
-    document.getElementById('cel-gen-status').style.display = 'none';
+    document.getElementById('cel-gen-badge').textContent = 'Erro';
+    document.getElementById('cel-gen-badge').className = 'badge badge-error';
+    document.getElementById('cel-gen-etapas').innerHTML = '<div style="color:var(--danger);font-size:11px;margin-top:4px">' + erroMsg + '</div>';
+    toast('Erro: ' + erroMsg, 'error');
     return;
   }
 
@@ -4385,16 +5215,22 @@ async function gerarRoteiroCelula() {
         document.getElementById('cel-gen-badge').textContent = 'Concluído';
         document.getElementById('cel-gen-badge').className = 'badge badge-done';
         toast('Roteiro gerado!', 'success');
-        // Salvar resultado na célula (como campo roteiro)
+        // Salvar resultado na célula e mostrar no campo
         if (!temasData.celulas) temasData.celulas = {};
         if (!temasData.celulas[key]) temasData.celulas[key] = {};
         temasData.celulas[key].roteiro = st.resultado_final;
         temasData.celulas[key].synced = false;
+        document.getElementById('cel-roteiro').value = st.resultado_final;
+        document.getElementById('cel-roteiro-chars').textContent = st.resultado_final.length + ' chars';
         salvarTemasLocal();
       } else {
         document.getElementById('cel-gen-badge').textContent = 'Erro';
         document.getElementById('cel-gen-badge').className = 'badge badge-error';
-        toast('Erro na geração', 'error');
+        // Mostrar detalhes do erro no painel e no toast
+        var erros = st.etapas ? st.etapas.filter(function(e){ return e.status==='erro'; }).map(function(e){ return e.nome + ': ' + (e.erro||''); }) : [];
+        var erroMsg = erros.join(' | ') || 'Falha na geração';
+        document.getElementById('cel-gen-etapas').innerHTML = '<div style="color:var(--danger);font-size:11px;margin-top:4px;white-space:pre-wrap">' + erroMsg.replace(/</g,'&lt;') + '</div>';
+        toast('Erro: ' + erroMsg.substring(0, 100), 'error');
       }
     }
   }, 2000);
@@ -4463,7 +5299,7 @@ function previewLote() {
       var p = pipelines.find(function(x){ return x.id === pipId; });
       pipNome = p ? p.nome : pipId;
     }
-    var status = cel.roteiro ? '<span style="color:var(--accent)">tem roteiro</span>' : (cel.tema ? '<span style="color:var(--warn)">tema ok</span>' : '<span style="color:var(--text-sec)">vazio</span>');
+    var status = cel.roteiro ? '<span style="color:var(--accent)">tem roteiro (pula)</span>' : (cel.tema ? '<span style="color:var(--warn)">tema ok</span>' : '<span style="color:var(--text-sec)">vazio</span>');
     itens.push('<span style="margin-right:16px"><strong>' + col.nome + '</strong>: ' + status + (pipNome ? ' (' + pipNome + ')' : ' <span style="color:var(--danger)">sem pipeline</span>') + '</span>');
   });
   preview.innerHTML = itens.join('');
@@ -4482,6 +5318,7 @@ async function gerarLoteRoteiros() {
     var cel = (temasData.celulas || {})[key] || {};
     var pipId = cel.pipeline_id || col.pipeline_id || '';
     if (!pipId || !cel.tema) return;
+    if (cel.roteiro) return; // pular quem já tem roteiro
     jobs.push({ ri: ri, ci: ci, key: key, col: col, cel: cel, pipId: pipId });
   });
 
@@ -4500,6 +5337,14 @@ async function gerarLoteRoteiros() {
     log.scrollTop = 99999;
 
     try {
+      // Esperar pipeline anterior terminar (evitar 409)
+      var waitCount = 0;
+      while (waitCount < 30) {
+        try { var chk = await (await fetch('/api/pipelines/execucao')).json(); if (!chk.ativo) break; } catch(e){}
+        await new Promise(function(r){ setTimeout(r, 2000); });
+        waitCount++;
+      }
+
       var res = await fetch('/api/pipelines/' + job.pipId + '/executar', {
         method: 'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({
@@ -4560,18 +5405,38 @@ async function produzirDataCompleta() {
   var row = temasData.linhas[ri];
   var cols = temasData.colunas || [];
 
-  // Validar colunas
+  // Carregar templates se necessário
+  if (!templates.length) { var tr = await fetch('/api/templates'); templates = await tr.json(); }
+
+  var dateParts = row.data.split('/');
+  var dataFormatada = dateParts[0] + '-' + dateParts[1];
+  var dataYMD = dateParts[2] + dateParts[1] + dateParts[0];
+
+  // Montar jobs com todas as configs
   var jobs = [];
   cols.forEach(function(col, ci) {
     var key = ri + '_' + ci;
     var cel = (temasData.celulas || {})[key] || {};
-    if (!cel.tema) return; // pular sem tema
+    if (!cel.tema) return;
+
+    // Buscar template associado à coluna
+    var tmpl = col.template_id ? templates.find(function(t){ return t.id === col.template_id; }) : null;
+    var tmplVoz = tmpl ? (tmpl.narracao_voz || {}) : {};
+
+    // Voz: template > coluna
+    var voiceId = tmplVoz.voice_id || col.voice_id || '';
+    var voiceProv = tmplVoz.provider || col.voice_provider || '';
+
     jobs.push({
       ri: ri, ci: ci, key: key, col: col, cel: cel,
       pipeline_id: cel.pipeline_id || col.pipeline_id || '',
       template_id: col.template_id || '',
-      voice_id: col.voice_id || '',
-      voice_provider: col.voice_provider || '',
+      voice_id: voiceId,
+      voice_provider: voiceProv,
+      voice_speed: tmplVoz.speed || 1.0,
+      voice_pitch: tmplVoz.pitch || 0,
+      tag: col.nome,
+      narrNome: col.nome + ' ' + dataFormatada,
     });
   });
 
@@ -4580,44 +5445,44 @@ async function produzirDataCompleta() {
   // Validar configs
   var erros = [];
   jobs.forEach(function(j) {
-    if (!j.pipeline_id) erros.push(j.col.nome + ': sem pipeline');
-    if (!j.voice_id) erros.push(j.col.nome + ': sem voz');
-    if (!j.template_id) erros.push(j.col.nome + ': sem template');
+    if (!j.pipeline_id) erros.push(j.tag + ': sem pipeline');
+    if (!j.voice_id) erros.push(j.tag + ': sem voz (configure no template ou coluna)');
+    if (!j.template_id) erros.push(j.tag + ': sem template');
   });
   if (erros.length) {
-    toast('Configuração incompleta: ' + erros.join(', '), 'error');
+    toast('Config incompleta:\\n' + erros.join('\\n'), 'error');
     return;
   }
 
-  if (!confirm('Produzir ' + jobs.length + ' vídeos completos para ' + row.data + '?\\n\\nEtapas: Roteiro → Narração → Transcrição → Vídeo')) return;
+  if (!confirm('Produzir ' + jobs.length + ' vídeos para ' + row.data + '?\\n\\nRoteiro → Narração → Vídeo')) return;
 
   document.getElementById('lote-status').style.display = 'block';
   var log = document.getElementById('lote-log');
   log.innerHTML = '<div style="font-weight:600">PRODUÇÃO COMPLETA | ' + row.data + ' | ' + jobs.length + ' vídeos</div>';
   var startTime = Date.now();
-  var dateParts = row.data.split('/');
-  var dataFormatada = dateParts[0] + '-' + dateParts[1];
 
   for (var i = 0; i < jobs.length; i++) {
     var job = jobs[i];
-    var tag = job.col.nome;
     document.getElementById('lote-count').textContent = (i+1) + '/' + jobs.length;
     document.getElementById('lote-fill').style.width = (i / jobs.length * 100) + '%';
+    log.innerHTML += '<div style="margin-top:6px;font-weight:500;color:var(--text)">' + job.tag + '</div>';
 
     // === ETAPA 1: ROTEIRO ===
-    log.innerHTML += '<div style="margin-top:6px;font-weight:500;color:var(--text)">' + tag + '</div>';
     if (job.cel.roteiro) {
-      log.innerHTML += '<div style="color:var(--text-sec)">  Roteiro: já existe (' + job.cel.roteiro.length + ' chars), pulando</div>';
+      log.innerHTML += '<div style="color:var(--text-sec)">  Roteiro: existe (' + job.cel.roteiro.length + ' chars) - pulando</div>';
     } else {
       log.innerHTML += '<div style="color:var(--text-sec)">  Roteiro: gerando...</div>';
       log.scrollTop = 99999;
       try {
+        // Esperar pipeline anterior terminar
+        var _wc = 0;
+        while (_wc < 30) { try { var _chk = await (await fetch('/api/pipelines/execucao')).json(); if (!_chk.ativo) break; } catch(e){} await new Promise(function(r){setTimeout(r,2000)}); _wc++; }
+
         var rRes = await fetch('/api/pipelines/' + job.pipeline_id + '/executar', {
           method: 'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ entrada: job.cel.tema, tema: job.cel.tema, canal: tag, data: row.data, titulo: job.cel.titulo||'', thumb: job.cel.thumb||'' })
+          body: JSON.stringify({ entrada: job.cel.tema, tema: job.cel.tema, canal: job.tag, data: row.data, titulo: job.cel.titulo||'', thumb: job.cel.thumb||'' })
         });
-        if (!rRes.ok) { log.innerHTML += '<div style="color:var(--danger)">  Roteiro: ERRO</div>'; continue; }
-        // Poll
+        if (!rRes.ok) { var re = await rRes.json(); log.innerHTML += '<div style="color:var(--danger)">  Roteiro: ERRO - ' + (re.detail||'') + '</div>'; continue; }
         var rDone = false;
         while (!rDone) {
           await new Promise(function(r){ setTimeout(r, 2000); });
@@ -4629,57 +5494,92 @@ async function produzirDataCompleta() {
               if (!temasData.celulas[job.key]) temasData.celulas[job.key] = {};
               temasData.celulas[job.key].roteiro = sr.resultado_final;
               log.innerHTML += '<div style="color:var(--accent)">  Roteiro: OK (' + sr.resultado_final.length + ' chars)</div>';
-            } else { log.innerHTML += '<div style="color:var(--danger)">  Roteiro: sem resultado</div>'; continue; }
+            } else {
+              var erroEtapas = sr.etapas ? sr.etapas.filter(function(e){return e.status==='erro'}).map(function(e){return e.nome+': '+e.erro}).join(' | ') : '';
+              log.innerHTML += '<div style="color:var(--danger)">  Roteiro: FALHOU - ' + (erroEtapas || 'sem resultado') + '</div>';
+              continue;
+            }
           }
         }
       } catch(e) { log.innerHTML += '<div style="color:var(--danger)">  Roteiro: ' + e.message + '</div>'; continue; }
     }
 
     // === ETAPA 2: NARRAÇÃO ===
-    var narrNome = tag + ' ' + dataFormatada;
-    log.innerHTML += '<div style="color:var(--text-sec)">  Narração: gerando (' + narrNome + ')...</div>';
-    log.scrollTop = 99999;
+    // Verificar se MP3 já existe
+    var mp3Existente = null;
     try {
-      var nRes = await fetch('/api/narration/generate', {
-        method: 'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ provider: job.voice_provider, voice_id: job.voice_id, texto: job.cel.roteiro, nome: narrNome })
-      });
-      var nData = await nRes.json();
-      if (!nData.ok) { log.innerHTML += '<div style="color:var(--danger)">  Narração: ERRO - ' + (nData.erro||'') + '</div>'; continue; }
-      var nDone = false;
-      while (!nDone) {
-        await new Promise(function(r){ setTimeout(r, 3000); });
-        try { var ns = await (await fetch('/api/narration/status')).json(); } catch(e) { continue; }
-        if (ns.status === 'done') { nDone = true; log.innerHTML += '<div style="color:var(--accent)">  Narração: OK -> ' + (ns.audio_local||'').split('/').pop() + '</div>'; job._mp3 = ns.audio_local; }
-        else if (ns.status === 'error') { nDone = true; log.innerHTML += '<div style="color:var(--danger)">  Narração: ERRO - ' + (ns.erro||'') + '</div>'; }
-      }
-      if (!job._mp3) continue;
-    } catch(e) { log.innerHTML += '<div style="color:var(--danger)">  Narração: ' + e.message + '</div>'; continue; }
+      var checkRes = await fetch('/api/browse?path=' + encodeURIComponent('narracoes'));
+      var files = await checkRes.json();
+      var mp3Nome = job.narrNome + '.mp3';
+      var found = files.find(function(f){ return f.name === mp3Nome; });
+      if (found) mp3Existente = found.path;
+    } catch(e) {}
 
-    // === ETAPA 3+4: PRODUÇÃO DE VÍDEO (transcrição + montagem) ===
-    log.innerHTML += '<div style="color:var(--text-sec)">  Vídeo: iniciando produção...</div>';
-    log.scrollTop = 99999;
-    try {
-      var vRes = await fetch('/api/batch', {
-        method: 'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ jobs: [{ template_id: job.template_id, mp3: job._mp3 }] })
-      });
-      if (!vRes.ok) { log.innerHTML += '<div style="color:var(--danger)">  Vídeo: ERRO ao iniciar</div>'; continue; }
-      var vDone = false;
-      while (!vDone) {
-        await new Promise(function(r){ setTimeout(r, 3000); });
-        try { var vs = await (await fetch('/api/batch/status', { signal: AbortSignal.timeout(10000) })).json(); } catch(e) { continue; }
-        if (!vs.ativo) {
-          vDone = true;
-          var vJob = vs.jobs && vs.jobs[0];
-          if (vJob && vJob.status === 'concluido') {
-            log.innerHTML += '<div style="color:var(--accent)">  Vídeo: OK -> ' + (vJob.output||'').split('/').pop() + '</div>';
-          } else {
-            log.innerHTML += '<div style="color:var(--danger)">  Vídeo: ' + (vJob ? vJob.erro || vJob.status : 'erro') + '</div>';
+    if (mp3Existente) {
+      log.innerHTML += '<div style="color:var(--text-sec)">  Narração: existe (' + mp3Existente.split('/').pop() + ') - pulando</div>';
+      job._mp3 = mp3Existente;
+    } else {
+      log.innerHTML += '<div style="color:var(--text-sec)">  Narração: gerando (' + job.narrNome + ')...</div>';
+      log.scrollTop = 99999;
+      try {
+        var nRes = await fetch('/api/narration/generate', {
+          method: 'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ provider: job.voice_provider, voice_id: job.voice_id, texto: job.cel.roteiro, nome: job.narrNome, speed: job.voice_speed || 1.0, pitch: job.voice_pitch || 0 })
+        });
+        var nData = await nRes.json();
+        if (!nData.ok) { log.innerHTML += '<div style="color:var(--danger)">  Narração: ERRO - ' + (nData.erro||'') + '</div>'; continue; }
+        var nDone = false;
+        while (!nDone) {
+          await new Promise(function(r){ setTimeout(r, 3000); });
+          try { var ns = await (await fetch('/api/narration/status')).json(); } catch(e) { continue; }
+          if (ns.status === 'done') { nDone = true; job._mp3 = ns.audio_local; log.innerHTML += '<div style="color:var(--accent)">  Narração: OK -> ' + (ns.audio_local||'').split('/').pop() + '</div>'; }
+          else if (ns.status === 'error') { nDone = true; log.innerHTML += '<div style="color:var(--danger)">  Narração: ERRO - ' + (ns.erro||'') + '</div>'; }
+        }
+        if (!job._mp3) continue;
+      } catch(e) { log.innerHTML += '<div style="color:var(--danger)">  Narração: ' + e.message + '</div>'; continue; }
+    }
+
+    // === ETAPA 3: PRODUÇÃO DE VÍDEO ===
+    // Verificar se vídeo já existe
+    var tmpl = templates.find(function(t){ return t.id === job.template_id; });
+    var pastaSaida = tmpl ? (tmpl.pasta_saida || '') : '';
+    var videoNome = (tmpl ? tmpl.tag || job.tag : job.tag) + '_' + dataYMD + '_01.mp4';
+    var videoExiste = false;
+    if (pastaSaida) {
+      try {
+        var vCheck = await fetch('/api/browse?path=' + encodeURIComponent(pastaSaida));
+        var vFiles = await vCheck.json();
+        videoExiste = vFiles.some(function(f){ return f.name === videoNome; });
+      } catch(e) {}
+    }
+
+    if (videoExiste) {
+      log.innerHTML += '<div style="color:var(--text-sec)">  Vídeo: existe (' + videoNome + ') - pulando</div>';
+    } else {
+      log.innerHTML += '<div style="color:var(--text-sec)">  Vídeo: produzindo...</div>';
+      log.scrollTop = 99999;
+      try {
+        var vRes = await fetch('/api/batch', {
+          method: 'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ jobs: [{ template_id: job.template_id, mp3: job._mp3 }] })
+        });
+        if (!vRes.ok) { log.innerHTML += '<div style="color:var(--danger)">  Vídeo: ERRO ao iniciar</div>'; continue; }
+        var vDone = false;
+        while (!vDone) {
+          await new Promise(function(r){ setTimeout(r, 3000); });
+          try { var vs = await (await fetch('/api/batch/status', { signal: AbortSignal.timeout(10000) })).json(); } catch(e) { continue; }
+          if (!vs.ativo) {
+            vDone = true;
+            var vJob = vs.jobs && vs.jobs[0];
+            if (vJob && vJob.status === 'concluido') {
+              log.innerHTML += '<div style="color:var(--accent)">  Vídeo: OK -> ' + (vJob.output||'').split('/').pop() + '</div>';
+            } else {
+              log.innerHTML += '<div style="color:var(--danger)">  Vídeo: ' + (vJob ? vJob.erro || vJob.status : 'erro') + '</div>';
+            }
           }
         }
-      }
-    } catch(e) { log.innerHTML += '<div style="color:var(--danger)">  Vídeo: ' + e.message + '</div>'; }
+      } catch(e) { log.innerHTML += '<div style="color:var(--danger)">  Vídeo: ' + e.message + '</div>'; }
+    }
 
     log.scrollTop = 99999;
   }
@@ -4830,10 +5730,9 @@ window.addEventListener('unhandledrejection', function(event) {
   }
 });
 
-carregarTemplates().catch(function(e) {
-  console.error('Erro ao carregar templates:', e);
-  toast('Erro ao carregar templates: ' + e.message, 'error');
-});
+carregarPipelines();
+carregarTemas().then(function(){ atualizarLoteDataSelect(); });
+document.getElementById('chat-toggle-btn').style.display = 'block';
 </script>
 </body>
 </html>"""

@@ -303,8 +303,118 @@
     Retry automatico de producoes que falharam, com log de erros
     Prioridade: MEDIA
 
+--- BLINDAGEM PARA OPERAÇÃO REMOTA (CELULAR) ---
+
+[ ] RETRY AUTOMÁTICO POR ETAPA
+    Se uma etapa falha (timeout API, erro de rede, FFmpeg crash),
+    tentar novamente até 3x com delay crescente entre tentativas (5s, 15s, 30s).
+    Se falhar 3x, pular pra próxima coluna e marcar como erro.
+    Aplicar em: geração de roteiro, narração TTS, produção de vídeo.
+    Prioridade: ALTA
+
+[ ] WATCHDOG DO SERVIDOR
+    Se o Python/uvicorn morrer, reiniciar automaticamente.
+    Opções: Windows Service (nssm), ou script .bat com loop,
+    ou supervisord se migrar pra Linux.
+    Crítico para operação remota sem acesso ao PC.
+    Prioridade: ALTA
+
+[ ] PERSISTÊNCIA DO ESTADO DE PRODUÇÃO
+    Salvar estado da produção em disco (producao_estado.json).
+    Se o servidor reiniciar no meio de uma produção, retomar
+    de onde parou baseado no que já existe em disco.
+    Verificar: roteiro existe? MP3 existe? MP4 existe? -> pular.
+    Prioridade: ALTA
+
+[ ] LOG PERSISTENTE EM ARQUIVO
+    Salvar log da produção completa em arquivo timestamped
+    (logs/producao_YYYYMMDD_HHMMSS.txt).
+    Se o browser fechar/recarregar, o log não se perde.
+    Endpoint GET /api/producao/log para consultar último log.
+    Prioridade: MEDIA
+
+[ ] TIMEOUT POR ETAPA
+    Se uma etapa travar (API não responde, FFmpeg congelou):
+    - Roteiro: timeout 5 min por etapa LLM
+    - Narração: timeout 10 min (polling)
+    - Vídeo: timeout 30 min (renderização)
+    Após timeout: kill processo, marcar como erro, seguir pro retry.
+    Prioridade: MEDIA
+
+[ ] NOTIFICAÇÃO DE CONCLUSÃO/ERRO
+    Quando produção terminar ou der erro crítico, notificar:
+    - Webhook para URL configurável (pode ser Telegram bot, Discord, etc)
+    - Endpoint GET /api/producao/ultimo-status pra celular consultar
+    - Opcional: som/vibração no browser via Notification API
+    Prioridade: BAIXA
+
+
+--- AGENTE AUTÔNOMO (FUNCIONÁRIO VIRTUAL) ---
+
+[ ] OPÇÃO 1: CLAUDE CODE SCHEDULED AGENT
+    Usar o recurso de schedule/cron do Claude Code para criar um agente
+    que roda em intervalos programados.
+    Tarefas:
+    - A cada 30 min: verificar se servidor está rodando
+    - Checar se há produções travadas ou com erro
+    - Verificar se há temas pendentes para a data de hoje
+    - Relatar status via log ou webhook
+    - Reiniciar servidor se caiu
+    Vantagem: integrado com Claude Code, fácil de configurar
+    Limitação: roda em intervalos, não é contínuo
+    Prioridade: MEDIA
+
+[ ] OPÇÃO 2: AGENT SDK (AGENTE INTELIGENTE)
+    Usar claude_agent_sdk da Anthropic para criar agente autônomo
+    que roda continuamente com acesso às APIs do app.
+    Tarefas:
+    - Monitorar status de produções em tempo real
+    - Detectar falhas e re-executar automaticamente
+    - Verificar temas pendentes e iniciar produção proativamente
+    - Tomar decisões: "roteiro muito curto → re-gerar"
+    - Validar qualidade: contar chars, verificar estrutura do roteiro
+    - Reportar via webhook (Telegram, Discord)
+    - Sugerir temas baseado em tendências anteriores
+    Vantagem: mais inteligente, toma decisões, contínuo
+    Limitação: consome créditos de API, mais complexo
+    Prioridade: BAIXA
+
+[ ] OPÇÃO 3: MONITOR PYTHON (PRÁTICO / SEM API)
+    Script monitor.py que roda em loop independente do app.
+    Tarefas:
+    - Loop infinito com checagem a cada N minutos
+    - Verificar saúde: GET /api/batch/status
+    - Se servidor morto → reiniciar (subprocess)
+    - Se produção travada (>30 min sem progresso) → cancelar e retentar
+    - Se hora configurada (ex: 06:00) → iniciar produção da data de hoje
+    - Se hora configurada (ex: 22:00) → gerar relatório do dia
+    - Log tudo em arquivo rotativo
+    - Webhook opcional para notificações
+    Vantagem: robusta, sem custo de API, roda 24/7
+    Limitação: não toma decisões inteligentes, só regras fixas
+    Prioridade: ALTA
+
+    Implementação sugerida:
+    ```
+    monitor.py
+    - check_server_health() → ping /api/batch/status
+    - check_stuck_production() → se ativo>30min, cancelar
+    - auto_start_production(data) → POST /api/producao-completa
+    - restart_server() → subprocess python app.py
+    - send_notification(msg) → webhook POST
+    - main loop: while True → check → sleep(interval)
+    ```
+
+[ ] COMBINAÇÃO IDEAL (FUTURO)
+    Usar Opção 3 (monitor.py) como base de estabilidade +
+    Opção 1 (Claude scheduled) para tarefas inteligentes:
+    - monitor.py cuida de saúde, restart, timeout
+    - Claude agent cuida de decisões, qualidade, sugestões
+    - Ambos reportam pro mesmo webhook
+    Prioridade: BAIXA (depois de implementar 1 e 3 separadamente)
+
 
 ================================================================================
   Legenda:  [x] Concluido   [ ] Pendente   [-] Cancelado
-  Ultima atualizacao: 2026-04-07
+  Ultima atualizacao: 2026-04-08
 ================================================================================

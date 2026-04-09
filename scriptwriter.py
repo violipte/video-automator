@@ -140,7 +140,7 @@ def _chamar_claude(system_msg: str, user_msg: str, api_key: str, model: str) -> 
         },
         json={
             "model": model,
-            "max_tokens": 8192,
+            "max_tokens": 32000,
             "system": system_msg,
             "messages": [{"role": "user", "content": user_msg}],
         },
@@ -160,7 +160,7 @@ def _chamar_gpt(system_msg: str, user_msg: str, api_key: str, model: str) -> str
         },
         json={
             "model": model,
-            "max_tokens": 8192,
+            "max_tokens": 32000,
             "messages": [
                 {"role": "system", "content": system_msg},
                 {"role": "user", "content": user_msg},
@@ -180,7 +180,7 @@ def _chamar_gemini(system_msg: str, user_msg: str, api_key: str, model: str) -> 
         json={
             "system_instruction": {"parts": [{"text": system_msg}]},
             "contents": [{"parts": [{"text": user_msg}]}],
-            "generationConfig": {"maxOutputTokens": 8192},
+            "generationConfig": {"maxOutputTokens": 32000},
         },
         timeout=120.0,
     )
@@ -197,8 +197,11 @@ CHAMADAS = {
 
 
 def _substituir_variaveis(texto: str, variaveis: dict) -> str:
+    import re
     for chave, valor in variaveis.items():
-        texto = texto.replace("{{" + chave + "}}", str(valor))
+        # Substituir {{chave}} com tolerância a espaços
+        pattern = r'\{\{\s*' + re.escape(chave) + r'\s*\}\}'
+        texto = re.sub(pattern, str(valor), texto)
     return texto
 
 
@@ -274,9 +277,11 @@ def executar_pipeline(pipeline_id: str, entrada: str, contexto_extra: dict = Non
             try:
                 if tipo == "texto":
                     # Texto fixo: substitui variáveis e usa como resultado
-                    resultado = _substituir_variaveis(
-                        etapa_config.get("prompt", ""), variaveis
-                    )
+                    raw_prompt = etapa_config.get("prompt", "")
+                    # Debug: log variáveis disponíveis
+                    print(f"[TEXTO FIXO] Etapa {i+1}: vars disponíveis = {list(variaveis.keys())}")
+                    print(f"[TEXTO FIXO] Prompt contém saida_etapa_3: {'saida_etapa_3' in raw_prompt}")
+                    resultado = _substituir_variaveis(raw_prompt, variaveis)
 
                 elif tipo == "code":
                     # Code: roda Python com acesso a variaveis
