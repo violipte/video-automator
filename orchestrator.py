@@ -182,7 +182,7 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None):
                     resultado = scriptwriter.estado_execucao.get("resultado_final", "")
 
                     # Verificar tamanho mínimo (configurável por template)
-                    min_chars = tmpl.get("min_roteiro_chars", 15000)
+                    min_chars = tmpl.get("min_roteiro_chars", 22000)
                     max_retries = 2
                     retry_count = 0
 

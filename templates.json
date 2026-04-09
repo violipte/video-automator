@@ -11,6 +11,7 @@
     "fps": 30,
     "pasta_imagens": "F:/Canal Dark/Imagens/Chosen One/Starseeds/Arcturian",
     "tipo_fundo": "imagens",
+    "video_loop": true,
     "duracao_por_imagem": 10,
     "efeito_zoom": true,
     "zoom_ratio": 1.15,
@@ -63,6 +64,14 @@
     },
     "pasta_saida": "F:/Canal Dark",
     "formato_nome_saida": "{tag}_{data}_{sequencia}",
+    "min_roteiro_chars": 22000,
+    "proxy": "",
+    "link_destino": "",
+    "moldura": {
+      "arquivo": "",
+      "tipo": "chromakey",
+      "opacidade": 1
+    },
     "cta": {
       "arquivo": "F:/Canal Dark/Video/subscribe green screen.mp4",
       "inicio": 30,

@@ -131,59 +131,77 @@ def testar_credencial(provedor: str, api_key: str) -> dict:
 # === CHAMADAS AOS MODELOS ===
 
 def _chamar_claude(system_msg: str, user_msg: str, api_key: str, model: str) -> str:
-    resp = httpx.post(
-        "https://api.anthropic.com/v1/messages",
-        headers={
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        },
-        json={
-            "model": model,
-            "max_tokens": 32000,
-            "system": system_msg,
-            "messages": [{"role": "user", "content": user_msg}],
-        },
-        timeout=300.0,
-    )
+    for attempt in range(3):
+        resp = httpx.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": model,
+                "max_tokens": 32000,
+                "system": system_msg,
+                "messages": [{"role": "user", "content": user_msg}],
+            },
+            timeout=300.0,
+        )
+        if resp.status_code == 429:
+            import time as _time; _time.sleep((attempt + 1) * 30)
+            continue
+        break
     resp.raise_for_status()
     data = resp.json()
     return data["content"][0]["text"]
 
 
 def _chamar_gpt(system_msg: str, user_msg: str, api_key: str, model: str) -> str:
-    resp = httpx.post(
-        "https://api.openai.com/v1/chat/completions",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": model,
-            "max_tokens": 32000,
-            "messages": [
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": user_msg},
-            ],
-        },
+    for attempt in range(3):
+        resp = httpx.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "max_tokens": 32000,
+                "messages": [
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": user_msg},
+                ],
+            },
         timeout=300.0,
-    )
+        )
+        if resp.status_code == 429:
+            import time as _time; _time.sleep((attempt + 1) * 30)
+            continue
+        break
     resp.raise_for_status()
     data = resp.json()
     return data["choices"][0]["message"]["content"]
 
 
 def _chamar_gemini(system_msg: str, user_msg: str, api_key: str, model: str) -> str:
-    resp = httpx.post(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}",
-        headers={"Content-Type": "application/json"},
-        json={
-            "system_instruction": {"parts": [{"text": system_msg}]},
-            "contents": [{"parts": [{"text": user_msg}]}],
-            "generationConfig": {"maxOutputTokens": 32000},
-        },
-        timeout=300.0,
-    )
+    # Retry com backoff para rate limiting (429)
+    for attempt in range(3):
+        resp = httpx.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}",
+            headers={"Content-Type": "application/json"},
+            json={
+                "system_instruction": {"parts": [{"text": system_msg}]},
+                "contents": [{"parts": [{"text": user_msg}]}],
+                "generationConfig": {"maxOutputTokens": 32000},
+            },
+            timeout=300.0,
+        )
+        if resp.status_code == 429:
+            wait = (attempt + 1) * 30  # 30s, 60s, 90s
+            import time as _time
+            _time.sleep(wait)
+            continue
+        break
     resp.raise_for_status()
     data = resp.json()
     return data["candidates"][0]["content"]["parts"][0]["text"]

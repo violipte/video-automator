@@ -1272,6 +1272,23 @@ def cancelar_producao_completa():
     return {"ok": True}
 
 
+@app.post("/api/producao-completa/reset")
+def resetar_producao():
+    """Reset total: mata processos, limpa estados."""
+    orchestrator.cancelar()
+    orchestrator.estado["ativo"] = False
+    narrator.estado_narracao["ativo"] = False
+    scriptwriter.estado_execucao["ativo"] = False
+    estado_batch["ativo"] = False
+    estado_batch["jobs"] = []
+    _salvar_estado_batch()
+    production_log.finalizar(True)
+    # Limpar state file
+    import subprocess as sp
+    sp.run(["taskkill", "/F", "/IM", "ffmpeg.exe"], capture_output=True, timeout=5)
+    return {"ok": True}
+
+
 # === API: CHAT (CLAUDE CLI) ===
 
 AGENTS_DIR = BASE_DIR / "agents"
@@ -1720,6 +1737,7 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
         <span id="mon-data-ref" style="font-size:13px;font-weight:600;color:var(--accent)"></span>
         <span id="mon-timer-global" style="font-size:14px;font-family:monospace;color:var(--text)">00:00:00</span>
         <span id="mon-uptime" style="font-size:11px;color:var(--text-sec)">Uptime: --:--:--</span>
+        <button class="btn btn-danger btn-sm" onclick="resetarProducao()" style="font-size:10px">Reset Total</button>
         <span style="font-size:10px;color:var(--text-sec)">Auto-refresh: 3s</span>
       </div>
     </div>
@@ -2814,7 +2832,7 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
         </div>
         <div class="form-group">
           <label>Mínimo de caracteres do roteiro</label>
-          <input type="number" id="ed-min-roteiro-chars" value="15000" min="0" max="100000">
+          <input type="number" id="ed-min-roteiro-chars" value="22000" min="0" max="100000">
           <div style="font-size:10px;color:var(--text-sec);margin-top:2px">Se o roteiro gerado tiver menos que esse valor, será refeito automaticamente (0 = sem verificação)</div>
         </div>
         <div class="form-group">
@@ -3124,7 +3142,7 @@ async function abrirEditor(id) {
     togglePosicaoCustom();
     document.getElementById('ed-pasta-saida').value = t.pasta_saida || '';
     document.getElementById('ed-formato-nome').value = t.formato_nome_saida || '{tag}_{data}_{sequencia}';
-    document.getElementById('ed-min-roteiro-chars').value = t.min_roteiro_chars || 15000;
+    document.getElementById('ed-min-roteiro-chars').value = t.min_roteiro_chars || 22000;
     document.getElementById('ed-proxy').value = t.proxy || '';
     document.getElementById('ed-link-destino').value = t.link_destino || '';
 
@@ -3196,7 +3214,7 @@ async function abrirEditor(id) {
     document.getElementById('legenda-y-val').textContent = '85%';
     togglePosicaoCustom();
     document.getElementById('ed-formato-nome').value = '{tag}_{data}_{sequencia}';
-    document.getElementById('ed-min-roteiro-chars').value = 15000;
+    document.getElementById('ed-min-roteiro-chars').value = 22000;
     document.getElementById('ed-proxy').value = '';
     document.getElementById('ed-link-destino').value = '';
     document.getElementById('ed-regras-subs').value = '';
@@ -3372,7 +3390,7 @@ async function salvarTemplate() {
     },
     pasta_saida: document.getElementById('ed-pasta-saida').value,
     formato_nome_saida: document.getElementById('ed-formato-nome').value,
-    min_roteiro_chars: parseInt(document.getElementById('ed-min-roteiro-chars').value) || 15000,
+    min_roteiro_chars: parseInt(document.getElementById('ed-min-roteiro-chars').value) || 22000,
     proxy: document.getElementById('ed-proxy').value,
     link_destino: document.getElementById('ed-link-destino').value,
     moldura: {
@@ -6840,6 +6858,13 @@ function _monCanalTimer(c) {
   var end = c.fim || (Date.now()/1000);
   var seg = end - c.inicio;
   return _fmtTempo(seg);
+}
+
+async function resetarProducao() {
+  if (!confirm('Reset total? Mata todos os processos e limpa o estado.')) return;
+  await fetch('/api/producao-completa/reset', { method: 'POST' });
+  toast('Reset completo!', 'success');
+  refreshMonitor();
 }
 
 async function refreshMonitor() {
