@@ -6963,6 +6963,9 @@ carregarPipelines();
 carregarTemas().then(function(){ atualizarLoteDataSelect(); });
 document.getElementById('chat-toggle-btn').style.display = 'block';
 
+// Sempre iniciar polling do Monitor em background
+startMonitorPolling();
+
 // === MONITOR ===
 var _monitorInterval = null;
 var _monitorTimerInterval = null;
