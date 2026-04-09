@@ -176,6 +176,8 @@ def _chamar_claude(system_msg: str, user_msg: str, api_key: str, model: str) -> 
 
 def _chamar_gpt(system_msg: str, user_msg: str, api_key: str, model: str) -> str:
     for attempt in range(3):
+        # GPT 5.x usa max_completion_tokens, modelos antigos usam max_tokens
+        token_param = "max_completion_tokens" if model.startswith("gpt-5") or model.startswith("o") else "max_tokens"
         resp = httpx.post(
             "https://api.openai.com/v1/chat/completions",
             headers={
@@ -184,7 +186,7 @@ def _chamar_gpt(system_msg: str, user_msg: str, api_key: str, model: str) -> str
             },
             json={
                 "model": model,
-                "max_tokens": 32000,
+                token_param: 32000,
                 "messages": [
                     {"role": "system", "content": system_msg},
                     {"role": "user", "content": user_msg},
