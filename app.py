@@ -914,11 +914,23 @@ def refresh_modelos(cred_id: str):
 # === API: TEMAS ===
 
 @app.get("/api/temas")
-def listar_temas():
+def listar_temas(light: bool = True):
     data = scriptwriter.carregar_temas()
-    # Suportar formato antigo (array) e novo (objeto grid)
     if isinstance(data, list):
         return {"colunas": [], "linhas": [], "celulas": {}}
+    if light:
+        # Versão leve: sem roteiros (economiza ~380KB)
+        light_data = {
+            "colunas": data.get("colunas", []),
+            "linhas": data.get("linhas", []),
+            "celulas": {}
+        }
+        for k, v in data.get("celulas", {}).items():
+            light_data["celulas"][k] = {key: val for key, val in v.items() if key != "roteiro"}
+            # Indicar se tem roteiro (sem enviar o texto)
+            if v.get("roteiro"):
+                light_data["celulas"][k]["tem_roteiro"] = len(v["roteiro"])
+        return light_data
     return data
 
 
@@ -952,19 +964,30 @@ async def salvar_temas_grid(request: Request):
 
 # === API: NARRAÇÃO ===
 
+_vozes_cache = {"data": [], "ts": 0}
+
 @app.get("/api/narration/voices")
-def listar_vozes():
+def listar_vozes(refresh: bool = False):
+    # Cache de 10 minutos para evitar 10s de latência
+    if not refresh and _vozes_cache["data"] and (time.time() - _vozes_cache["ts"]) < 600:
+        return _vozes_cache["data"]
+
     config = scriptwriter.carregar_config()
     api_key = config.get("ai33_api_key", "")
     if not api_key:
+        # Retornar cache antigo se tiver, mesmo expirado
+        if _vozes_cache["data"]:
+            return _vozes_cache["data"]
         raise HTTPException(400, "API key do ai33.pro não configurada (Config > Sync)")
     vozes = []
     vozes.extend(narrator.listar_vozes_clonadas(api_key))
     vozes.extend(narrator.listar_vozes_elevenlabs(api_key))
     vozes.extend(narrator.listar_vozes_elevenlabs_shared(api_key))
     vozes.extend(narrator.listar_vozes_minimax(api_key))
-    # Filtrar erros
-    return [v for v in vozes if "error" not in v]
+    result = [v for v in vozes if "error" not in v]
+    _vozes_cache["data"] = result
+    _vozes_cache["ts"] = time.time()
+    return result
 
 
 @app.post("/api/narration/generate")
@@ -5447,7 +5470,7 @@ function renderTemasGrid() {
       // Status de produção da célula
       var cellStatus = 'empty';
       if (cel.done) cellStatus = 'done-' + (cel.done_type || 'manual');
-      else if (cel.roteiro) cellStatus = 'roteiro';
+      else if (cel.roteiro || cel.tem_roteiro) cellStatus = 'roteiro';
       else if (cel.titulo) cellStatus = 'titulo';
       else if (cel.tema) cellStatus = 'tema';
 
@@ -5705,8 +5728,23 @@ function editarCelula(ri, ci) {
   document.getElementById('cel-tema').value = cel.tema || '';
   document.getElementById('cel-titulo').value = cel.titulo || '';
   document.getElementById('cel-thumb').value = cel.thumb || '';
-  document.getElementById('cel-roteiro').value = cel.roteiro || '';
-  document.getElementById('cel-roteiro-chars').textContent = (cel.roteiro || '').length + ' chars';
+  // Carregar roteiro completo da API (não vem no light mode)
+  if (cel.tem_roteiro && !cel.roteiro) {
+    document.getElementById('cel-roteiro').value = 'Carregando roteiro...';
+    fetch('/api/temas?light=false').then(function(r){ return r.json(); }).then(function(fullData){
+      var fullCel = (fullData.celulas || {})[key] || {};
+      if (fullCel.roteiro) {
+        document.getElementById('cel-roteiro').value = fullCel.roteiro;
+        document.getElementById('cel-roteiro-chars').textContent = fullCel.roteiro.length + ' chars';
+        // Cachear localmente
+        if (!temasData.celulas[key]) temasData.celulas[key] = {};
+        temasData.celulas[key].roteiro = fullCel.roteiro;
+      }
+    });
+  } else {
+    document.getElementById('cel-roteiro').value = cel.roteiro || '';
+  }
+  document.getElementById('cel-roteiro-chars').textContent = (cel.roteiro ? cel.roteiro.length : (cel.tem_roteiro || 0)) + ' chars';
   document.getElementById('cel-roteiro').oninput = function() {
     document.getElementById('cel-roteiro-chars').textContent = this.value.length + ' chars';
   };
@@ -6743,7 +6781,7 @@ window.addEventListener('unhandledrejection', function(event) {
   }
 });
 
-carregarPipelines();
+// Lazy load: só carregar temas (leve) no init. Pipelines carregam sob demanda.
 carregarTemas().then(function(){ atualizarLoteDataSelect(); });
 document.getElementById('chat-toggle-btn').style.display = 'block';
 
