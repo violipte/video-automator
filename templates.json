@@ -426,6 +426,7 @@
     "fps": 30,
     "pasta_imagens": "F:/Canal Dark/Imagens/Chosen One/Starseeds/Pleidian",
     "tipo_fundo": "imagens",
+    "video_loop": true,
     "duracao_por_imagem": 10,
     "efeito_zoom": true,
     "zoom_ratio": 1.15,
@@ -478,6 +479,11 @@
     },
     "pasta_saida": "F:/Canal Dark",
     "formato_nome_saida": "{tag}_{data}_{sequencia}",
+    "moldura": {
+      "arquivo": "",
+      "tipo": "chromakey",
+      "opacidade": 1
+    },
     "cta": {
       "arquivo": "F:/Canal Dark/Video/subscribe green screen.mp4",
       "inicio": 30,
@@ -489,7 +495,9 @@
     "regras": {
       "substituicoes": {
         "elayara": "alaya'ra",
-        "Lyra": "alaya'ra"
+        "Lyra": "alaya'ra",
+        "star seat": "starseed",
+        "aliyah ra": "alaya'ra"
       },
       "max_chars_linha": 42,
       "max_linhas": 2,
@@ -771,6 +779,7 @@
     "fps": 30,
     "pasta_imagens": "F:/Canal Dark/Imagens/Chosen One/Estilo Chosen One/ELDER",
     "tipo_fundo": "videos",
+    "video_loop": true,
     "duracao_por_imagem": 10,
     "efeito_zoom": false,
     "zoom_ratio": 1.09,
@@ -827,6 +836,11 @@
     },
     "pasta_saida": "F:/Canal Dark/",
     "formato_nome_saida": "{tag}_{data}_{sequencia}",
+    "moldura": {
+      "arquivo": "",
+      "tipo": "chromakey",
+      "opacidade": 1
+    },
     "cta": {
       "arquivo": "F:/Canal Dark/Video/subscribe green screen.mp4",
       "inicio": 30,
@@ -838,7 +852,8 @@
     "regras": {
       "substituicoes": {
         "Kailyn": "Kaelon",
-        "Kailin": "Kaelon"
+        "Kailin": "Kaelon",
+        "Caelon": "Kaelon"
       },
       "max_chars_linha": 42,
       "max_linhas": 2,
@@ -859,6 +874,7 @@
     "fps": 30,
     "pasta_imagens": "F:/Canal Dark/Imagens/Chosen One/Estilo Chosen One/Sirian",
     "tipo_fundo": "videos",
+    "video_loop": true,
     "duracao_por_imagem": 10,
     "efeito_zoom": true,
     "zoom_ratio": 1.15,
@@ -915,6 +931,11 @@
     },
     "pasta_saida": "F:/Canal Dark",
     "formato_nome_saida": "{tag}_{data}_{sequencia}",
+    "moldura": {
+      "arquivo": "",
+      "tipo": "chromakey",
+      "opacidade": 1
+    },
     "cta": {
       "arquivo": "F:/Canal Dark/Video/subscribe green screen.mp4",
       "inicio": 30,
@@ -924,7 +945,9 @@
       "posicao": "bottom-center"
     },
     "regras": {
-      "substituicoes": {},
+      "substituicoes": {
+        "tyrone": "tyron"
+      },
       "max_chars_linha": 42,
       "max_linhas": 2,
       "remover_hesitacoes": true,
@@ -944,8 +967,9 @@
     "fps": 30,
     "pasta_imagens": "F:/Canal Dark/Imagens/Chosen One/Estilo Chosen One/Chosen CON/CON'",
     "tipo_fundo": "imagens",
+    "video_loop": true,
     "duracao_por_imagem": 10,
-    "efeito_zoom": false,
+    "efeito_zoom": true,
     "zoom_ratio": 1.15,
     "overlays": [
       {
@@ -996,6 +1020,11 @@
     },
     "pasta_saida": "F:/Canal Dark/",
     "formato_nome_saida": "{tag}_{data}_{sequencia}",
+    "moldura": {
+      "arquivo": "",
+      "tipo": "chromakey",
+      "opacidade": 1
+    },
     "cta": {
       "arquivo": "F:/Canal Dark/Video/subscribe green screen.mp4",
       "inicio": 30,

@@ -16,6 +16,7 @@ credentials.json
 # Dados locais (podem ser recriados)
 historico.json
 temas.json
+estado_batch.json
 
 # Agente histórico de chat
 agents/temas/historico.json

@@ -44,13 +44,34 @@ TEMP_DIR.mkdir(exist_ok=True)
 app = FastAPI(title="Video Automator")
 
 # === ESTADO GLOBAL ===
-estado_batch = {
-    "ativo": False,
-    "jobs": [],
-    "job_atual": -1,
-    "inicio": None,
-    "cancelado": False,
-}
+ESTADO_BATCH_FILE = BASE_DIR / "estado_batch.json"
+
+def _carregar_estado_batch():
+    if ESTADO_BATCH_FILE.exists():
+        try:
+            with open(ESTADO_BATCH_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"ativo": False, "jobs": [], "job_atual": -1, "inicio": None, "cancelado": False}
+
+def _salvar_estado_batch():
+    try:
+        with open(ESTADO_BATCH_FILE, "w", encoding="utf-8") as f:
+            json.dump(estado_batch, f, ensure_ascii=False, default=str)
+    except Exception:
+        pass
+
+estado_batch = _carregar_estado_batch()
+# Se estava ativo quando o servidor morreu, marcar como inativo
+if estado_batch.get("ativo"):
+    estado_batch["ativo"] = False
+    for j in estado_batch.get("jobs", []):
+        if j.get("status") in ("transcrevendo", "corrigindo", "montando"):
+            j["status"] = "erro"
+            j["erro"] = "Servidor reiniciou durante produção"
+    _salvar_estado_batch()
+
 engine_atual: VideoEngine = None
 
 
@@ -474,6 +495,7 @@ def _executar_batch():
     finally:
         engine_atual = None
         estado_batch["ativo"] = False
+        _salvar_estado_batch()
         # Matar qualquer FFmpeg órfão
         try:
             import subprocess as _sp
@@ -515,6 +537,7 @@ async def iniciar_batch(request: Request):
         "cancelado": False,
     }
 
+    _salvar_estado_batch()
     thread = threading.Thread(target=_executar_batch, daemon=True)
     thread.start()
     return {"ok": True, "total_jobs": len(jobs)}
@@ -1650,8 +1673,10 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
             <option value="">Selecione a data</option>
           </select>
         </div>
-        <button class="btn btn-primary btn-sm" onclick="gerarLoteRoteiros()" style="font-size:11px">Gerar Roteiros</button>
-        <button class="btn btn-primary btn-sm" onclick="produzirDataCompleta()" style="font-size:11px;background:var(--warn);color:#000">Produzir Tudo</button>
+        <button class="btn btn-primary btn-sm" onclick="gerarLoteRoteiros()" id="btn-lote-roteiros" style="font-size:11px">Gerar Roteiros</button>
+        <button class="btn btn-danger btn-sm" onclick="_loteRoteiroCancelled=true" id="btn-lote-roteiros-cancel" style="font-size:11px;display:none">Cancelar</button>
+        <button class="btn btn-primary btn-sm" onclick="produzirDataCompleta()" id="btn-produzir-tudo" style="font-size:11px;background:var(--warn);color:#000">Produzir Tudo</button>
+        <button class="btn btn-danger btn-sm" onclick="_produzirTudoCancelled=true" id="btn-produzir-tudo-cancel" style="font-size:11px;display:none">Cancelar</button>
       </div>
       <div id="lote-preview" style="font-size:11px;color:var(--text-sec);margin-bottom:8px"></div>
       <div id="lote-status" style="display:none">
@@ -5462,7 +5487,11 @@ function previewLote() {
   preview.innerHTML = itens.join('');
 }
 
+var _loteRoteiroCancelled = false;
 async function gerarLoteRoteiros() {
+  _loteRoteiroCancelled = false;
+  document.getElementById('btn-lote-roteiros').style.display = 'none';
+  document.getElementById('btn-lote-roteiros-cancel').style.display = 'inline-flex';
   var ri = parseInt(document.getElementById('lote-data-select').value);
   if (isNaN(ri)) { toast('Selecione uma data', 'error'); return; }
   var row = temasData.linhas[ri];
@@ -5488,6 +5517,7 @@ async function gerarLoteRoteiros() {
 
   for (var i = 0; i < jobs.length; i++) {
     var job = jobs[i];
+    if (_loteRoteiroCancelled) { log.innerHTML += '<div style="color:var(--danger);font-weight:600">Cancelado</div>'; break; }
     document.getElementById('lote-count').textContent = (i+1) + '/' + jobs.length;
     document.getElementById('lote-fill').style.width = (i / jobs.length * 100) + '%';
     log.innerHTML += '<div>' + job.col.nome + ': Iniciando pipeline...</div>';
@@ -5552,11 +5582,15 @@ async function gerarLoteRoteiros() {
   document.getElementById('lote-count').textContent = jobs.length + '/' + jobs.length;
   var totalTime = ((Date.now() - startTime) / 1000).toFixed(0);
   log.innerHTML += '<div style="font-weight:600;margin-top:4px;border-top:1px solid var(--border);padding-top:4px">Concluído | ' + totalTime + 's total</div>';
-  toast('Lote de roteiros concluído!', 'success');
+  document.getElementById('btn-lote-roteiros').style.display = 'inline-flex';
+  document.getElementById('btn-lote-roteiros-cancel').style.display = 'none';
+  toast(_loteRoteiroCancelled ? 'Lote cancelado' : 'Lote concluído!', _loteRoteiroCancelled ? 'error' : 'success');
 }
 
 // === PRODUÇÃO COMPLETA ===
+var _produzirTudoCancelled = false;
 async function produzirDataCompleta() {
+  _produzirTudoCancelled = false;
   var ri = parseInt(document.getElementById('lote-data-select').value);
   if (isNaN(ri)) { toast('Selecione uma data', 'error'); return; }
   var row = temasData.linhas[ri];
@@ -5612,6 +5646,8 @@ async function produzirDataCompleta() {
   }
 
   if (!confirm('Produzir ' + jobs.length + ' vídeos para ' + row.data + '?\\n\\nRoteiro → Narração → Vídeo')) return;
+  document.getElementById('btn-produzir-tudo').style.display = 'none';
+  document.getElementById('btn-produzir-tudo-cancel').style.display = 'inline-flex';
 
   document.getElementById('lote-status').style.display = 'block';
   var log = document.getElementById('lote-log');
@@ -5619,6 +5655,7 @@ async function produzirDataCompleta() {
   var startTime = Date.now();
 
   for (var i = 0; i < jobs.length; i++) {
+    if (_produzirTudoCancelled) { log.innerHTML += '<div style="color:var(--danger);font-weight:600">Cancelado pelo usuário</div>'; break; }
     var job = jobs[i];
     document.getElementById('lote-count').textContent = (i+1) + '/' + jobs.length;
     document.getElementById('lote-fill').style.width = (i / jobs.length * 100) + '%';
@@ -5749,7 +5786,9 @@ async function produzirDataCompleta() {
   var totalTime = ((Date.now() - startTime) / 1000 / 60).toFixed(1);
   log.innerHTML += '<div style="font-weight:600;margin-top:6px;border-top:1px solid var(--border);padding-top:6px">CONCLUÍDO | ' + totalTime + ' min total</div>';
   log.scrollTop = 99999;
-  toast('Produção completa finalizada!', 'success');
+  document.getElementById('btn-produzir-tudo').style.display = 'inline-flex';
+  document.getElementById('btn-produzir-tudo-cancel').style.display = 'none';
+  toast(_produzirTudoCancelled ? 'Produção cancelada' : 'Produção finalizada!', _produzirTudoCancelled ? 'error' : 'success');
 }
 
 // === CHAT (CLAUDE CLI) ===

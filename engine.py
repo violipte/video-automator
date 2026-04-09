@@ -121,14 +121,14 @@ class VideoEngine:
         # Alterna entre efeitos para variedade sem ser agressivo
         efeitos_pool = ["zoom_in", "zoom_out", "pan_left", "pan_right"]
         clips = []
-        if tipo_fundo == "imagens" and zoom:
+        if tipo_fundo == "imagens":
             total_clips = len(lista_expandida)
             if callback_etapa:
                 callback_etapa(f"Gerando clips (0/{total_clips})")
             for i, (img, dur) in enumerate(zip(lista_expandida, duracoes)):
                 if self.cancelado:
                     raise RuntimeError("Produção cancelada pelo usuário.")
-                efeito = efeitos_pool[i % len(efeitos_pool)]
+                efeito = efeitos_pool[i % len(efeitos_pool)] if zoom else "static"
                 clip_path = self._gerar_clip_cached(img, dur, w, h, fps, zoom_ratio, efeito)
                 clips.append(clip_path)
                 if callback_progresso:
@@ -269,8 +269,8 @@ class VideoEngine:
         input_idx = 0
 
         # Inputs: clips de fundo (já renderizados)
-        if tipo_fundo == "imagens" and zoom:
-            # Clips são paths de vídeo cacheado
+        if tipo_fundo == "imagens":
+            # Clips são paths de vídeo cacheado (com ou sem zoom)
             for clip in clips:
                 inputs.extend(["-i", clip])
                 input_idx += 1
@@ -386,7 +386,7 @@ class VideoEngine:
             filtros.append(
                 f"[0:v]setpts=PTS-STARTPTS,trim=0:{self.duracao_total:.2f},setpts=PTS-STARTPTS[trimmed]"
             )
-        elif tipo_fundo == "imagens" and zoom:
+        elif tipo_fundo == "imagens":
             for i in range(n_clips):
                 filtros.append(f"[{i}:v]setpts=PTS-STARTPTS[img{i}]")
             concat_inputs = "".join(f"[img{i}]" for i in range(n_clips))
