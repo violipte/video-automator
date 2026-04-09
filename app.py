@@ -34,6 +34,7 @@ import subtitle_fixer
 import scriptwriter
 import narrator
 import thumbnail
+import production_log
 from engine import VideoEngine
 
 # === CONFIG ===
@@ -1199,7 +1200,31 @@ def monitor_status():
             "videos_total": videos_total,
             "tempo_medio": tempo_medio,
         },
+        "producao_completa": production_log.obter_estado(),
     }
+
+
+# === API: PRODUCTION LOG ===
+
+@app.post("/api/production-log/start")
+async def prod_log_start(request: Request):
+    dados = await request.json()
+    production_log.iniciar(dados.get("data_ref", ""), dados.get("canais", []))
+    return {"ok": True}
+
+@app.post("/api/production-log/update")
+async def prod_log_update(request: Request):
+    dados = await request.json()
+    production_log.atualizar_canal(dados.get("index", 0), **{k:v for k,v in dados.items() if k != "index"})
+    if dados.get("log_msg"):
+        production_log.adicionar_log(dados["log_msg"])
+    return {"ok": True}
+
+@app.post("/api/production-log/finish")
+async def prod_log_finish(request: Request):
+    dados = await request.json()
+    production_log.finalizar(dados.get("cancelado", False))
+    return {"ok": True}
 
 
 # === API: CHAT (CLAUDE CLI) ===
@@ -1642,91 +1667,83 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
   <!-- PAGE: MONITOR -->
   <div id="page-monitor" class="page">
     <div class="page-header">
-      <h2>Monitor</h2>
+      <h2>Monitor de Producao</h2>
       <div style="display:flex;align-items:center;gap:12px">
-        <span id="mon-uptime" style="font-size:12px;color:var(--text-sec)">Uptime: --:--:--</span>
-        <span id="mon-refresh-indicator" style="font-size:10px;color:var(--text-sec)">Auto-refresh: 5s</span>
+        <span id="mon-data-ref" style="font-size:13px;font-weight:600;color:var(--accent)"></span>
+        <span id="mon-timer-global" style="font-size:14px;font-family:monospace;color:var(--text)">00:00:00</span>
+        <span id="mon-uptime" style="font-size:11px;color:var(--text-sec)">Uptime: --:--:--</span>
+        <span style="font-size:10px;color:var(--text-sec)">Auto-refresh: 3s</span>
       </div>
     </div>
 
-    <!-- STATUS CARDS -->
-    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:24px">
-      <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:16px">
-        <div style="font-size:11px;color:var(--text-sec);margin-bottom:6px">Produção</div>
+    <!-- PROGRESS OVERVIEW -->
+    <div id="mon-progress-panel" style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:16px">
+      <div style="display:flex;align-items:center;gap:16px;margin-bottom:8px">
+        <span id="mon-status-label" style="font-size:14px;font-weight:600;color:var(--text)">Nenhuma producao registrada</span>
+        <span id="mon-count-label" style="font-size:13px;color:var(--text-sec)"></span>
+      </div>
+      <div class="progress-bar" style="height:12px;margin-bottom:10px"><div id="mon-progress-fill" class="progress-fill" style="width:0%;transition:width 0.3s"></div></div>
+      <div style="display:flex;gap:20px;font-size:12px">
+        <span style="color:#4ade80" id="mon-sum-ok">0 concluidos</span>
+        <span style="color:#f87171" id="mon-sum-erros">0 erros</span>
+        <span style="color:#60a5fa" id="mon-sum-pulados">0 pulados</span>
+        <span style="color:#facc15" id="mon-sum-processando">0 processando</span>
+        <span style="color:var(--text-sec)" id="mon-sum-aguardando">0 aguardando</span>
+      </div>
+    </div>
+
+    <!-- CANAL CARDS GRID -->
+    <div id="mon-canal-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px;margin-bottom:16px"></div>
+
+    <!-- LOG PANEL -->
+    <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:16px">
+      <h3 style="font-size:13px;margin-bottom:8px;color:var(--text-sec)">Log de Producao</h3>
+      <div id="mon-log-panel" style="max-height:240px;overflow-y:auto;font-size:11px;font-family:monospace;color:var(--text-sec);background:var(--bg);border-radius:6px;padding:10px"></div>
+    </div>
+
+    <!-- GENERAL STATUS CARDS (batch, narracao, pipeline, credits) -->
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px">
+      <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px">
+        <div style="font-size:10px;color:var(--text-sec);margin-bottom:4px">Batch Video</div>
         <span id="mon-batch-badge" class="badge badge-waiting">Inativo</span>
-        <div id="mon-batch-job" style="font-size:11px;color:var(--text-sec);margin-top:6px"></div>
       </div>
-      <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:16px">
-        <div style="font-size:11px;color:var(--text-sec);margin-bottom:6px">Narração</div>
+      <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px">
+        <div style="font-size:10px;color:var(--text-sec);margin-bottom:4px">Narracao</div>
         <span id="mon-narr-badge" class="badge badge-waiting">Inativo</span>
-        <div id="mon-narr-task" style="font-size:11px;color:var(--text-sec);margin-top:6px"></div>
       </div>
-      <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:16px">
-        <div style="font-size:11px;color:var(--text-sec);margin-bottom:6px">Roteiros</div>
+      <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px">
+        <div style="font-size:10px;color:var(--text-sec);margin-bottom:4px">Pipeline</div>
         <span id="mon-pipe-badge" class="badge badge-waiting">Inativo</span>
-        <div id="mon-pipe-task" style="font-size:11px;color:var(--text-sec);margin-top:6px"></div>
       </div>
-      <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:16px">
-        <div style="font-size:11px;color:var(--text-sec);margin-bottom:6px">Créditos TTS</div>
-        <div id="mon-credits" style="font-size:22px;font-weight:700;color:var(--accent)">--</div>
-      </div>
-    </div>
-
-    <!-- PRODUÇÃO ATUAL -->
-    <div id="mon-producao-atual" style="display:none;background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:24px">
-      <h3 style="font-size:14px;margin-bottom:12px">Produção Atual</h3>
-      <div style="display:flex;align-items:center;gap:16px;margin-bottom:12px">
-        <div class="progress-bar" style="flex:1;height:10px"><div id="mon-batch-fill" class="progress-fill" style="width:0%"></div></div>
-        <span id="mon-batch-pct" style="font-size:14px;font-weight:600;color:var(--accent)">0%</span>
-        <span id="mon-batch-timer" style="font-size:13px;font-family:monospace;color:var(--text)">00:00:00</span>
-      </div>
-      <div id="mon-batch-template" style="font-size:12px;color:var(--text-sec);margin-bottom:10px"></div>
-      <table class="batch-table" style="font-size:12px">
-        <thead><tr><th style="width:30px">#</th><th>Template</th><th style="width:120px">Status</th><th style="width:80px">Progresso</th></tr></thead>
-        <tbody id="mon-batch-jobs"></tbody>
-      </table>
-    </div>
-
-    <!-- ESTATÍSTICAS -->
-    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:24px">
-      <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:16px;text-align:center">
-        <div style="font-size:28px;font-weight:700;color:var(--accent)" id="mon-stat-hoje">0</div>
-        <div style="font-size:11px;color:var(--text-sec)">Vídeos hoje</div>
-      </div>
-      <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:16px;text-align:center">
-        <div style="font-size:28px;font-weight:700;color:var(--info)" id="mon-stat-semana">0</div>
-        <div style="font-size:11px;color:var(--text-sec)">Esta semana</div>
-      </div>
-      <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:16px;text-align:center">
-        <div style="font-size:28px;font-weight:700;color:var(--text)" id="mon-stat-total">0</div>
-        <div style="font-size:11px;color:var(--text-sec)">Total produzidos</div>
-      </div>
-      <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:16px;text-align:center">
-        <div style="font-size:28px;font-weight:700;color:var(--warn)" id="mon-stat-tempo">0s</div>
-        <div style="font-size:11px;color:var(--text-sec)">Tempo médio</div>
+      <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px">
+        <div style="font-size:10px;color:var(--text-sec);margin-bottom:4px">Creditos TTS</div>
+        <div id="mon-credits" style="font-size:20px;font-weight:700;color:var(--accent)">--</div>
       </div>
     </div>
 
-    <!-- DISCO -->
-    <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:24px">
-      <h3 style="font-size:14px;margin-bottom:12px">Uso de Disco</h3>
-      <div id="mon-disco" style="display:flex;gap:16px;flex-wrap:wrap"></div>
+    <!-- STATS + DISCO -->
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px">
+      <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px;text-align:center">
+        <div style="font-size:24px;font-weight:700;color:var(--accent)" id="mon-stat-hoje">0</div>
+        <div style="font-size:10px;color:var(--text-sec)">Videos hoje</div>
+      </div>
+      <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px;text-align:center">
+        <div style="font-size:24px;font-weight:700;color:var(--info)" id="mon-stat-semana">0</div>
+        <div style="font-size:10px;color:var(--text-sec)">Esta semana</div>
+      </div>
+      <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px;text-align:center">
+        <div style="font-size:24px;font-weight:700;color:var(--text)" id="mon-stat-total">0</div>
+        <div style="font-size:10px;color:var(--text-sec)">Total produzidos</div>
+      </div>
+      <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px;text-align:center">
+        <div style="font-size:24px;font-weight:700;color:var(--warn)" id="mon-stat-tempo">0s</div>
+        <div style="font-size:10px;color:var(--text-sec)">Tempo medio</div>
+      </div>
     </div>
 
-    <!-- ÚLTIMOS 10 VÍDEOS -->
     <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:16px">
-      <h3 style="font-size:14px;margin-bottom:12px">Últimos 10 Vídeos</h3>
-      <table class="batch-table" style="font-size:12px">
-        <thead><tr>
-          <th style="width:140px">Data</th>
-          <th style="width:50px">Tag</th>
-          <th>Template</th>
-          <th style="width:70px">Tempo</th>
-          <th style="width:70px">Status</th>
-        </tr></thead>
-        <tbody id="mon-ultimos-tbody"></tbody>
-      </table>
-      <div id="mon-ultimos-empty" style="display:none;color:var(--text-sec);font-size:12px;text-align:center;padding:16px">Nenhum vídeo produzido ainda</div>
+      <h3 style="font-size:13px;margin-bottom:8px;color:var(--text-sec)">Uso de Disco</h3>
+      <div id="mon-disco" style="display:flex;gap:16px;flex-wrap:wrap"></div>
     </div>
   </div>
 
@@ -6152,6 +6169,8 @@ function cancelarProduzirTudo() {
   toast('Cancelando produção após etapa atual...', 'error');
   // Também matar FFmpeg se estiver rodando
   fetch('/api/batch/cancel', { method: 'POST' }).catch(function(){});
+  // Production log: cancel signal (actual finish happens when loop ends)
+  fetch('/api/production-log/update', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({index:0, log_msg:'CANCELAMENTO SOLICITADO'})}).catch(function(){});
 }
 
 async function produzirDataCompleta() {
@@ -6211,6 +6230,10 @@ async function produzirDataCompleta() {
   }
 
   if (!confirm('Produzir ' + jobs.length + ' vídeos para ' + row.data + '?\\n\\nRoteiro → Narração → Vídeo')) return;
+
+  // Production log: START
+  fetch('/api/production-log/start', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({data_ref: row.data, canais: jobs.map(function(j){ return {tag: j.tag, template: j.template_id}; })})}).catch(function(){});
+
   document.getElementById('btn-produzir-tudo').style.display = 'none';
   document.getElementById('btn-produzir-tudo-cancel').style.display = 'inline-flex';
 
@@ -6233,8 +6256,10 @@ async function produzirDataCompleta() {
     log.innerHTML += '<div style="margin-top:6px;font-weight:500;color:var(--text)">' + job.tag + '</div>';
 
     // === ETAPA 1: ROTEIRO ===
+    fetch('/api/production-log/update', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({index:i, etapa:'roteiro', inicio:Date.now()/1000, log_msg:job.tag+': iniciando roteiro...'})}).catch(function(){});
     if (job.cel.roteiro) {
       log.innerHTML += '<div style="color:var(--text-sec)">  Roteiro: existe (' + job.cel.roteiro.length + ' chars) - pulando</div>';
+      fetch('/api/production-log/update', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({index:i, etapa:'concluido', etapa_detalhe:'roteiro pulado (existente)', roteiro_chars:job.cel.roteiro.length, fim:Date.now()/1000, progresso:33, log_msg:job.tag+': roteiro existente ('+job.cel.roteiro.length+' chars)'})}).catch(function(){});
     } else {
       log.innerHTML += '<div style="color:var(--text-sec)">  Roteiro: gerando...</div>';
       log.scrollTop = 99999;
@@ -6259,9 +6284,11 @@ async function produzirDataCompleta() {
               if (!temasData.celulas[job.key]) temasData.celulas[job.key] = {};
               temasData.celulas[job.key].roteiro = sr.resultado_final;
               log.innerHTML += '<div style="color:var(--accent)">  Roteiro: OK (' + sr.resultado_final.length + ' chars)</div>';
+              fetch('/api/production-log/update', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({index:i, etapa_detalhe:'roteiro OK', roteiro_chars:sr.resultado_final.length, progresso:33, log_msg:job.tag+': roteiro OK ('+sr.resultado_final.length+' chars)'})}).catch(function(){});
             } else {
               var erroEtapas = sr.etapas ? sr.etapas.filter(function(e){return e.status==='erro'}).map(function(e){return e.nome+': '+e.erro}).join(' | ') : '';
               log.innerHTML += '<div style="color:var(--danger)">  Roteiro: FALHOU - ' + (erroEtapas || 'sem resultado') + '</div>';
+              fetch('/api/production-log/update', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({index:i, etapa:'erro', erro:'Roteiro falhou: '+(erroEtapas||'sem resultado'), fim:Date.now()/1000, log_msg:job.tag+': roteiro FALHOU'})}).catch(function(){});
               continue;
             }
           }
@@ -6307,6 +6334,7 @@ async function produzirDataCompleta() {
     }
 
     // === ETAPA 2: NARRAÇÃO ===
+    fetch('/api/production-log/update', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({index:i, etapa:'narracao', etapa_detalhe:'verificando MP3...', log_msg:job.tag+': iniciando narracao...'})}).catch(function(){});
     // Verificar se MP3 já existe
     var mp3Existente = null;
     try {
@@ -6320,6 +6348,7 @@ async function produzirDataCompleta() {
     if (mp3Existente) {
       log.innerHTML += '<div style="color:var(--text-sec)">  Narração: existe (' + mp3Existente.split('/').pop() + ') - pulando</div>';
       job._mp3 = mp3Existente;
+      fetch('/api/production-log/update', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({index:i, etapa_detalhe:'narracao pulada (existente)', narracao_path:mp3Existente, progresso:66, log_msg:job.tag+': narracao existente'})}).catch(function(){});
     } else {
       log.innerHTML += '<div style="color:var(--text-sec)">  Narração: gerando (' + job.narrNome + ')...</div>';
       log.scrollTop = 99999;
@@ -6334,14 +6363,15 @@ async function produzirDataCompleta() {
         while (!nDone) {
           await new Promise(function(r){ setTimeout(r, 3000); });
           try { var ns = await (await fetch('/api/narration/status')).json(); } catch(e) { continue; }
-          if (ns.status === 'done') { nDone = true; job._mp3 = ns.audio_local; log.innerHTML += '<div style="color:var(--accent)">  Narração: OK -> ' + (ns.audio_local||'').split('/').pop() + '</div>'; }
-          else if (ns.status === 'error') { nDone = true; log.innerHTML += '<div style="color:var(--danger)">  Narração: ERRO - ' + (ns.erro||'') + '</div>'; }
+          if (ns.status === 'done') { nDone = true; job._mp3 = ns.audio_local; log.innerHTML += '<div style="color:var(--accent)">  Narração: OK -> ' + (ns.audio_local||'').split('/').pop() + '</div>'; fetch('/api/production-log/update', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({index:i, etapa_detalhe:'narracao OK', narracao_path:ns.audio_local||'', progresso:66, log_msg:job.tag+': narracao OK'})}).catch(function(){}); }
+          else if (ns.status === 'error') { nDone = true; log.innerHTML += '<div style="color:var(--danger)">  Narração: ERRO - ' + (ns.erro||'') + '</div>'; fetch('/api/production-log/update', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({index:i, etapa:'erro', erro:'Narracao: '+(ns.erro||''), fim:Date.now()/1000, log_msg:job.tag+': narracao ERRO'})}).catch(function(){}); }
         }
         if (!job._mp3) continue;
       } catch(e) { log.innerHTML += '<div style="color:var(--danger)">  Narração: ' + e.message + '</div>'; continue; }
     }
 
     // === ETAPA 3: PRODUÇÃO DE VÍDEO ===
+    fetch('/api/production-log/update', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({index:i, etapa:'video', etapa_detalhe:'verificando video...', log_msg:job.tag+': iniciando video...'})}).catch(function(){});
     // Verificar se vídeo já existe
     var tmpl = templates.find(function(t){ return t.id === job.template_id; });
     var pastaSaida = tmpl ? (tmpl.pasta_saida || '') : '';
@@ -6359,6 +6389,7 @@ async function produzirDataCompleta() {
 
     if (videoExiste) {
       log.innerHTML += '<div style="color:var(--text-sec)">  Vídeo: existe (' + videoNome + ') - pulando</div>';
+      fetch('/api/production-log/update', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({index:i, etapa:'concluido', etapa_detalhe:'video pulado (existente)', video_path:videoNome, progresso:100, fim:Date.now()/1000, log_msg:job.tag+': video existente - concluido'})}).catch(function(){});
     } else {
       log.innerHTML += '<div style="color:var(--text-sec)">  Vídeo: produzindo...</div>';
       log.scrollTop = 99999;
@@ -6377,8 +6408,10 @@ async function produzirDataCompleta() {
             var vJob = vs.jobs && vs.jobs[0];
             if (vJob && vJob.status === 'concluido') {
               log.innerHTML += '<div style="color:var(--accent)">  Vídeo: OK -> ' + (vJob.output||'').split('/').pop() + '</div>';
+              fetch('/api/production-log/update', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({index:i, etapa:'concluido', etapa_detalhe:'video OK', video_path:(vJob.output||''), progresso:100, fim:Date.now()/1000, log_msg:job.tag+': video OK - concluido'})}).catch(function(){});
             } else {
               log.innerHTML += '<div style="color:var(--danger)">  Vídeo: ' + (vJob ? vJob.erro || vJob.status : 'erro') + '</div>';
+              fetch('/api/production-log/update', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({index:i, etapa:'erro', erro:'Video: '+(vJob?vJob.erro||vJob.status:'erro'), fim:Date.now()/1000, log_msg:job.tag+': video ERRO'})}).catch(function(){});
             }
           }
         }
@@ -6400,6 +6433,9 @@ async function produzirDataCompleta() {
   btnC.style.opacity = '1';
   btnC.disabled = false;
   document.getElementById('btn-produzir-tudo').style.display = 'inline-flex';
+
+  // Production log: FINISH
+  fetch('/api/production-log/finish', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({cancelado: _produzirTudoCancelled})}).catch(function(){});
 
   if (_produzirTudoCancelled) {
     log.innerHTML += '<div style="font-weight:600;margin-top:6px;border-top:1px solid var(--danger);padding-top:6px;color:var(--danger)">⛔ CANCELADO | ' + totalTime + ' min decorridos</div>';
@@ -6907,40 +6943,42 @@ document.getElementById('chat-toggle-btn').style.display = 'block';
 
 // === MONITOR ===
 var _monitorInterval = null;
+var _monitorTimerInterval = null;
+var _monitorInicio = null;
+var _monitorAtivo = false;
 
 function startMonitorPolling() {
   stopMonitorPolling();
-  _monitorInterval = setInterval(refreshMonitor, 5000);
+  refreshMonitor();
+  _monitorInterval = setInterval(refreshMonitor, 3000);
+  _monitorTimerInterval = setInterval(_updateMonitorTimer, 1000);
 }
 
 function stopMonitorPolling() {
   if (_monitorInterval) { clearInterval(_monitorInterval); _monitorInterval = null; }
+  if (_monitorTimerInterval) { clearInterval(_monitorTimerInterval); _monitorTimerInterval = null; }
 }
 
-function _badgeClass(active, status) {
-  if (!active) return 'badge-waiting';
-  if (status === 'error' || status === 'erro') return 'badge-error';
-  if (status === 'done' || status === 'concluido') return 'badge-done';
-  return 'badge-encoding';
+function _updateMonitorTimer() {
+  if (!_monitorInicio) return;
+  var elapsed = _monitorAtivo ? (Date.now()/1000 - _monitorInicio) : 0;
+  var el = document.getElementById('mon-timer-global');
+  if (el) {
+    var hh = String(Math.floor(elapsed / 3600)).padStart(2, '0');
+    var mm = String(Math.floor((elapsed % 3600) / 60)).padStart(2, '0');
+    var ss = String(Math.floor(elapsed % 60)).padStart(2, '0');
+    el.textContent = hh + ':' + mm + ':' + ss;
+  }
 }
 
-function _badgeText(active, status) {
-  if (!active) return 'Inativo';
-  if (status === 'error' || status === 'erro') return 'Erro';
-  if (status === 'done' || status === 'concluido') return 'Concluído';
-  if (status === 'processing') return 'Processando';
-  return status || 'Ativo';
-}
-
-function _statusBadge(s) {
-  if (s === 'concluido') return '<span class="badge badge-done">OK</span>';
-  if (s === 'erro') return '<span class="badge badge-error">Erro</span>';
-  if (s === 'cancelado') return '<span class="badge badge-cancelled">Cancel</span>';
-  if (s === 'transcrevendo') return '<span class="badge badge-transcribing">Transcr.</span>';
-  if (s === 'corrigindo') return '<span class="badge badge-fixing">Corrig.</span>';
-  if (s === 'montando') return '<span class="badge badge-encoding">Montando</span>';
-  if (s === 'aguardando') return '<span class="badge badge-waiting">Aguard.</span>';
-  return '<span class="badge badge-waiting">' + (s || '--') + '</span>';
+function _monEtapaBadge(etapa) {
+  if (etapa === 'concluido') return '<span style="display:inline-block;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;background:#166534;color:#4ade80">concluido</span>';
+  if (etapa === 'erro') return '<span style="display:inline-block;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;background:#7f1d1d;color:#f87171">erro</span>';
+  if (etapa === 'roteiro') return '<span style="display:inline-block;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;background:#854d0e;color:#facc15">roteiro</span>';
+  if (etapa === 'narracao') return '<span style="display:inline-block;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;background:#854d0e;color:#facc15">narracao</span>';
+  if (etapa === 'video') return '<span style="display:inline-block;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;background:#854d0e;color:#facc15">video</span>';
+  if (etapa === 'pulado') return '<span style="display:inline-block;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;background:#1e3a5f;color:#60a5fa">pulado</span>';
+  return '<span style="display:inline-block;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;background:#333;color:#888">aguardando</span>';
 }
 
 function _fmtTempo(seg) {
@@ -6948,6 +6986,13 @@ function _fmtTempo(seg) {
   if (seg < 60) return Math.round(seg) + 's';
   if (seg < 3600) return Math.floor(seg / 60) + 'm ' + Math.round(seg % 60) + 's';
   return Math.floor(seg / 3600) + 'h ' + Math.floor((seg % 3600) / 60) + 'm';
+}
+
+function _monCanalTimer(c) {
+  if (!c.inicio) return '';
+  var end = c.fim || (Date.now()/1000);
+  var seg = end - c.inicio;
+  return _fmtTempo(seg);
 }
 
 async function refreshMonitor() {
@@ -6958,80 +7003,132 @@ async function refreshMonitor() {
     // Uptime
     document.getElementById('mon-uptime').textContent = 'Uptime: ' + d.uptime;
 
-    // Batch card
+    // Production log data
+    var pc = d.producao_completa || {};
+    var canais = pc.canais || [];
+    var isAtivo = !!pc.ativo;
+    _monitorAtivo = isAtivo;
+    _monitorInicio = pc.inicio || null;
+
+    // Data ref
+    var dataRefEl = document.getElementById('mon-data-ref');
+    if (pc.data_ref) {
+      dataRefEl.textContent = pc.data_ref + (isAtivo ? ' (em andamento)' : (pc.cancelado ? ' (cancelado)' : ' (finalizado)'));
+      dataRefEl.style.color = isAtivo ? 'var(--warn)' : (pc.cancelado ? 'var(--danger)' : 'var(--accent)');
+    } else {
+      dataRefEl.textContent = '';
+    }
+
+    // Timer for non-active (show final time)
+    if (!isAtivo && pc.tempo_decorrido) {
+      var td = pc.tempo_decorrido;
+      var hh = String(Math.floor(td / 3600)).padStart(2, '0');
+      var mm = String(Math.floor((td % 3600) / 60)).padStart(2, '0');
+      var ss = String(Math.floor(td % 60)).padStart(2, '0');
+      document.getElementById('mon-timer-global').textContent = hh + ':' + mm + ':' + ss;
+    }
+
+    // Progress overview
+    var total = canais.length;
+    var concluidos = 0, erros = 0, pulados = 0, processando = 0, aguardando = 0;
+    for (var ci = 0; ci < canais.length; ci++) {
+      var et = canais[ci].etapa;
+      if (et === 'concluido') concluidos++;
+      else if (et === 'erro') erros++;
+      else if (et === 'pulado') pulados++;
+      else if (et === 'aguardando') aguardando++;
+      else processando++;
+    }
+    var pct = total > 0 ? Math.round(concluidos / total * 100) : 0;
+    document.getElementById('mon-progress-fill').style.width = pct + '%';
+    var statusLabel = document.getElementById('mon-status-label');
+    if (total === 0) {
+      statusLabel.textContent = 'Nenhuma producao registrada';
+      statusLabel.style.color = 'var(--text-sec)';
+    } else if (isAtivo) {
+      statusLabel.textContent = 'Producao em andamento';
+      statusLabel.style.color = 'var(--warn)';
+    } else if (pc.cancelado) {
+      statusLabel.textContent = 'Producao cancelada';
+      statusLabel.style.color = 'var(--danger)';
+    } else {
+      statusLabel.textContent = 'Producao finalizada';
+      statusLabel.style.color = 'var(--accent)';
+    }
+    document.getElementById('mon-count-label').textContent = total > 0 ? concluidos + '/' + total + ' canais concluidos' : '';
+    document.getElementById('mon-sum-ok').textContent = concluidos + ' concluidos';
+    document.getElementById('mon-sum-erros').textContent = erros + ' erros';
+    document.getElementById('mon-sum-pulados').textContent = pulados + ' pulados';
+    document.getElementById('mon-sum-processando').textContent = processando + ' processando';
+    document.getElementById('mon-sum-aguardando').textContent = aguardando + ' aguardando';
+
+    // Canal cards
+    var grid = document.getElementById('mon-canal-grid');
+    var gHtml = '';
+    for (var ci2 = 0; ci2 < canais.length; ci2++) {
+      var c = canais[ci2];
+      var borderColor = c.etapa === 'concluido' ? '#4ade80' : (c.etapa === 'erro' ? '#f87171' : (c.etapa === 'aguardando' ? '#444' : (c.etapa === 'pulado' ? '#60a5fa' : '#facc15')));
+      gHtml += '<div style="background:var(--panel);border:1px solid ' + borderColor + ';border-radius:8px;padding:14px;border-left:4px solid ' + borderColor + '">';
+      gHtml += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">';
+      gHtml += '<span style="font-weight:600;font-size:13px;color:var(--text)">' + (c.tag || 'Canal ' + (ci2+1)) + '</span>';
+      gHtml += _monEtapaBadge(c.etapa);
+      gHtml += '</div>';
+      if (c.etapa_detalhe) {
+        gHtml += '<div style="font-size:11px;color:var(--text-sec);margin-bottom:6px">' + c.etapa_detalhe + '</div>';
+      }
+      // Progress bar per canal
+      gHtml += '<div class="progress-bar" style="height:5px;margin-bottom:6px"><div class="progress-fill" style="width:' + (c.progresso || 0) + '%;transition:width 0.3s"></div></div>';
+      // Info row
+      gHtml += '<div style="display:flex;gap:12px;font-size:10px;color:var(--text-sec);flex-wrap:wrap">';
+      if (c.roteiro_chars) gHtml += '<span>Roteiro: ' + c.roteiro_chars + ' chars</span>';
+      if (c.narracao_path) gHtml += '<span>MP3: ' + c.narracao_path.split('/').pop().split('\\\\').pop() + '</span>';
+      if (c.video_path) gHtml += '<span>Video: ' + c.video_path.split('/').pop().split('\\\\').pop() + '</span>';
+      var timer = _monCanalTimer(c);
+      if (timer) gHtml += '<span style="margin-left:auto;font-family:monospace">' + timer + '</span>';
+      gHtml += '</div>';
+      if (c.erro) {
+        gHtml += '<div style="font-size:10px;color:#f87171;margin-top:4px">' + c.erro + '</div>';
+      }
+      gHtml += '</div>';
+    }
+    if (canais.length === 0) {
+      gHtml = '<div style="color:var(--text-sec);font-size:12px;text-align:center;padding:24px;grid-column:1/-1">Nenhum canal na producao atual. Inicie uma producao via "Produzir Tudo" na aba Temas.</div>';
+    }
+    grid.innerHTML = gHtml;
+
+    // Log panel
+    var logPanel = document.getElementById('mon-log-panel');
+    var logs = pc.log || [];
+    var lHtml = '';
+    for (var li = 0; li < logs.length; li++) {
+      var logEntry = logs[li];
+      var ts = logEntry.ts ? logEntry.ts.substring(11, 19) : '';
+      lHtml += '<div style="padding:1px 0"><span style="color:var(--accent)">' + ts + '</span> ' + (logEntry.msg || '') + '</div>';
+    }
+    logPanel.innerHTML = lHtml || '<div style="color:#555">Sem entradas de log</div>';
+    // Auto-scroll to bottom
+    logPanel.scrollTop = logPanel.scrollHeight;
+
+    // General status cards
     var bAtivo = d.batch && d.batch.ativo;
     var bBadge = document.getElementById('mon-batch-badge');
     bBadge.className = 'badge ' + (bAtivo ? 'badge-encoding' : 'badge-waiting');
     bBadge.textContent = bAtivo ? 'Ativo' : 'Inativo';
-    var bJob = document.getElementById('mon-batch-job');
-    if (bAtivo && d.batch.jobs && d.batch.job_atual >= 0) {
-      var cj = d.batch.jobs[d.batch.job_atual];
-      bJob.textContent = cj ? (cj.etapa || cj.template_id || '') : '';
-    } else { bJob.textContent = ''; }
 
-    // Narração card
     var nAtivo = d.narracao && d.narracao.ativo;
     var nBadge = document.getElementById('mon-narr-badge');
-    nBadge.className = 'badge ' + _badgeClass(nAtivo, d.narracao.status);
-    nBadge.textContent = _badgeText(nAtivo, d.narracao.status);
-    document.getElementById('mon-narr-task').textContent = nAtivo ? (d.narracao.nome_saida || '') : '';
+    nBadge.className = 'badge ' + (nAtivo ? 'badge-encoding' : 'badge-waiting');
+    nBadge.textContent = nAtivo ? 'Ativo' : 'Inativo';
 
-    // Pipeline card
     var pAtivo = d.pipeline && d.pipeline.ativo;
     var pBadge = document.getElementById('mon-pipe-badge');
-    pBadge.className = 'badge ' + _badgeClass(pAtivo, d.pipeline.status);
-    pBadge.textContent = _badgeText(pAtivo, d.pipeline.status);
-    var pTask = document.getElementById('mon-pipe-task');
-    if (pAtivo && d.pipeline.etapa_atual >= 0 && d.pipeline.etapas) {
-      var et = d.pipeline.etapas[d.pipeline.etapa_atual];
-      pTask.textContent = et ? (et.nome || 'Etapa ' + (d.pipeline.etapa_atual + 1)) : '';
-    } else { pTask.textContent = ''; }
+    pBadge.className = 'badge ' + (pAtivo ? 'badge-encoding' : 'badge-waiting');
+    pBadge.textContent = pAtivo ? 'Ativo' : 'Inativo';
 
-    // Credits
     var credEl = document.getElementById('mon-credits');
     credEl.textContent = d.creditos != null ? d.creditos : '--';
 
-    // Produção Atual
-    var prodPanel = document.getElementById('mon-producao-atual');
-    if (bAtivo && d.batch.jobs) {
-      prodPanel.style.display = 'block';
-      var jobs = d.batch.jobs;
-      var done = jobs.filter(function(j){ return j.status === 'concluido'; }).length;
-      var total = jobs.length;
-      var pctGlobal = total > 0 ? Math.round(done / total * 100) : 0;
-      if (d.batch.job_atual >= 0 && d.batch.job_atual < total) {
-        var curJ = jobs[d.batch.job_atual];
-        pctGlobal = Math.round(((done + (curJ.progresso || 0) / 100) / total) * 100);
-      }
-      document.getElementById('mon-batch-fill').style.width = pctGlobal + '%';
-      document.getElementById('mon-batch-pct').textContent = pctGlobal + '%';
-      // Timer
-      if (d.batch.inicio) {
-        var elapsed = (Date.now() - new Date(d.batch.inicio).getTime()) / 1000;
-        var hh = String(Math.floor(elapsed / 3600)).padStart(2, '0');
-        var mm = String(Math.floor((elapsed % 3600) / 60)).padStart(2, '0');
-        var ss = String(Math.floor(elapsed % 60)).padStart(2, '0');
-        document.getElementById('mon-batch-timer').textContent = hh + ':' + mm + ':' + ss;
-      }
-      // Template atual
-      if (d.batch.job_atual >= 0 && d.batch.job_atual < total) {
-        var cur = jobs[d.batch.job_atual];
-        document.getElementById('mon-batch-template').textContent = 'Processando: ' + (cur.template_id || '') + ' - ' + (cur.etapa || '');
-      }
-      // Jobs table
-      var html = '';
-      for (var i = 0; i < jobs.length; i++) {
-        var j = jobs[i];
-        html += '<tr><td>' + (i + 1) + '</td><td>' + (j.template_id || '') + '</td><td>' + _statusBadge(j.status) + '</td><td>';
-        html += '<div class="progress-bar" style="height:6px"><div class="progress-fill" style="width:' + (j.progresso || 0) + '%"></div></div>';
-        html += '</td></tr>';
-      }
-      document.getElementById('mon-batch-jobs').innerHTML = html;
-    } else {
-      prodPanel.style.display = 'none';
-    }
-
-    // Estatísticas
+    // Stats
     var st = d.estatisticas || {};
     document.getElementById('mon-stat-hoje').textContent = st.videos_hoje || 0;
     document.getElementById('mon-stat-semana').textContent = st.videos_semana || 0;
@@ -7040,43 +7137,20 @@ async function refreshMonitor() {
 
     // Disco
     var discoEl = document.getElementById('mon-disco');
-    var dHtml = '';
+    var dHtml2 = '';
     if (d.disco) {
       var keys = Object.keys(d.disco);
       for (var di = 0; di < keys.length; di++) {
         var dk = keys[di];
         var dv = d.disco[dk];
-        dHtml += '<div style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px 14px;min-width:120px">';
-        dHtml += '<div style="font-size:10px;color:var(--text-sec);margin-bottom:4px">' + dk + '</div>';
-        dHtml += '<div style="font-size:14px;font-weight:600;color:var(--text)">' + (dv.humano || '?') + '</div>';
-        dHtml += '</div>';
+        dHtml2 += '<div style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px 12px;min-width:100px">';
+        dHtml2 += '<div style="font-size:10px;color:var(--text-sec);margin-bottom:2px">' + dk + '</div>';
+        dHtml2 += '<div style="font-size:13px;font-weight:600;color:var(--text)">' + (dv.humano || '?') + '</div>';
+        dHtml2 += '</div>';
       }
     }
-    discoEl.innerHTML = dHtml;
+    discoEl.innerHTML = dHtml2;
 
-    // Últimos 10
-    var ultimos = d.ultimos || [];
-    var uBody = document.getElementById('mon-ultimos-tbody');
-    var uEmpty = document.getElementById('mon-ultimos-empty');
-    if (ultimos.length === 0) {
-      uBody.innerHTML = '';
-      uEmpty.style.display = 'block';
-    } else {
-      uEmpty.style.display = 'none';
-      var uHtml = '';
-      for (var ui = 0; ui < ultimos.length; ui++) {
-        var u = ultimos[ui];
-        var dataStr = u.data ? new Date(u.data).toLocaleString('pt-BR') : '--';
-        uHtml += '<tr>';
-        uHtml += '<td>' + dataStr + '</td>';
-        uHtml += '<td><span class="card-tag">' + (u.tag || '--') + '</span></td>';
-        uHtml += '<td>' + (u.nome || u.template_id || '--') + '</td>';
-        uHtml += '<td>' + _fmtTempo(u.duracao_producao) + '</td>';
-        uHtml += '<td>' + _statusBadge(u.status) + '</td>';
-        uHtml += '</tr>';
-      }
-      uBody.innerHTML = uHtml;
-    }
   } catch (e) {
     // Silently ignore fetch errors during polling
   }
