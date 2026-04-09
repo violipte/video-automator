@@ -258,10 +258,16 @@
 
     MODO 3: MODELAR DA REFERÊNCIA
     [ ] Campo opcional: URL do vídeo YouTube de referência
-    [ ] Extrair thumbnail do vídeo de referência (YouTube API ou scraping)
+    [ ] Extrair thumbnail do vídeo de referência (YouTube oEmbed ou yt-dlp)
     [ ] Agente LLM analisa a thumb de referência e gera prompt de modelagem
+    [ ] Switch "Usar texto no prompt": se ON, inclui o texto da thumb no prompt
+        do agente que modela a imagem (texto fica embutido na imagem gerada)
+    [ ] Switch "Aplicar texto": se ON, o texto é aplicado como overlay
+        DEPOIS da geração da imagem (queimado por cima com fonte/estilo)
+    [ ] Os dois switches são independentes — pode ativar ambos, só um, ou nenhum
     [ ] Gerar nova imagem inspirada via Nano Banana
-    [ ] Aplicar texto da célula Temas, exportar
+    [ ] Se "Aplicar texto" ON: sobrepor texto com fonte/estilo configurado
+    [ ] Exportar thumb final
     Prioridade: MEDIA
 
     CONFIGURAÇÃO DO CARD:
@@ -294,13 +300,44 @@
     - Data de agendamento (se scheduled)
 
     [ ] Autenticação OAuth2 com YouTube Data API v3
+        - Cada canal precisa de OAuth separado (consent screen)
+        - Token refresh automático
+        - Armazenar tokens em credentials.json ou separado
+
     [ ] Upload de vídeo com metadata
     [ ] Upload de thumbnail customizada
-    [ ] Agendamento de publicação
+    [ ] Agendamento de publicação (scheduled visibility)
+
+    [ ] PROXY POR CANAL
+        - Campo de proxy por card/canal (HTTP ou SOCKS5)
+        - Formato: http://user:pass@ip:port ou socks5://ip:port
+        - Cada canal pode ter proxy diferente para mascarar IP
+        - Evita que YouTube detecte múltiplos uploads do mesmo IP
+        - Proxy configurável no template ou na coluna do Temas
+        - httpx suporta proxy nativo: httpx.Client(proxy="...")
+        Viabilidade: ALTA — suportado nativamente pelo httpx
+        Prioridade: ALTA
+
+    [ ] COMENTÁRIO FIXADO AUTOMÁTICO
+        - Após upload, postar comentário no vídeo
+        - YouTube API: POST /commentThreads (insert comment)
+        - Fixar: POST /comments/setModerationStatus ou marcar via API
+          Nota: a API do YouTube não tem endpoint direto "pin comment"
+          Workaround: usar Selenium/Playwright para fixar via interface
+          OU usar a API interna do YouTube (não oficial, pode quebrar)
+          Alternativa mais segura: postar o comentário como primeiro
+          (geralmente fica no topo por ser do owner)
+        - Template de comentário com variáveis {{titulo}}, {{canal}}, etc
+        - Configurável por template/canal
+        Viabilidade: PARCIAL — postar é fácil, fixar é limitado pela API
+        Prioridade: MEDIA
+
     [ ] Upload em lote por data
     [ ] Status de upload (progresso, concluído, erro)
-    [ ] Histórico de uploads
+    [ ] Histórico de uploads com link do vídeo
     [ ] Template de descrição com variáveis ({{titulo}}, {{canal}}, {{data}}, etc)
+    [ ] Template de tags por canal
+    [ ] Retry automático em caso de falha
     Prioridade: MEDIA
 
 --- DISTRIBUICAO ---

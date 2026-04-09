@@ -707,7 +707,7 @@
       "vinheta": 0
     },
     "narracao_voz": {
-      "voice_id": "2585486",
+      "voice_id": "2585484",
       "provider": "minimax_clone",
       "speed": 0.95,
       "pitch": 0
@@ -735,6 +735,11 @@
     },
     "pasta_saida": "F:/Canal Dark",
     "formato_nome_saida": "{tag}_{data}_{sequencia}",
+    "moldura": {
+      "arquivo": "",
+      "tipo": "chromakey",
+      "opacidade": 1
+    },
     "cta": {
       "arquivo": "F:/Canal Dark/Video/subscribe green screen.mp4",
       "inicio": 30,
