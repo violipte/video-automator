@@ -181,22 +181,39 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None):
 
                     resultado = scriptwriter.estado_execucao.get("resultado_final", "")
 
-                    # Verificar tamanho mínimo
-                    min_chars = 15000
-                    if resultado and len(resultado) < min_chars:
-                        production_log.adicionar_log(f"{tag}: Roteiro curto ({len(resultado)} chars < {min_chars}), refazendo...")
-                        # Retry
+                    # Verificar tamanho mínimo (configurável por template)
+                    min_chars = tmpl.get("min_roteiro_chars", 15000)
+                    max_retries = 2
+                    retry_count = 0
+
+                    while resultado and len(resultado) < min_chars and retry_count < max_retries:
+                        retry_count += 1
+                        production_log.adicionar_log(f"{tag}: Roteiro CURTO ({len(resultado)} chars < {min_chars}) — retry {retry_count}/{max_retries}")
+                        production_log.atualizar_canal(i, etapa_detalhe=f"Roteiro curto ({len(resultado)}ch), retry {retry_count}...")
+
+                        # Esperar pipeline liberar
                         for _ in range(60):
                             if not scriptwriter.estado_execucao.get("ativo"):
                                 break
                             time.sleep(2)
-                        scriptwriter.executar_pipeline(pipeline_id, cel.get("tema", ""),
-                            contexto_extra={"tema": cel.get("tema", ""), "canal": tag, "data": data_ref})
+
+                        # Reger
+                        scriptwriter.executar_pipeline(
+                            pipeline_id, cel.get("tema", ""),
+                            contexto_extra={"tema": cel.get("tema", ""), "canal": tag, "data": data_ref,
+                                            "titulo": cel.get("titulo", ""), "thumb": cel.get("thumb", "")}
+                        )
                         for _ in range(300):
                             if not scriptwriter.estado_execucao.get("ativo"):
                                 break
                             time.sleep(2)
                         resultado = scriptwriter.estado_execucao.get("resultado_final", "")
+
+                    # Após retries, verificar se ainda é curto
+                    if resultado and len(resultado) < min_chars:
+                        production_log.atualizar_canal(i, etapa="erro", erro=f"Roteiro muito curto após {max_retries} tentativas ({len(resultado)} chars)")
+                        production_log.adicionar_log(f"{tag}: ERRO — roteiro curto após {max_retries} tentativas ({len(resultado)} chars)")
+                        continue
 
                     if resultado and len(resultado) > 100:
                         # Salvar na célula

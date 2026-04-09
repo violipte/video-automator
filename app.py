@@ -2790,6 +2790,11 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
           <div style="font-size:11px;color:var(--text-sec);margin-top:4px">Variáveis: {tag}, {nome}, {data}, {sequencia}, {idioma}</div>
         </div>
         <div class="form-group">
+          <label>Mínimo de caracteres do roteiro</label>
+          <input type="number" id="ed-min-roteiro-chars" value="15000" min="0" max="100000">
+          <div style="font-size:10px;color:var(--text-sec);margin-top:2px">Se o roteiro gerado tiver menos que esse valor, será refeito automaticamente (0 = sem verificação)</div>
+        </div>
+        <div class="form-group">
           <label>Proxy (para upload YouTube)</label>
           <input type="text" id="ed-proxy" placeholder="http://user:pass@ip:port ou socks5://ip:port">
           <div style="font-size:10px;color:var(--text-sec);margin-top:2px">Cada canal pode ter proxy diferente para mascarar IP</div>
@@ -3096,6 +3101,7 @@ async function abrirEditor(id) {
     togglePosicaoCustom();
     document.getElementById('ed-pasta-saida').value = t.pasta_saida || '';
     document.getElementById('ed-formato-nome').value = t.formato_nome_saida || '{tag}_{data}_{sequencia}';
+    document.getElementById('ed-min-roteiro-chars').value = t.min_roteiro_chars || 15000;
     document.getElementById('ed-proxy').value = t.proxy || '';
     document.getElementById('ed-link-destino').value = t.link_destino || '';
 
@@ -3167,6 +3173,7 @@ async function abrirEditor(id) {
     document.getElementById('legenda-y-val').textContent = '85%';
     togglePosicaoCustom();
     document.getElementById('ed-formato-nome').value = '{tag}_{data}_{sequencia}';
+    document.getElementById('ed-min-roteiro-chars').value = 15000;
     document.getElementById('ed-proxy').value = '';
     document.getElementById('ed-link-destino').value = '';
     document.getElementById('ed-regras-subs').value = '';
@@ -3342,6 +3349,7 @@ async function salvarTemplate() {
     },
     pasta_saida: document.getElementById('ed-pasta-saida').value,
     formato_nome_saida: document.getElementById('ed-formato-nome').value,
+    min_roteiro_chars: parseInt(document.getElementById('ed-min-roteiro-chars').value) || 15000,
     proxy: document.getElementById('ed-proxy').value,
     link_destino: document.getElementById('ed-link-destino').value,
     moldura: {
