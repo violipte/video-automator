@@ -95,7 +95,7 @@ def listar_modelos(provedor: str, api_key: str) -> list:
             data = resp.json()
             # Filtrar só modelos de chat úteis
             modelos = [m["id"] for m in data.get("data", [])]
-            prefixos = ("gpt-4", "gpt-3.5", "o1", "o3", "o4")
+            prefixos = ("gpt-5", "gpt-4", "gpt-3.5", "o1", "o3", "o4")
             filtrados = [m for m in modelos if any(m.startswith(p) for p in prefixos)]
             return sorted(filtrados, reverse=True) if filtrados else sorted(modelos[:30], reverse=True)
 
@@ -126,6 +126,24 @@ def testar_credencial(provedor: str, api_key: str) -> dict:
         return {"ok": True, "modelos": modelos}
     erro = modelos[0] if modelos else "Nenhum modelo retornado"
     return {"ok": False, "erro": erro, "modelos": []}
+
+
+# Fallback LLM padrão quando o modelo principal falha
+FALLBACK_MODEL = "gpt-5.4"
+FALLBACK_PROVIDER = "gpt"
+
+
+def _obter_fallback_credencial() -> dict:
+    """Busca credencial de fallback (GPT) para quando o modelo principal falha."""
+    creds = carregar_credenciais()
+    for c in creds:
+        if c.get("provedor") == FALLBACK_PROVIDER and c.get("status") == "ok":
+            return {
+                "provedor": FALLBACK_PROVIDER,
+                "api_key": c.get("api_key", ""),
+                "modelo": FALLBACK_MODEL,
+            }
+    return None
 
 
 # === CHAMADAS AOS MODELOS ===
@@ -341,7 +359,21 @@ def executar_pipeline(pipeline_id: str, entrada: str, contexto_extra: dict = Non
                     fn = CHAMADAS.get(provedor)
                     if not fn:
                         raise ValueError(f"Provedor desconhecido: {provedor}")
-                    resultado = fn(system_msg, user_msg, api_key, modelo)
+
+                    try:
+                        resultado = fn(system_msg, user_msg, api_key, modelo)
+                    except Exception as llm_err:
+                        # FALLBACK: tentar com credencial de backup (GPT 5.4)
+                        fallback_cred = _obter_fallback_credencial()
+                        if fallback_cred:
+                            print(f"[FALLBACK] {provedor}/{modelo} falhou: {llm_err}. Tentando {fallback_cred['provedor']}/{fallback_cred['modelo']}...")
+                            fb_fn = CHAMADAS.get(fallback_cred["provedor"])
+                            if fb_fn:
+                                resultado = fb_fn(system_msg, user_msg, fallback_cred["api_key"], fallback_cred["modelo"])
+                            else:
+                                raise llm_err
+                        else:
+                            raise llm_err
 
                 estado_execucao["etapas"][i]["status"] = "concluido"
                 estado_execucao["etapas"][i]["resultado"] = resultado
