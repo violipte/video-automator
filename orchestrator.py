@@ -56,7 +56,7 @@ estado = {
 }
 
 
-def produzir_data_completa(data_idx: int, temas_data: dict = None):
+def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas: list = None):
     """Produz todos os canais de uma data. Roda em thread."""
     global estado
     estado["ativo"] = True
@@ -92,9 +92,13 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None):
     data_ymd = f"{yyyy}{mm}{dd}"  # YYYYMMDD para vídeo
     data_pasta = f"{yyyy}-{mm}-{dd}"  # YYYY-MM-DD para pastas
 
-    # Montar lista de jobs
+    # Montar lista de jobs (filtrada e ordenada)
     jobs = []
-    for ci, col in enumerate(colunas):
+    col_indices = ordem_colunas if ordem_colunas else list(range(len(colunas)))
+    for ci in col_indices:
+        if ci >= len(colunas):
+            continue
+        col = colunas[ci]
         key = f"{data_idx}_{ci}"
         cel = celulas.get(key, {})
         if not cel.get("tema"):

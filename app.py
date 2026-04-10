@@ -6153,10 +6153,12 @@ function atualizarLoteDataSelect() {
   sel.onchange = function() { previewLote(); };
 }
 
-function previewLote() {
+async function previewLote() {
   var ri = parseInt(document.getElementById('lote-data-select').value);
   var preview = document.getElementById('lote-preview');
   if (isNaN(ri)) { preview.innerHTML = ''; return; }
+  // Garantir pipelines carregadas
+  if (!pipelines.length) { try { var r = await fetch('/api/pipelines'); pipelines = await r.json(); } catch(e){} }
   var cols = temasData.colunas || [];
   var itens = [];
   cols.forEach(function(col, ci) {
