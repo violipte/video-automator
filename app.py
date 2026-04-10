@@ -5799,20 +5799,23 @@ function editarCelula(ri, ci) {
   document.getElementById('cel-titulo').value = cel.titulo || '';
   document.getElementById('cel-thumb').value = cel.thumb || '';
   // Carregar roteiro completo da API (não vem no light mode)
-  if (cel.tem_roteiro && !cel.roteiro) {
-    document.getElementById('cel-roteiro').value = 'Carregando roteiro...';
-    fetch('/api/temas/roteiro/' + key).then(function(r){ return r.json(); }).then(function(d){
-      if (d.roteiro) {
-        document.getElementById('cel-roteiro').value = d.roteiro;
-        document.getElementById('cel-roteiro-chars').textContent = d.chars + ' chars';
-        if (!temasData.celulas[key]) temasData.celulas[key] = {};
-        temasData.celulas[key].roteiro = d.roteiro;
-      }
-    }).catch(function(e){ document.getElementById('cel-roteiro').value = 'Erro ao carregar: ' + e.message; });
-  } else {
-    document.getElementById('cel-roteiro').value = cel.roteiro || '';
-  }
+  // Sempre tentar carregar roteiro do backend (fonte da verdade)
+  document.getElementById('cel-roteiro').value = cel.roteiro || 'Carregando...';
   document.getElementById('cel-roteiro-chars').textContent = (cel.roteiro ? cel.roteiro.length : (cel.tem_roteiro || 0)) + ' chars';
+  fetch('/api/temas/roteiro/' + key).then(function(r){ return r.json(); }).then(function(d){
+    if (d.roteiro) {
+      document.getElementById('cel-roteiro').value = d.roteiro;
+      document.getElementById('cel-roteiro-chars').textContent = d.chars + ' chars';
+      if (!temasData.celulas[key]) temasData.celulas[key] = {};
+      temasData.celulas[key].roteiro = d.roteiro;
+      temasData.celulas[key].tem_roteiro = d.chars;
+    } else if (!cel.roteiro) {
+      document.getElementById('cel-roteiro').value = '';
+      document.getElementById('cel-roteiro-chars').textContent = '0 chars';
+    }
+  }).catch(function(e){
+    if (!cel.roteiro) document.getElementById('cel-roteiro').value = '';
+  });
   document.getElementById('cel-roteiro').oninput = function() {
     document.getElementById('cel-roteiro-chars').textContent = this.value.length + ' chars';
   };

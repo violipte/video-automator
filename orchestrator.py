@@ -284,13 +284,26 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
                         continue
 
                     # Poll
+                    narr_ok = False
                     for _ in range(300):
                         st = narrator.poll_narracao()
                         if st.get("status") == "done":
-                            narr_path_result = st.get("audio_local", "")
-                            production_log.atualizar_canal(i, etapa_detalhe=f"OK ({Path(narr_path_result).name})", narracao_path=narr_path_result)
-                            production_log.adicionar_log(f"{tag}: Narração OK → {Path(narr_path_result).name}")
-                            narr_path = Path(narr_path_result)
+                            narr_path_result = st.get("audio_local") or ""
+                            if narr_path_result and Path(narr_path_result).exists():
+                                production_log.atualizar_canal(i, etapa_detalhe=f"OK ({Path(narr_path_result).name})", narracao_path=narr_path_result)
+                                production_log.adicionar_log(f"{tag}: Narração OK → {Path(narr_path_result).name}")
+                                narr_path = Path(narr_path_result)
+                                narr_ok = True
+                            else:
+                                # Chunking pode ter falhado — verificar se existe na pasta esperada
+                                expected = narr_subpasta / f"{narr_nome}.mp3"
+                                if expected.exists():
+                                    narr_path = expected
+                                    narr_ok = True
+                                    production_log.adicionar_log(f"{tag}: Narração encontrada em {expected.name}")
+                                else:
+                                    production_log.atualizar_canal(i, etapa="erro", erro=f"Narração done mas arquivo não encontrado: {narr_path_result}")
+                                    production_log.adicionar_log(f"{tag}: ERRO - arquivo não encontrado após narração")
                             break
                         elif st.get("status") == "error":
                             production_log.atualizar_canal(i, etapa="erro", erro=st.get("erro", ""))
@@ -301,7 +314,7 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
                         production_log.atualizar_canal(i, etapa="erro", erro="Narração timeout")
                         continue
 
-                    if not narr_path.exists():
+                    if not narr_ok:
                         production_log.atualizar_canal(i, etapa="erro", erro="MP3 não encontrado após geração")
                         continue
 
