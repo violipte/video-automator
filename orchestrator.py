@@ -361,48 +361,58 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
             production_log.atualizar_canal(i, etapa="video", etapa_detalhe="Transcrevendo...")
             production_log.adicionar_log(f"{tag}: Produzindo vídeo...")
 
-            try:
-                mp3_path = str(narr_path)
+            max_video_retries = 2
+            video_ok = False
+            for video_attempt in range(max_video_retries + 1):
+                try:
+                    mp3_path = str(narr_path)
 
-                # Transcrever
-                srt_path = transcriber.transcrever(mp3_path, tmpl.get("idioma"))
+                    # Transcrever
+                    srt_path = transcriber.transcrever(mp3_path, tmpl.get("idioma"))
 
-                # Corrigir legendas
-                lc = tmpl.get("legenda_config", {})
-                maiuscula = lc.get("maiuscula", tmpl.get("estilo_legenda") == 2)
-                srt_corrigido = subtitle_fixer.corrigir_srt(
-                    srt_path, tmpl.get("idioma", "en"), job["template_id"], maiuscula,
-                    max_linhas=lc.get("max_linhas", 2),
-                    max_chars=lc.get("max_chars", 30),
-                    regras_template=tmpl.get("regras")
-                )
+                    # Corrigir legendas
+                    lc = tmpl.get("legenda_config", {})
+                    maiuscula = lc.get("maiuscula", tmpl.get("estilo_legenda") == 2)
+                    srt_corrigido = subtitle_fixer.corrigir_srt(
+                        srt_path, tmpl.get("idioma", "en"), job["template_id"], maiuscula,
+                        max_linhas=lc.get("max_linhas", 2),
+                        max_chars=lc.get("max_chars", 30),
+                        regras_template=tmpl.get("regras")
+                    )
 
-                production_log.atualizar_canal(i, etapa_detalhe="Renderizando...", progresso=30)
+                    production_log.atualizar_canal(i, etapa_detalhe=f"Renderizando...{' (retry '+str(video_attempt)+')' if video_attempt > 0 else ''}", progresso=30)
 
-                # Montar vídeo
-                engine = VideoEngine(tmpl, mp3_path, str(video_path))
-                engine.montar(srt_path=srt_corrigido)
+                    # Montar vídeo
+                    engine = VideoEngine(tmpl, mp3_path, str(video_path))
+                    engine.montar(srt_path=srt_corrigido)
 
-                if video_path.exists() and video_path.stat().st_size > 1000:
-                    production_log.atualizar_canal(i, etapa="concluido", etapa_detalhe=f"OK ({video_nome})", video_path=str(video_path), progresso=100, fim=time.time())
-                    production_log.adicionar_log(f"{tag}: Vídeo OK → {video_nome}")
+                    if video_path.exists() and video_path.stat().st_size > 1000:
+                        production_log.atualizar_canal(i, etapa="concluido", etapa_detalhe=f"OK ({video_nome})", video_path=str(video_path), progresso=100, fim=time.time())
+                        production_log.adicionar_log(f"{tag}: Vídeo OK → {video_nome}")
 
-                    # Marcar como Done auto na célula
-                    temas_data = _carregar_temas()
-                    if key in temas_data.get("celulas", {}):
-                        temas_data["celulas"][key]["done"] = True
-                        temas_data["celulas"][key]["done_type"] = "auto"
-                        _salvar_temas(temas_data)
-                else:
-                    production_log.atualizar_canal(i, etapa="erro", erro="Vídeo não gerado ou vazio")
+                        # Marcar como Done auto na célula
+                        temas_data = _carregar_temas()
+                        if key in temas_data.get("celulas", {}):
+                            temas_data["celulas"][key]["done"] = True
+                            temas_data["celulas"][key]["done_type"] = "auto"
+                            _salvar_temas(temas_data)
+                        video_ok = True
+                        break
+                    else:
+                        raise RuntimeError("Vídeo não gerado ou vazio")
 
-            except Exception as e:
-                production_log.atualizar_canal(i, etapa="erro", erro=str(e))
-                production_log.adicionar_log(f"{tag}: ERRO vídeo - {e}")
-                # Limpar arquivo corrompido
-                if video_path.exists():
-                    video_path.unlink(missing_ok=True)
-                traceback.print_exc()
+                except Exception as e:
+                    # Limpar arquivo corrompido
+                    if video_path.exists():
+                        video_path.unlink(missing_ok=True)
+                    if video_attempt < max_video_retries:
+                        production_log.adicionar_log(f"{tag}: ERRO vídeo (tentativa {video_attempt+1}) - {e}. Retentando em 10s...")
+                        production_log.atualizar_canal(i, etapa_detalhe=f"Erro, retry {video_attempt+1}/{max_video_retries}...")
+                        time.sleep(10)
+                    else:
+                        production_log.atualizar_canal(i, etapa="erro", erro=str(e))
+                        production_log.adicionar_log(f"{tag}: ERRO vídeo após {max_video_retries+1} tentativas - {e}")
+                        traceback.print_exc()
 
     except Exception as e:
         production_log.adicionar_log(f"ERRO FATAL: {e}")
