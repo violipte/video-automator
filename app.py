@@ -26,6 +26,7 @@ if _nvidia_path.exists():
         ctypes.CDLL(str(_cublas))
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -46,6 +47,7 @@ TEMP_DIR = BASE_DIR / "temp"
 TEMP_DIR.mkdir(exist_ok=True)
 
 app = FastAPI(title="Video Automator")
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 SERVER_START_TIME = time.time()
 
@@ -621,9 +623,19 @@ def browse_filesystem(path: str = ""):
 # === API: PIPELINES (ROTEIROS) ===
 
 @app.get("/api/pipelines")
-def listar_pipelines():
+def listar_pipelines(light: bool = True):
     pipelines = scriptwriter.carregar_pipelines()
-    return sorted(pipelines.values(), key=lambda p: p.get("ordem", 0))
+    result = sorted(pipelines.values(), key=lambda p: p.get("ordem", 0))
+    if light:
+        # Sem prompts/system_message (economiza ~350KB)
+        return [{
+            "id": p.get("id"), "nome": p.get("nome"), "tag": p.get("tag"),
+            "idioma": p.get("idioma"), "ordem": p.get("ordem"),
+            "etapas": [{"nome": e.get("nome"), "tipo": e.get("tipo", "llm"),
+                        "credencial": e.get("credencial"), "modelo": e.get("modelo")}
+                       for e in p.get("etapas", [])]
+        } for p in result]
+    return result
 
 
 @app.post("/api/pipelines")
@@ -4571,18 +4583,21 @@ function adicionarEtapaPipeline() {
 }
 
 async function abrirEditorPipeline(id) {
-  // Carregar credenciais atualizadas
+  // Carregar credenciais e pipelines completas
   if (!credenciais.length) {
     var r = await fetch('/api/credenciais');
     credenciais = await r.json();
   }
+  // Carregar versão completa (com prompts) para edição
+  var fullRes = await fetch('/api/pipelines?light=false');
+  var fullPipelines = await fullRes.json();
   editandoPipelineId = id || null;
   document.getElementById('pipeline-editor-title').textContent = id ? 'Editar Pipeline' : 'Nova Pipeline';
   var list = document.getElementById('pip-etapas-list');
   list.innerHTML = '';
 
   if (id) {
-    var p = pipelines.find(function(x){ return x.id === id; });
+    var p = fullPipelines.find(function(x){ return x.id === id; });
     if (!p) return;
     document.getElementById('pip-nome').value = p.nome || '';
     document.getElementById('pip-tag').value = p.tag || '';
@@ -4618,18 +4633,23 @@ function _coletarEtapas() {
 }
 
 async function salvarPipeline() {
-  var dados = {
-    id: editandoPipelineId || document.getElementById('pip-nome').value.toLowerCase().replace(/[^a-z0-9]/g,'-') || undefined,
-    nome: document.getElementById('pip-nome').value,
-    tag: document.getElementById('pip-tag').value.toUpperCase(),
-    idioma: document.getElementById('pip-idioma').value,
-    etapas: _coletarEtapas(),
-  };
-  var url = editandoPipelineId ? '/api/pipelines/' + editandoPipelineId : '/api/pipelines';
-  var method = editandoPipelineId ? 'PUT' : 'POST';
-  var res = await fetch(url, { method: method, headers:{'Content-Type':'application/json'}, body:JSON.stringify(dados) });
-  if (res.ok) { toast('Pipeline salva!', 'success'); fecharEditorPipeline(); carregarPipelines(); }
-  else { var err = await res.json(); toast('Erro: ' + (err.detail||'Falha'), 'error'); }
+  try {
+    var dados = {
+      id: editandoPipelineId || document.getElementById('pip-nome').value.toLowerCase().replace(/[^a-z0-9]/g,'-') || undefined,
+      nome: document.getElementById('pip-nome').value,
+      tag: document.getElementById('pip-tag').value.toUpperCase(),
+      idioma: document.getElementById('pip-idioma').value,
+      etapas: _coletarEtapas(),
+    };
+    var url = editandoPipelineId ? '/api/pipelines/' + editandoPipelineId : '/api/pipelines';
+    var method = editandoPipelineId ? 'PUT' : 'POST';
+    var res = await fetch(url, { method: method, headers:{'Content-Type':'application/json'}, body:JSON.stringify(dados) });
+    if (res.ok) { toast('Pipeline salva!', 'success'); fecharEditorPipeline(); carregarPipelines(); }
+    else { var err = await res.json(); toast('Erro ao salvar: ' + (err.detail||JSON.stringify(err)), 'error'); }
+  } catch(e) {
+    toast('Erro JS: ' + e.message, 'error');
+    console.error('salvarPipeline erro:', e);
+  }
 }
 
 async function deletarPipeline(id) {
@@ -6815,7 +6835,7 @@ var _monitorAtivo = false;
 function startMonitorPolling() {
   stopMonitorPolling();
   refreshMonitor();
-  _monitorInterval = setInterval(refreshMonitor, 3000);
+  _monitorInterval = setInterval(refreshMonitor, _monitorAtivo ? 5000 : 15000);
   _monitorTimerInterval = setInterval(_updateMonitorTimer, 1000);
 }
 
