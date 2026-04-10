@@ -283,10 +283,26 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
                         production_log.adicionar_log(f"{tag}: ERRO narração - {result.get('erro','')}")
                         continue
 
-                    # Poll
+                    # Poll com timeout e detecção de estado perdido
                     narr_ok = False
+                    poll_sem_progresso = 0
                     for _ in range(300):
                         st = narrator.poll_narracao()
+                        # Detectar estado perdido (idle = processo morreu/reiniciou)
+                        if st.get("status") == "idle" and not st.get("ativo"):
+                            poll_sem_progresso += 1
+                            if poll_sem_progresso > 5:
+                                # Verificar se o arquivo já existe na pasta esperada
+                                expected = narr_subpasta / f"{narr_nome}.mp3"
+                                if expected.exists():
+                                    narr_path = expected
+                                    narr_ok = True
+                                    production_log.adicionar_log(f"{tag}: Narração recuperada de {expected.name}")
+                                    break
+                                else:
+                                    production_log.atualizar_canal(i, etapa="erro", erro="Narração perdida (estado idle)")
+                                    production_log.adicionar_log(f"{tag}: ERRO - narração perdida (servidor reiniciou?)")
+                                    break
                         if st.get("status") == "done":
                             narr_path_result = st.get("audio_local") or ""
                             if narr_path_result and Path(narr_path_result).exists():
