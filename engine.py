@@ -270,11 +270,33 @@ class VideoEngine:
 
         # Inputs: clips de fundo (já renderizados)
         if tipo_fundo == "imagens":
-            # Clips são paths de vídeo cacheado (com ou sem zoom)
-            for clip in clips:
-                inputs.extend(["-i", clip])
+            if len(clips) > 50:
+                # Muitos clips: pré-concatenar para evitar OOM no FFmpeg
+                if callback_etapa:
+                    callback_etapa(f"Pré-concatenando {len(clips)} clips...")
+                concat_list = TEMP_DIR / "bg_concat.txt"
+                with open(concat_list, "w", encoding="utf-8") as f:
+                    for clip in clips:
+                        f.write(f"file '{Path(clip).as_posix()}'\n")
+                bg_video = str(TEMP_DIR / "bg_concat.mp4")
+                concat_cmd = [
+                    "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                    "-i", str(concat_list),
+                    "-c", "copy",
+                    "-t", f"{self.duracao_total:.2f}",
+                    bg_video
+                ]
+                ret = _rodar_ffmpeg(concat_cmd)
+                if ret != 0:
+                    raise RuntimeError("Falha ao pré-concatenar clips de imagem")
+                inputs.extend(["-i", bg_video])
                 input_idx += 1
-            n_clips = len(clips)
+                n_clips = 1
+            else:
+                for clip in clips:
+                    inputs.extend(["-i", clip])
+                    input_idx += 1
+                n_clips = len(clips)
         else:
             if video_loop:
                 # LOOP: pré-concatenar vídeos shuffled em um único arquivo
