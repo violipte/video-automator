@@ -379,11 +379,11 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None):
         estado["ativo"] = False
 
 
-def iniciar_producao(data_idx: int, temas_data: dict = None):
+def iniciar_producao(data_idx: int, temas_data: dict = None, ordem_colunas: list = None):
     """Inicia produção em thread separada."""
     if estado["ativo"]:
         return {"ok": False, "erro": "Produção já em andamento"}
-    thread = threading.Thread(target=produzir_data_completa, args=(data_idx, temas_data), daemon=True)
+    thread = threading.Thread(target=produzir_data_completa, args=(data_idx, temas_data, ordem_colunas), daemon=True)
     thread.start()
     return {"ok": True}
 

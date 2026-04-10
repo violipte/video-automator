@@ -946,6 +946,16 @@ def listar_temas(light: bool = True):
     return data
 
 
+@app.get("/api/temas/roteiro/{key}")
+def obter_roteiro_celula(key: str):
+    """Retorna só o roteiro de uma célula específica."""
+    data = scriptwriter.carregar_temas()
+    if isinstance(data, list):
+        return {"roteiro": ""}
+    cel = data.get("celulas", {}).get(key, {})
+    return {"roteiro": cel.get("roteiro", ""), "chars": len(cel.get("roteiro", ""))}
+
+
 @app.post("/api/temas")
 async def salvar_temas_grid(request: Request):
     """Salva o grid inteiro de temas."""
@@ -1270,9 +1280,10 @@ async def iniciar_producao_completa(request: Request):
     """Inicia produção completa no backend (thread)."""
     dados = await request.json()
     data_idx = dados.get("data_idx", -1)
+    ordem = dados.get("ordem", None)  # lista de índices de coluna na ordem desejada
     if data_idx < 0:
         raise HTTPException(400, "data_idx é obrigatório")
-    result = orchestrator.iniciar_producao(data_idx)
+    result = orchestrator.iniciar_producao(data_idx, ordem_colunas=ordem)
     if not result.get("ok"):
         raise HTTPException(409, result.get("erro", "Erro"))
     return result
@@ -2130,6 +2141,27 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
       </div>
     </div>
 
+    <!-- MODAL: PRODUZIR TUDO (PRIORIDADE) -->
+    <div class="modal-overlay" id="modal-produzir-config">
+      <div class="modal" style="max-width:500px">
+        <div class="modal-header">
+          <h3>Produzir Tudo</h3>
+          <button class="modal-close" onclick="document.getElementById('modal-produzir-config').classList.remove('active')">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div style="font-size:12px;color:var(--text-sec);margin-bottom:12px">Arraste para reordenar a prioridade. Desmarque para excluir do lote.</div>
+          <div id="produzir-canais-list" style="display:flex;flex-direction:column;gap:4px"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary btn-sm" onclick="selecionarTodosProduzir(true)">Marcar Todos</button>
+          <button class="btn btn-secondary btn-sm" onclick="selecionarTodosProduzir(false)">Desmarcar Todos</button>
+          <div style="flex:1"></div>
+          <button class="btn btn-secondary" onclick="document.getElementById('modal-produzir-config').classList.remove('active')">Cancelar</button>
+          <button class="btn btn-primary" onclick="confirmarProduzirTudo()" style="background:var(--warn);color:#000">Iniciar Produção</button>
+        </div>
+      </div>
+    </div>
+
     <!-- MODAL: REPLICAR PARA -->
     <div class="modal-overlay" id="modal-replicar">
       <div class="modal" style="max-width:420px">
@@ -2179,7 +2211,7 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
         </div>
         <button class="btn btn-primary btn-sm" onclick="gerarLoteRoteiros()" id="btn-lote-roteiros" style="font-size:11px">Gerar Roteiros</button>
         <button class="btn btn-danger btn-sm" onclick="cancelarLoteRoteiros()" id="btn-lote-roteiros-cancel" style="font-size:11px;display:none">Cancelar</button>
-        <button class="btn btn-primary btn-sm" onclick="produzirDataCompleta()" id="btn-produzir-tudo" style="font-size:11px;background:var(--warn);color:#000">Produzir Tudo</button>
+        <button class="btn btn-primary btn-sm" onclick="abrirProduzirTudo()" id="btn-produzir-tudo" style="font-size:11px;background:var(--warn);color:#000">Produzir Tudo</button>
         <button class="btn btn-danger btn-sm" onclick="cancelarProduzirTudo()" id="btn-produzir-tudo-cancel" style="font-size:11px;display:none">Cancelar</button>
       </div>
       <div id="lote-preview" style="font-size:11px;color:var(--text-sec);margin-bottom:8px"></div>
@@ -5769,16 +5801,14 @@ function editarCelula(ri, ci) {
   // Carregar roteiro completo da API (não vem no light mode)
   if (cel.tem_roteiro && !cel.roteiro) {
     document.getElementById('cel-roteiro').value = 'Carregando roteiro...';
-    fetch('/api/temas?light=false').then(function(r){ return r.json(); }).then(function(fullData){
-      var fullCel = (fullData.celulas || {})[key] || {};
-      if (fullCel.roteiro) {
-        document.getElementById('cel-roteiro').value = fullCel.roteiro;
-        document.getElementById('cel-roteiro-chars').textContent = fullCel.roteiro.length + ' chars';
-        // Cachear localmente
+    fetch('/api/temas/roteiro/' + key).then(function(r){ return r.json(); }).then(function(d){
+      if (d.roteiro) {
+        document.getElementById('cel-roteiro').value = d.roteiro;
+        document.getElementById('cel-roteiro-chars').textContent = d.chars + ' chars';
         if (!temasData.celulas[key]) temasData.celulas[key] = {};
-        temasData.celulas[key].roteiro = fullCel.roteiro;
+        temasData.celulas[key].roteiro = d.roteiro;
       }
-    });
+    }).catch(function(e){ document.getElementById('cel-roteiro').value = 'Erro ao carregar: ' + e.message; });
   } else {
     document.getElementById('cel-roteiro').value = cel.roteiro || '';
   }
@@ -6278,14 +6308,111 @@ function cancelarProduzirTudo() {
   toast('Cancelando produção...', 'error');
 }
 
+var _produzirOrdem = [];
+var _produzirDataIdx = -1;
+
+function abrirProduzirTudo() {
+  var ri = parseInt(document.getElementById('lote-data-select').value);
+  if (isNaN(ri)) { toast('Selecione uma data', 'error'); return; }
+  _produzirDataIdx = ri;
+  var row = temasData.linhas[ri];
+  var cols = temasData.colunas || [];
+
+  // Carregar ordem salva ou usar ordem das colunas
+  var savedOrdem = JSON.parse(localStorage.getItem('produzirOrdem') || '[]');
+
+  // Construir lista de canais com tema
+  var canais = [];
+  cols.forEach(function(col, ci) {
+    var key = ri + '_' + ci;
+    var cel = (temasData.celulas || {})[key] || {};
+    if (!cel.tema) return;
+    canais.push({ ci: ci, tag: col.nome, tema: cel.tema.substring(0, 50), done: cel.done });
+  });
+
+  // Ordenar pela ordem salva
+  if (savedOrdem.length) {
+    canais.sort(function(a, b) {
+      var ia = savedOrdem.indexOf(a.tag), ib = savedOrdem.indexOf(b.tag);
+      if (ia < 0) ia = 999; if (ib < 0) ib = 999;
+      return ia - ib;
+    });
+  }
+
+  // Renderizar lista
+  var list = document.getElementById('produzir-canais-list');
+  list.innerHTML = canais.map(function(c, i) {
+    var doneIcon = c.done ? ' <span style="color:var(--accent);font-size:10px">done</span>' : '';
+    return '<div draggable="true" data-idx="' + i + '" data-ci="' + c.ci + '" data-tag="' + c.tag + '" '
+      + 'ondragstart="this.style.opacity=0.5;event.dataTransfer.setData(\\'text\\',\\'' + i + '\\')" '
+      + 'ondragend="this.style.opacity=1" '
+      + 'ondragover="event.preventDefault()" '
+      + 'ondrop="_dropProduzirItem(event,this)" '
+      + 'style="display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;cursor:grab">'
+      + '<input type="checkbox" class="produzir-check" data-ci="' + c.ci + '" checked>'
+      + '<span style="font-size:10px;color:var(--text-sec);width:20px">' + (i+1) + '</span>'
+      + '<strong style="font-size:13px">' + c.tag + '</strong>' + doneIcon
+      + '<span style="font-size:11px;color:var(--text-sec);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + c.tema + '</span>'
+      + '<span style="font-size:16px;color:var(--text-sec);cursor:grab">&#9776;</span>'
+      + '</div>';
+  }).join('');
+
+  document.getElementById('modal-produzir-config').classList.add('active');
+}
+
+function _dropProduzirItem(event, target) {
+  event.preventDefault();
+  var fromIdx = parseInt(event.dataTransfer.getData('text'));
+  var toIdx = parseInt(target.dataset.idx);
+  var list = document.getElementById('produzir-canais-list');
+  var items = Array.from(list.children);
+  if (fromIdx === toIdx || fromIdx < 0 || toIdx < 0) return;
+  var el = items[fromIdx];
+  if (fromIdx < toIdx) {
+    target.after(el);
+  } else {
+    target.before(el);
+  }
+  // Atualizar números
+  Array.from(list.children).forEach(function(div, i) {
+    div.dataset.idx = i;
+    div.querySelector('span').textContent = (i+1);
+  });
+}
+
+function selecionarTodosProduzir(val) {
+  document.querySelectorAll('.produzir-check').forEach(function(cb) { cb.checked = val; });
+}
+
+function confirmarProduzirTudo() {
+  var list = document.getElementById('produzir-canais-list');
+  var items = Array.from(list.children);
+  var ordem = [];
+  items.forEach(function(div) {
+    var cb = div.querySelector('.produzir-check');
+    if (cb && cb.checked) {
+      ordem.push(parseInt(div.dataset.ci));
+    }
+  });
+
+  if (!ordem.length) { toast('Selecione ao menos um canal', 'error'); return; }
+
+  // Salvar ordem para próxima vez
+  var tagOrdem = items.map(function(div){ return div.dataset.tag; });
+  localStorage.setItem('produzirOrdem', JSON.stringify(tagOrdem));
+
+  document.getElementById('modal-produzir-config').classList.remove('active');
+
+  // Iniciar produção com ordem customizada
+  _produzirOrdem = ordem;
+  produzirDataCompleta();
+}
+
 async function produzirDataCompleta() {
   // Delega ao backend Python (orchestrator.py)
   _produzirTudoCancelled = false;
-  var ri = parseInt(document.getElementById('lote-data-select').value);
+  var ri = _produzirDataIdx >= 0 ? _produzirDataIdx : parseInt(document.getElementById('lote-data-select').value);
   if (isNaN(ri)) { toast('Selecione uma data', 'error'); return; }
-  var row = temasData.linhas[ri];
-
-  if (!confirm('Produzir todos os vídeos para ' + row.data + '?')) return;
 
   document.getElementById('btn-produzir-tudo').style.display = 'none';
   document.getElementById('btn-produzir-tudo-cancel').style.display = 'inline-flex';
@@ -6293,7 +6420,7 @@ async function produzirDataCompleta() {
   try {
     var res = await fetch('/api/producao-completa/iniciar', {
       method: 'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ data_idx: ri })
+      body: JSON.stringify({ data_idx: ri, ordem: _produzirOrdem.length ? _produzirOrdem : undefined })
     });
     if (!res.ok) {
       var err = await res.json();

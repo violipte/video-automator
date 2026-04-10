@@ -129,7 +129,7 @@ def testar_credencial(provedor: str, api_key: str) -> dict:
 
 
 # Fallback LLM padrão quando o modelo principal falha
-FALLBACK_MODEL = "gpt-5.4"
+FALLBACK_MODEL = "gpt-5.2"
 FALLBACK_PROVIDER = "gpt"
 
 

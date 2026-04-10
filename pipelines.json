@@ -25,19 +25,14 @@
         "tipo": "llm",
         "nome": "Amplifier EN",
         "prompt": "Goal: Expand the content provided in {{saida_anterior}} up to a maximum of 25,000 characters, maintaining the original tone, pacing, and spiritual depth. You must amplify each section of the content (except for the Hook and Audience Interaction), adding more emotional resonance, metaphoric richness, illustrative detail, and narrative depth.\n\n🔒 STRICT RULES (DO NOT BREAK):\n\nNEVER start the text with any variation of:\n\n\"Hello beautiful souls, and welcome back to Starseed from Gaya. Today, we embark on a profound journey...\"\nor anything similar.\n\nThe channel name is NOT “Starseed from Gaya.”\nDo not insert or refer to this name in your text.\n\nYou are NOT responsible for writing the hook or audience interaction. Your task begins after these parts.\n\nThere are protected sections in the script marked as:\n<!-- CTA CLOSE START --> to <!-- CTA CLOSE END -->\nDo not edit these sections under any circumstances.\n\nDo not add new sections, greetings, or structural elements. Your output must be a continuous, uninterrupted block of text. Do not include formatting, headings, or labels.\n\nAbsolutely do not output anything like:\n\n“Hello beautiful souls”\n\n“Welcome back to the channel”\n\n“In today’s video…”\n\nOr anything similar.\nSkip straight into the subject matter.\n\nALWAYS INCLUDE THE EBOOK CTA\n\nInput:\n{{saida_anterior}}\n\nOutput:\nReturn only the expanded version of the script, as a single block of plain text, seamlessly enriching the existing structure and message.",
-        "credencial": "ff01fb83",
-        "modelo": "gemini-2.5-flash",
+        "credencial": "2a38491d",
+        "modelo": "gpt-5.2",
         "system_message": "You are an expert at amplifying and expanding spiritual YouTube scripts. Your task is to take the script provided and expand it to a minimum of 15,000 characters while maintaining its original tone, flow, and spiritual depth.\n\nYour expanded script must:\n\nPreserve the structure and voice of the original.\n\nEnrich the content with vivid metaphors, scripture, imagery, practical reflection, and spiritual insight.\n\nExpand naturally and meaningfully, avoiding repetition or filler.\n\n🔒 ABSOLUTELY DO NOT EDIT the following protected blocks:\nThere are fixed sections in the script. They are marked like this:\n\n<!-- FIXED INTRO START --> to <!-- FIXED INTRO END -->\n\n<!-- CTA CLOSE START --> to <!-- CTA CLOSE END -->\n\nYou must not modify, rewrite, rephrase, expand, or paraphrase anything inside these blocks.\n\nInstead, simply preserve these exact words in the final output and remove the HTML comment tags (<!-- ... -->) before returning your result.\n\nAny attempt to alter the content within those markers is considered a failure.\n\nREMOVE from your output:\nAgent descriptions or prefaces like “Here’s the expanded script…”\n\nAny formatting (e.g., headers, bullet points, numbered lists)\n\nLine breaks like \\n\n\nSymbols like #, *, or [Scene], [Pause], etc.\n\nFINAL OUTPUT RULES:\nReturn a single, clean, uninterrupted block of text, using natural paragraph breaks only.\nThe content must feel fluid, complete, and spiritually powerful from beginning to end."
       },
       {
         "tipo": "texto",
         "nome": "Closer",
-        "prompt": "If this transmission spoke to you, don't just walk away from it—respond to it. Remember: the ebook \"The Hidden Keys of Arcturian Awakening\" is waiting for you in our exclusive app, for a limited time only. Go to the link in the first pinned comment before this gateway closes to the next wave. And if your heart is calling for guidance on divine love and sacred union, I also bring transmissions on Arcturian Heart Wisdom—where we explore the twin flame journey, heart healing, and attracting your divine counterpart. You'll find the link in the description.\""
-      },
-      {
-        "tipo": "texto",
-        "nome": "Closer",
-        "prompt": "{{saida_etapa_1}}\n{{saida_etapa_3}}\n{{saida_anterior}}\n"
+        "prompt": "{{saida_etapa_1}}\n{{saida_anterior}}\n"
       },
       {
         "tipo": "code",
@@ -72,19 +67,14 @@
         "tipo": "llm",
         "nome": "Amplifier EN",
         "prompt": "Goal: Expand the content provided in {{saida_anterior}} up to a maximum of 25,000 characters, maintaining the original tone, pacing, and spiritual depth. You must amplify each section of the content (except for the Hook and Audience Interaction), adding more emotional resonance, metaphoric richness, illustrative detail, and narrative depth.\n\n🔒 STRICT RULES (DO NOT BREAK):\n\nNEVER start the text with any variation of:\n\n\"Hello beautiful souls, and welcome back to Starseed from Gaya. Today, we embark on a profound journey...\"\nor anything similar.\n\nThe channel name is NOT “Starseed from Gaya.”\nDo not insert or refer to this name in your text.\n\nYou are NOT responsible for writing the hook or audience interaction. Your task begins after these parts.\n\nThere are protected sections in the script marked as:\n<!-- CTA CLOSE START --> to <!-- CTA CLOSE END -->\nDo not edit these sections under any circumstances.\n\nDo not add new sections, greetings, or structural elements. Your output must be a continuous, uninterrupted block of text. Do not include formatting, headings, or labels.\n\nAbsolutely do not output anything like:\n\n“Hello beautiful souls”\n\n“Welcome back to the channel”\n\n“In today’s video…”\n\nOr anything similar.\nSkip straight into the subject matter.\n\nALWAYS INCLUDE THE EBOOK CTA\n\nInput:\n{{saida_anterior}}\n\nOutput:\nReturn only the expanded version of the script, as a single block of plain text, seamlessly enriching the existing structure and message.",
-        "credencial": "ff01fb83",
-        "modelo": "gemini-2.5-flash",
+        "credencial": "2a38491d",
+        "modelo": "gpt-5.2",
         "system_message": "You are an expert at amplifying and expanding spiritual YouTube scripts. Your task is to take the script provided and expand it to a minimum of 15,000 characters while maintaining its original tone, flow, and spiritual depth.\n\nYour expanded script must:\n\nPreserve the structure and voice of the original.\n\nEnrich the content with vivid metaphors, scripture, imagery, practical reflection, and spiritual insight.\n\nExpand naturally and meaningfully, avoiding repetition or filler.\n\n🔒 ABSOLUTELY DO NOT EDIT the following protected blocks:\nThere are fixed sections in the script. They are marked like this:\n\n<!-- FIXED INTRO START --> to <!-- FIXED INTRO END -->\n\n<!-- CTA CLOSE START --> to <!-- CTA CLOSE END -->\n\nYou must not modify, rewrite, rephrase, expand, or paraphrase anything inside these blocks.\n\nInstead, simply preserve these exact words in the final output and remove the HTML comment tags (<!-- ... -->) before returning your result.\n\nAny attempt to alter the content within those markers is considered a failure.\n\nREMOVE from your output:\nAgent descriptions or prefaces like “Here’s the expanded script…”\n\nAny formatting (e.g., headers, bullet points, numbered lists)\n\nLine breaks like \\n\n\nSymbols like #, *, or [Scene], [Pause], etc.\n\nFINAL OUTPUT RULES:\nReturn a single, clean, uninterrupted block of text, using natural paragraph breaks only.\nThe content must feel fluid, complete, and spiritually powerful from beginning to end."
       },
       {
         "tipo": "texto",
         "nome": "Closer",
-        "prompt": "If this transmission spoke to you, don’t just walk away from it—respond to it. Help carry this message further. Every act of support helps this transmission find the next starseed who needs it."
-      },
-      {
-        "tipo": "texto",
-        "nome": "Closer",
-        "prompt": "{{saida_etapa_1}}\n{{saida_etapa_3}}\n{{saida_anterior}}\n"
+        "prompt": "{{saida_etapa_1}}\n{{saida_anterior}}\n"
       },
       {
         "tipo": "code",
@@ -119,19 +109,14 @@
         "tipo": "llm",
         "nome": "Amplifier EN",
         "prompt": "Goal: Expand the content provided in {{saida_anterior}} up to a maximum of 25,000 characters, maintaining the original tone, pacing, and spiritual depth. You must amplify each section of the content (except for the Hook and Audience Interaction), adding more emotional resonance, metaphoric richness, illustrative detail, and narrative depth.\n\n🔒 STRICT RULES (DO NOT BREAK):\n\nNEVER start the text with any variation of:\n\n\"Hello beautiful souls, and welcome back to Starseed from Gaya. Today, we embark on a profound journey...\"\nor anything similar.\n\nThe channel name is NOT “Starseed from Gaya.”\nDo not insert or refer to this name in your text.\n\nYou are NOT responsible for writing the hook or audience interaction. Your task begins after these parts.\n\nThere are protected sections in the script marked as:\n<!-- CTA CLOSE START --> to <!-- CTA CLOSE END -->\nDo not edit these sections under any circumstances.\n\nDo not add new sections, greetings, or structural elements. Your output must be a continuous, uninterrupted block of text. Do not include formatting, headings, or labels.\n\nAbsolutely do not output anything like:\n\n“Hello beautiful souls”\n\n“Welcome back to the channel”\n\n“In today’s video…”\n\nOr anything similar.\nSkip straight into the subject matter.\n\nALWAYS INCLUDE THE EBOOK CTA\n\nInput:\n{{saida_anterior}}\n\nOutput:\nReturn only the expanded version of the script, as a single block of plain text, seamlessly enriching the existing structure and message.",
-        "credencial": "ff01fb83",
-        "modelo": "gemini-2.5-flash",
+        "credencial": "2a38491d",
+        "modelo": "gpt-5.2",
         "system_message": "You are an expert at amplifying and expanding spiritual YouTube scripts. Your task is to take the script provided and expand it to a minimum of 15,000 characters while maintaining its original tone, flow, and spiritual depth.\n\nYour expanded script must:\n\nPreserve the structure and voice of the original.\n\nEnrich the content with vivid metaphors, scripture, imagery, practical reflection, and spiritual insight.\n\nExpand naturally and meaningfully, avoiding repetition or filler.\n\n🔒 ABSOLUTELY DO NOT EDIT the following protected blocks:\nThere are fixed sections in the script. They are marked like this:\n\n<!-- FIXED INTRO START --> to <!-- FIXED INTRO END -->\n\n<!-- CTA CLOSE START --> to <!-- CTA CLOSE END -->\n\nYou must not modify, rewrite, rephrase, expand, or paraphrase anything inside these blocks.\n\nInstead, simply preserve these exact words in the final output and remove the HTML comment tags (<!-- ... -->) before returning your result.\n\nAny attempt to alter the content within those markers is considered a failure.\n\nREMOVE from your output:\nAgent descriptions or prefaces like “Here’s the expanded script…”\n\nAny formatting (e.g., headers, bullet points, numbered lists)\n\nLine breaks like \\n\n\nSymbols like #, *, or [Scene], [Pause], etc.\n\nFINAL OUTPUT RULES:\nReturn a single, clean, uninterrupted block of text, using natural paragraph breaks only.\nThe content must feel fluid, complete, and spiritually powerful from beginning to end."
       },
       {
         "tipo": "texto",
         "nome": "Closer",
-        "prompt": "If this transmission spoke to you, don’t just walk away from it—respond to it. Help carry this message further. Every act of support helps this transmission find the next starseed who needs it."
-      },
-      {
-        "tipo": "texto",
-        "nome": "Closer",
-        "prompt": "{{saida_etapa_1}}\n{{saida_etapa_3}}\n{{saida_anterior}}\n"
+        "prompt": "{{saida_etapa_1}}\n{{saida_anterior}}\n"
       },
       {
         "tipo": "code",
@@ -166,19 +151,14 @@
         "tipo": "llm",
         "nome": "Amplifier EN",
         "prompt": "Goal: Expand the content provided in {{saida_anterior}} up to a maximum of 25,000 characters, maintaining the original tone, pacing, and spiritual depth. You must amplify each section of the content (except for the Hook and Audience Interaction), adding more emotional resonance, metaphoric richness, illustrative detail, and narrative depth.\n\n🔒 STRICT RULES (DO NOT BREAK):\n\nNEVER start the text with any variation of:\n\n\"Hello beautiful souls, and welcome back to Starseed from Gaya. Today, we embark on a profound journey...\"\nor anything similar.\n\nThe channel name is NOT “Starseed from Gaya.”\nDo not insert or refer to this name in your text.\n\nYou are NOT responsible for writing the hook or audience interaction. Your task begins after these parts.\n\nThere are protected sections in the script marked as:\n<!-- CTA CLOSE START --> to <!-- CTA CLOSE END -->\nDo not edit these sections under any circumstances.\n\nDo not add new sections, greetings, or structural elements. Your output must be a continuous, uninterrupted block of text. Do not include formatting, headings, or labels.\n\nAbsolutely do not output anything like:\n\n“Hello beautiful souls”\n\n“Welcome back to the channel”\n\n“In today’s video…”\n\nOr anything similar.\nSkip straight into the subject matter.\n\nALWAYS INCLUDE THE EBOOK CTA\n\nInput:\n{{saida_anterior}}\n\nOutput:\nReturn only the expanded version of the script, as a single block of plain text, seamlessly enriching the existing structure and message.",
-        "credencial": "ff01fb83",
-        "modelo": "gemini-2.5-flash",
+        "credencial": "2a38491d",
+        "modelo": "gpt-5.2",
         "system_message": "You are an expert at amplifying and expanding spiritual YouTube scripts. Your task is to take the script provided and expand it to a minimum of 15,000 characters while maintaining its original tone, flow, and spiritual depth.\n\nYour expanded script must:\n\nPreserve the structure and voice of the original.\n\nEnrich the content with vivid metaphors, scripture, imagery, practical reflection, and spiritual insight.\n\nExpand naturally and meaningfully, avoiding repetition or filler.\n\n🔒 ABSOLUTELY DO NOT EDIT the following protected blocks:\nThere are fixed sections in the script. They are marked like this:\n\n<!-- FIXED INTRO START --> to <!-- FIXED INTRO END -->\n\n<!-- CTA CLOSE START --> to <!-- CTA CLOSE END -->\n\nYou must not modify, rewrite, rephrase, expand, or paraphrase anything inside these blocks.\n\nInstead, simply preserve these exact words in the final output and remove the HTML comment tags (<!-- ... -->) before returning your result.\n\nAny attempt to alter the content within those markers is considered a failure.\n\nREMOVE from your output:\nAgent descriptions or prefaces like “Here’s the expanded script…”\n\nAny formatting (e.g., headers, bullet points, numbered lists)\n\nLine breaks like \\n\n\nSymbols like #, *, or [Scene], [Pause], etc.\n\nFINAL OUTPUT RULES:\nReturn a single, clean, uninterrupted block of text, using natural paragraph breaks only.\nThe content must feel fluid, complete, and spiritually powerful from beginning to end."
       },
       {
         "tipo": "texto",
         "nome": "Closer",
-        "prompt": "If this transmission spoke to you, don’t just walk away from it—respond to it. Help carry this message further. Every act of support helps this transmission find the next starseed who needs it."
-      },
-      {
-        "tipo": "texto",
-        "nome": "Closer",
-        "prompt": "{{saida_etapa_1}}\n{{saida_etapa_3}}\n{{saida_anterior}}\n"
+        "prompt": "{{saida_etapa_1}}\n{{saida_anterior}}\n"
       },
       {
         "tipo": "code",
@@ -213,19 +193,14 @@
         "tipo": "llm",
         "nome": "Amplifier EN",
         "prompt": "Goal: Expand the content provided in {{saida_anterior}} up to a maximum of 25,000 characters, maintaining the original tone, pacing, and spiritual depth. You must amplify each section of the content (except for the Hook and Audience Interaction), adding more emotional resonance, metaphoric richness, illustrative detail, and narrative depth.\n\n🔒 STRICT RULES (DO NOT BREAK):\n\nNEVER start the text with any variation of:\n\n\"Hello beautiful souls, and welcome back to Starseed from Gaya. Today, we embark on a profound journey...\"\nor anything similar.\n\nThe channel name is NOT “Starseed from Gaya.”\nDo not insert or refer to this name in your text.\n\nYou are NOT responsible for writing the hook or audience interaction. Your task begins after these parts.\n\nThere are protected sections in the script marked as:\n<!-- CTA CLOSE START --> to <!-- CTA CLOSE END -->\nDo not edit these sections under any circumstances.\n\nDo not add new sections, greetings, or structural elements. Your output must be a continuous, uninterrupted block of text. Do not include formatting, headings, or labels.\n\nAbsolutely do not output anything like:\n\n“Hello beautiful souls”\n\n“Welcome back to the channel”\n\n“In today’s video…”\n\nOr anything similar.\nSkip straight into the subject matter.\n\nALWAYS INCLUDE THE EBOOK CTA\n\nInput:\n{{saida_anterior}}\n\nOutput:\nReturn only the expanded version of the script, as a single block of plain text, seamlessly enriching the existing structure and message.",
-        "credencial": "ff01fb83",
-        "modelo": "gemini-2.5-flash",
+        "credencial": "2a38491d",
+        "modelo": "gpt-5.2",
         "system_message": "You are an expert at amplifying and expanding spiritual YouTube scripts. Your task is to take the script provided and expand it to a minimum of 15,000 characters while maintaining its original tone, flow, and spiritual depth.\n\nYour expanded script must:\n\nPreserve the structure and voice of the original.\n\nEnrich the content with vivid metaphors, scripture, imagery, practical reflection, and spiritual insight.\n\nExpand naturally and meaningfully, avoiding repetition or filler.\n\n🔒 ABSOLUTELY DO NOT EDIT the following protected blocks:\nThere are fixed sections in the script. They are marked like this:\n\n<!-- FIXED INTRO START --> to <!-- FIXED INTRO END -->\n\n<!-- CTA CLOSE START --> to <!-- CTA CLOSE END -->\n\nYou must not modify, rewrite, rephrase, expand, or paraphrase anything inside these blocks.\n\nInstead, simply preserve these exact words in the final output and remove the HTML comment tags (<!-- ... -->) before returning your result.\n\nAny attempt to alter the content within those markers is considered a failure.\n\nREMOVE from your output:\nAgent descriptions or prefaces like “Here’s the expanded script…”\n\nAny formatting (e.g., headers, bullet points, numbered lists)\n\nLine breaks like \\n\n\nSymbols like #, *, or [Scene], [Pause], etc.\n\nFINAL OUTPUT RULES:\nReturn a single, clean, uninterrupted block of text, using natural paragraph breaks only.\nThe content must feel fluid, complete, and spiritually powerful from beginning to end."
       },
       {
         "tipo": "texto",
         "nome": "Closer",
-        "prompt": "If this transmission spoke to you, don’t just walk away from it—respond to it. Help carry this message further. Every act of support helps this transmission find the next starseed who needs it."
-      },
-      {
-        "tipo": "texto",
-        "nome": "Closer",
-        "prompt": "{{saida_etapa_1}}\n{{saida_etapa_3}}\n{{saida_anterior}}\n"
+        "prompt": "{{saida_etapa_1}}\n{{saida_anterior}}\n"
       },
       {
         "tipo": "code",
@@ -260,19 +235,14 @@
         "tipo": "llm",
         "nome": "Amplifier EN",
         "prompt": "Goal: Expand the content provided in {{saida_anterior}} up to a maximum of 25,000 characters, maintaining the original tone, pacing, and spiritual depth. You must amplify each section of the content (except for the Hook and Audience Interaction), adding more emotional resonance, metaphoric richness, illustrative detail, and narrative depth.\n\n🔒 STRICT RULES (DO NOT BREAK):\n\nNEVER start the text with any variation of:\n\n\"Hello beautiful souls, and welcome back to Starseed from Gaya. Today, we embark on a profound journey...\"\nor anything similar.\n\nThe channel name is NOT “Starseed from Gaya.”\nDo not insert or refer to this name in your text.\n\nYou are NOT responsible for writing the hook or audience interaction. Your task begins after these parts.\n\nThere are protected sections in the script marked as:\n<!-- CTA CLOSE START --> to <!-- CTA CLOSE END -->\nDo not edit these sections under any circumstances.\n\nDo not add new sections, greetings, or structural elements. Your output must be a continuous, uninterrupted block of text. Do not include formatting, headings, or labels.\n\nAbsolutely do not output anything like:\n\n“Hello beautiful souls”\n\n“Welcome back to the channel”\n\n“In today’s video…”\n\nOr anything similar.\nSkip straight into the subject matter.\n\nALWAYS INCLUDE THE EBOOK CTA\n\nInput:\n{{saida_anterior}}\n\nOutput:\nReturn only the expanded version of the script, as a single block of plain text, seamlessly enriching the existing structure and message.",
-        "credencial": "ff01fb83",
-        "modelo": "gemini-2.5-flash",
+        "credencial": "2a38491d",
+        "modelo": "gpt-5.2",
         "system_message": "You are an expert at amplifying and expanding spiritual YouTube scripts. Your task is to take the script provided and expand it to a minimum of 15,000 characters while maintaining its original tone, flow, and spiritual depth.\n\nYour expanded script must:\n\nPreserve the structure and voice of the original.\n\nEnrich the content with vivid metaphors, scripture, imagery, practical reflection, and spiritual insight.\n\nExpand naturally and meaningfully, avoiding repetition or filler.\n\n🔒 ABSOLUTELY DO NOT EDIT the following protected blocks:\nThere are fixed sections in the script. They are marked like this:\n\n<!-- FIXED INTRO START --> to <!-- FIXED INTRO END -->\n\n<!-- CTA CLOSE START --> to <!-- CTA CLOSE END -->\n\nYou must not modify, rewrite, rephrase, expand, or paraphrase anything inside these blocks.\n\nInstead, simply preserve these exact words in the final output and remove the HTML comment tags (<!-- ... -->) before returning your result.\n\nAny attempt to alter the content within those markers is considered a failure.\n\nREMOVE from your output:\nAgent descriptions or prefaces like “Here’s the expanded script…”\n\nAny formatting (e.g., headers, bullet points, numbered lists)\n\nLine breaks like \\n\n\nSymbols like #, *, or [Scene], [Pause], etc.\n\nFINAL OUTPUT RULES:\nReturn a single, clean, uninterrupted block of text, using natural paragraph breaks only.\nThe content must feel fluid, complete, and spiritually powerful from beginning to end."
       },
       {
         "tipo": "texto",
         "nome": "Closer",
-        "prompt": "If this transmission spoke to you, don’t just walk away from it—respond to it. Help carry this message further. Every act of support helps this transmission find the next starseed who needs it."
-      },
-      {
-        "tipo": "texto",
-        "nome": "Closer",
-        "prompt": "{{saida_etapa_1}}\n{{saida_etapa_3}}\n{{saida_anterior}}\n"
+        "prompt": "{{saida_etapa_1}}\n{{saida_anterior}}\n"
       },
       {
         "tipo": "code",
@@ -307,19 +277,14 @@
         "tipo": "llm",
         "nome": "Amplifier DE",
         "prompt": "Goal: Expand the content provided in {{saida_anterior}} up to a maximum of 25,000 characters, maintaining the original tone, pacing, and spiritual depth. You must amplify each section of the content (except for the Hook and Audience Interaction), adding more emotional resonance, metaphoric richness, illustrative detail, and narrative depth.\n\n🔒 STRICT RULES (DO NOT BREAK):\n\nNEVER start the text with any variation of:\n\n\"Hello beautiful souls, and welcome back to Starseed from Gaya. Today, we embark on a profound journey...\"\nor anything similar.\n\nThe channel name is NOT “Starseed from Gaya.”\nDo not insert or refer to this name in your text.\n\nYou are NOT responsible for writing the hook or audience interaction. Your task begins after these parts.\n\nThere are protected sections in the script marked as:\n<!-- CTA CLOSE START --> to <!-- CTA CLOSE END -->\nDo not edit these sections under any circumstances.\n\nDo not add new sections, greetings, or structural elements. Your output must be a continuous, uninterrupted block of text. Do not include formatting, headings, or labels.\n\nAbsolutely do not output anything like:\n\n“Hello beautiful souls”\n\n“Welcome back to the channel”\n\n“In today’s video…”\n\nOr anything similar.\nSkip straight into the subject matter.\n\nALWAYS INCLUDE THE EBOOK CTA\n\nInput:\n{{saida_anterior}}\n\nOutput:\nReturn only the expanded version of the script, as a single block of plain text, seamlessly enriching the existing structure and message.",
-        "credencial": "ff01fb83",
-        "modelo": "gemini-2.5-flash",
+        "credencial": "2a38491d",
+        "modelo": "gpt-5.2",
         "system_message": "You are an expert at amplifying and expanding spiritual YouTube scripts. Your task is to take the script provided and expand it to a minimum of 15,000 characters while maintaining its original tone, flow, and spiritual depth.\n\nYour expanded script must:\n\nPreserve the structure and voice of the original.\n\nEnrich the content with vivid metaphors, scripture, imagery, practical reflection, and spiritual insight.\n\nExpand naturally and meaningfully, avoiding repetition or filler.\n\n🔒 ABSOLUTELY DO NOT EDIT the following protected blocks:\nThere are fixed sections in the script. They are marked like this:\n\n<!-- FIXED INTRO START --> to <!-- FIXED INTRO END -->\n\n<!-- CTA CLOSE START --> to <!-- CTA CLOSE END -->\n\nYou must not modify, rewrite, rephrase, expand, or paraphrase anything inside these blocks.\n\nInstead, simply preserve these exact words in the final output and remove the HTML comment tags (<!-- ... -->) before returning your result.\n\nAny attempt to alter the content within those markers is considered a failure.\n\nREMOVE from your output:\nAgent descriptions or prefaces like “Here’s the expanded script…”\n\nAny formatting (e.g., headers, bullet points, numbered lists)\n\nLine breaks like \\n\n\nSymbols like #, *, or [Scene], [Pause], etc.\n\nFINAL OUTPUT RULES:\nReturn a single, clean, uninterrupted block of text, using natural paragraph breaks only.\nThe content must feel fluid, complete, and spiritually powerful from beginning to end."
       },
       {
         "tipo": "texto",
-        "nome": "Closer",
-        "prompt": "If this spoke to you, don’t just walk away from it—respond to it. Help carry this message further. Every act of support helps this word find the next soul who needs it."
-      },
-      {
-        "tipo": "texto",
         "nome": "Clean",
-        "prompt": "{{saida_etapa_1}}\n{{saida_etapa_3}}\n{{saida_anterior}}\n"
+        "prompt": "{{saida_etapa_1}}\n{{saida_anterior}}\n"
       },
       {
         "tipo": "code",
@@ -330,8 +295,8 @@
         "tipo": "llm",
         "nome": "Translator DE",
         "prompt": "Here is the text to be translated: {{saida_etapa_5}}\n\nOutput sempre masculino Auserwählter\n\nMantenha SEMPRE os espaços corretos entre as palavras e as pontuações.\n\nALWAYS keep the correct space between words. That's an ORDER.",
-        "credencial": "ff01fb83",
-        "modelo": "gemini-2.5-flash",
+        "credencial": "2a38491d",
+        "modelo": "gpt-5.2",
         "system_message": "You are an expert in translation from English to German. Your task is to translate the provided text literally into German without adding introductions, explanations, or comments. Translate directly and only the provided content."
       }
     ]
@@ -362,19 +327,14 @@
         "tipo": "llm",
         "nome": "Amplifier EN",
         "prompt": "Goal: Expand the content provided in {{saida_anterior}} up to a maximum of 25,000 characters, maintaining the original tone, pacing, and spiritual depth. You must amplify each section of the content (except for the Hook and Audience Interaction), adding more emotional resonance, metaphoric richness, illustrative detail, and narrative depth.\n\n🔒 STRICT RULES (DO NOT BREAK):\n\nNEVER start the text with any variation of:\n\n\"Hello beautiful souls, and welcome back to Starseed from Gaya. Today, we embark on a profound journey...\"\nor anything similar.\n\nThe channel name is NOT “Starseed from Gaya.”\nDo not insert or refer to this name in your text.\n\nYou are NOT responsible for writing the hook or audience interaction. Your task begins after these parts.\n\nThere are protected sections in the script marked as:\n<!-- CTA CLOSE START --> to <!-- CTA CLOSE END -->\nDo not edit these sections under any circumstances.\n\nDo not add new sections, greetings, or structural elements. Your output must be a continuous, uninterrupted block of text. Do not include formatting, headings, or labels.\n\nAbsolutely do not output anything like:\n\n“Hello beautiful souls”\n\n“Welcome back to the channel”\n\n“In today’s video…”\n\nOr anything similar.\nSkip straight into the subject matter.\n\nALWAYS INCLUDE THE EBOOK CTA\n\nInput:\n{{saida_anterior}}\n\nOutput:\nReturn only the expanded version of the script, as a single block of plain text, seamlessly enriching the existing structure and message.",
-        "credencial": "ff01fb83",
-        "modelo": "gemini-2.5-flash",
+        "credencial": "2a38491d",
+        "modelo": "gpt-5.2",
         "system_message": "You are an expert at amplifying and expanding spiritual YouTube scripts. Your task is to take the script provided and expand it to a minimum of 15,000 characters while maintaining its original tone, flow, and spiritual depth.\n\nYour expanded script must:\n\nPreserve the structure and voice of the original.\n\nEnrich the content with vivid metaphors, scripture, imagery, practical reflection, and spiritual insight.\n\nExpand naturally and meaningfully, avoiding repetition or filler.\n\n🔒 ABSOLUTELY DO NOT EDIT the following protected blocks:\nThere are fixed sections in the script. They are marked like this:\n\n<!-- FIXED INTRO START --> to <!-- FIXED INTRO END -->\n\n<!-- CTA CLOSE START --> to <!-- CTA CLOSE END -->\n\nYou must not modify, rewrite, rephrase, expand, or paraphrase anything inside these blocks.\n\nInstead, simply preserve these exact words in the final output and remove the HTML comment tags (<!-- ... -->) before returning your result.\n\nAny attempt to alter the content within those markers is considered a failure.\n\nREMOVE from your output:\nAgent descriptions or prefaces like “Here’s the expanded script…”\n\nAny formatting (e.g., headers, bullet points, numbered lists)\n\nLine breaks like \\n\n\nSymbols like #, *, or [Scene], [Pause], etc.\n\nFINAL OUTPUT RULES:\nReturn a single, clean, uninterrupted block of text, using natural paragraph breaks only.\nThe content must feel fluid, complete, and spiritually powerful from beginning to end."
       },
       {
         "tipo": "texto",
         "nome": "Closer",
-        "prompt": "If this message reached your spirit, don't just walk away from it—answer the call. And remember: The Chosen One's Blueprint is available through exclusive app access, for a limited time only. Go to the link in the first pinned comment before this door closes. Share this video with another Chosen One still waiting to awaken, and help carry this Word further. Every act of support helps this message reach the next soul God is calling home."
-      },
-      {
-        "tipo": "texto",
-        "nome": "Closer",
-        "prompt": "{{saida_etapa_1}}\n{{saida_etapa_3}}\n{{saida_anterior}}\n"
+        "prompt": "{{saida_etapa_1}}\n{{saida_anterior}}\n"
       },
       {
         "tipo": "code",
@@ -409,19 +369,14 @@
         "tipo": "llm",
         "nome": "Amplifier EN",
         "prompt": "Goal: Expand the content provided in {{saida_anterior}} up to a maximum of 25,000 characters, maintaining the original tone, pacing, and spiritual depth. You must amplify each section of the content (except for the Hook and Audience Interaction), adding more emotional resonance, metaphoric richness, illustrative detail, and narrative depth.\n\n🔒 STRICT RULES (DO NOT BREAK):\n\nNEVER start the text with any variation of:\n\n\"Hello beautiful souls, and welcome back to Starseed from Gaya. Today, we embark on a profound journey...\"\nor anything similar.\n\nThe channel name is NOT “Starseed from Gaya.”\nDo not insert or refer to this name in your text.\n\nYou are NOT responsible for writing the hook or audience interaction. Your task begins after these parts.\n\nThere are protected sections in the script marked as:\n<!-- CTA CLOSE START --> to <!-- CTA CLOSE END -->\nDo not edit these sections under any circumstances.\n\nDo not add new sections, greetings, or structural elements. Your output must be a continuous, uninterrupted block of text. Do not include formatting, headings, or labels.\n\nAbsolutely do not output anything like:\n\n“Hello beautiful souls”\n\n“Welcome back to the channel”\n\n“In today’s video…”\n\nOr anything similar.\nSkip straight into the subject matter.\n\nALWAYS INCLUDE THE EBOOK CTA\n\nInput:\n{{saida_anterior}}\n\nOutput:\nReturn only the expanded version of the script, as a single block of plain text, seamlessly enriching the existing structure and message.",
-        "credencial": "ff01fb83",
-        "modelo": "gemini-2.5-flash",
+        "credencial": "2a38491d",
+        "modelo": "gpt-5.2",
         "system_message": "You are an expert at amplifying and expanding spiritual YouTube scripts. Your task is to take the script provided and expand it to a minimum of 15,000 characters while maintaining its original tone, flow, and spiritual depth.\n\nYour expanded script must:\n\nPreserve the structure and voice of the original.\n\nEnrich the content with vivid metaphors, scripture, imagery, practical reflection, and spiritual insight.\n\nExpand naturally and meaningfully, avoiding repetition or filler.\n\n🔒 ABSOLUTELY DO NOT EDIT the following protected blocks:\nThere are fixed sections in the script. They are marked like this:\n\n<!-- FIXED INTRO START --> to <!-- FIXED INTRO END -->\n\n<!-- CTA CLOSE START --> to <!-- CTA CLOSE END -->\n\nYou must not modify, rewrite, rephrase, expand, or paraphrase anything inside these blocks.\n\nInstead, simply preserve these exact words in the final output and remove the HTML comment tags (<!-- ... -->) before returning your result.\n\nAny attempt to alter the content within those markers is considered a failure.\n\nREMOVE from your output:\nAgent descriptions or prefaces like “Here’s the expanded script…”\n\nAny formatting (e.g., headers, bullet points, numbered lists)\n\nLine breaks like \\n\n\nSymbols like #, *, or [Scene], [Pause], etc.\n\nFINAL OUTPUT RULES:\nReturn a single, clean, uninterrupted block of text, using natural paragraph breaks only.\nThe content must feel fluid, complete, and spiritually powerful from beginning to end."
       },
       {
         "tipo": "texto",
         "nome": "Closer",
-        "prompt": "If this message reached your spirit, don't just walk away from it—answer the call. And remember: The Chosen One's Blueprint is available through exclusive app access, for a limited time only. Go to the link in the first pinned comment before this door closes. Share this video with another Chosen One still waiting to awaken, and help carry this Word further. Every act of support helps this message reach the next soul God is calling home."
-      },
-      {
-        "tipo": "texto",
-        "nome": "Closer",
-        "prompt": "{{saida_etapa_1}}\n{{saida_etapa_3}}\n{{saida_anterior}}\n"
+        "prompt": "{{saida_etapa_1}}\n{{saida_anterior}}\n"
       },
       {
         "tipo": "code",
@@ -456,19 +411,14 @@
         "tipo": "llm",
         "nome": "Amplifier EN",
         "prompt": "Goal: Expand the content provided in {{saida_anterior}} up to a maximum of 25,000 characters, maintaining the original tone, pacing, and spiritual depth. You must amplify each section of the content (except for the Hook and Audience Interaction), adding more emotional resonance, metaphoric richness, illustrative detail, and narrative depth.\n\n🔒 STRICT RULES (DO NOT BREAK):\n\nNEVER start the text with any variation of:\n\n\"Hello beautiful souls, and welcome back to Starseed from Gaya. Today, we embark on a profound journey...\"\nor anything similar.\n\nThe channel name is NOT “Starseed from Gaya.”\nDo not insert or refer to this name in your text.\n\nYou are NOT responsible for writing the hook or audience interaction. Your task begins after these parts.\n\nThere are protected sections in the script marked as:\n<!-- CTA CLOSE START --> to <!-- CTA CLOSE END -->\nDo not edit these sections under any circumstances.\n\nDo not add new sections, greetings, or structural elements. Your output must be a continuous, uninterrupted block of text. Do not include formatting, headings, or labels.\n\nAbsolutely do not output anything like:\n\n“Hello beautiful souls”\n\n“Welcome back to the channel”\n\n“In today’s video…”\n\nOr anything similar.\nSkip straight into the subject matter.\n\nALWAYS INCLUDE THE EBOOK CTA\n\nInput:\n{{saida_anterior}}\n\nOutput:\nReturn only the expanded version of the script, as a single block of plain text, seamlessly enriching the existing structure and message.",
-        "credencial": "ff01fb83",
-        "modelo": "gemini-2.5-flash",
+        "credencial": "2a38491d",
+        "modelo": "gpt-5.2",
         "system_message": "You are an expert at amplifying and expanding spiritual YouTube scripts. Your task is to take the script provided and expand it to a minimum of 15,000 characters while maintaining its original tone, flow, and spiritual depth.\n\nYour expanded script must:\n\nPreserve the structure and voice of the original.\n\nEnrich the content with vivid metaphors, scripture, imagery, practical reflection, and spiritual insight.\n\nExpand naturally and meaningfully, avoiding repetition or filler.\n\n🔒 ABSOLUTELY DO NOT EDIT the following protected blocks:\nThere are fixed sections in the script. They are marked like this:\n\n<!-- FIXED INTRO START --> to <!-- FIXED INTRO END -->\n\n<!-- CTA CLOSE START --> to <!-- CTA CLOSE END -->\n\nYou must not modify, rewrite, rephrase, expand, or paraphrase anything inside these blocks.\n\nInstead, simply preserve these exact words in the final output and remove the HTML comment tags (<!-- ... -->) before returning your result.\n\nAny attempt to alter the content within those markers is considered a failure.\n\nREMOVE from your output:\nAgent descriptions or prefaces like “Here’s the expanded script…”\n\nAny formatting (e.g., headers, bullet points, numbered lists)\n\nLine breaks like \\n\n\nSymbols like #, *, or [Scene], [Pause], etc.\n\nFINAL OUTPUT RULES:\nReturn a single, clean, uninterrupted block of text, using natural paragraph breaks only.\nThe content must feel fluid, complete, and spiritually powerful from beginning to end."
       },
       {
         "tipo": "texto",
         "nome": "Closer",
-        "prompt": "If this word stirred something in you, don't ignore it—act on it. The Inner Sanctum is open right now, with exclusive app access for a limited time only. Tap the link in the first pinned comment before the gates close. Send this video to another Chosen One who needs to hear it, and help this message travel further. Every soul who steps inside brings another closer to the Father's call."
-      },
-      {
-        "tipo": "texto",
-        "nome": "Closer",
-        "prompt": "{{saida_etapa_1}}\n{{saida_etapa_3}}\n{{saida_anterior}}\n"
+        "prompt": "{{saida_etapa_1}}\n{{saida_anterior}}\n"
       },
       {
         "tipo": "code",
@@ -503,19 +453,14 @@
         "tipo": "llm",
         "nome": "Amplifier EN",
         "prompt": "Goal: Expand the content provided in {{saida_anterior}} up to a maximum of 25,000 characters, maintaining the original tone, pacing, and spiritual depth. You must amplify each section of the content (except for the Hook and Audience Interaction), adding more emotional resonance, metaphoric richness, illustrative detail, and narrative depth.\n\n🔒 STRICT RULES (DO NOT BREAK):\n\nNEVER start the text with any variation of:\n\n\"Hello beautiful souls, and welcome back to Starseed from Gaya. Today, we embark on a profound journey...\"\nor anything similar.\n\nThe channel name is NOT “Starseed from Gaya.”\nDo not insert or refer to this name in your text.\n\nYou are NOT responsible for writing the hook or audience interaction. Your task begins after these parts.\n\nThere are protected sections in the script marked as:\n<!-- CTA CLOSE START --> to <!-- CTA CLOSE END -->\nDo not edit these sections under any circumstances.\n\nDo not add new sections, greetings, or structural elements. Your output must be a continuous, uninterrupted block of text. Do not include formatting, headings, or labels.\n\nAbsolutely do not output anything like:\n\n“Hello beautiful souls”\n\n“Welcome back to the channel”\n\n“In today’s video…”\n\nOr anything similar.\nSkip straight into the subject matter.\n\nALWAYS INCLUDE THE EBOOK CTA\n\nInput:\n{{saida_anterior}}\n\nOutput:\nReturn only the expanded version of the script, as a single block of plain text, seamlessly enriching the existing structure and message.",
-        "credencial": "ff01fb83",
-        "modelo": "gemini-2.5-flash",
+        "credencial": "2a38491d",
+        "modelo": "gpt-5.2",
         "system_message": "You are an expert at amplifying and expanding spiritual YouTube scripts. Your task is to take the script provided and expand it to a minimum of 15,000 characters while maintaining its original tone, flow, and spiritual depth.\n\nYour expanded script must:\n\nPreserve the structure and voice of the original.\n\nEnrich the content with vivid metaphors, scripture, imagery, practical reflection, and spiritual insight.\n\nExpand naturally and meaningfully, avoiding repetition or filler.\n\n🔒 ABSOLUTELY DO NOT EDIT the following protected blocks:\nThere are fixed sections in the script. They are marked like this:\n\n<!-- FIXED INTRO START --> to <!-- FIXED INTRO END -->\n\n<!-- CTA CLOSE START --> to <!-- CTA CLOSE END -->\n\nYou must not modify, rewrite, rephrase, expand, or paraphrase anything inside these blocks.\n\nInstead, simply preserve these exact words in the final output and remove the HTML comment tags (<!-- ... -->) before returning your result.\n\nAny attempt to alter the content within those markers is considered a failure.\n\nREMOVE from your output:\nAgent descriptions or prefaces like “Here’s the expanded script…”\n\nAny formatting (e.g., headers, bullet points, numbered lists)\n\nLine breaks like \\n\n\nSymbols like #, *, or [Scene], [Pause], etc.\n\nFINAL OUTPUT RULES:\nReturn a single, clean, uninterrupted block of text, using natural paragraph breaks only.\nThe content must feel fluid, complete, and spiritually powerful from beginning to end."
       },
       {
         "tipo": "texto",
         "nome": "Closer",
-        "prompt": "If this word stirred something in you, don't ignore it—act on it. The Inner Sanctum is open right now, with exclusive app access for a limited time only. Tap the link in the first pinned comment before the gates close. Send this video to another Chosen One who needs to hear it, and help this message travel further. Every soul who steps inside brings another closer to the Father's call."
-      },
-      {
-        "tipo": "texto",
-        "nome": "Closer",
-        "prompt": "{{saida_etapa_1}}\n{{saida_etapa_3}}\n{{saida_anterior}}\n"
+        "prompt": "{{saida_etapa_1}}\n{{saida_anterior}}\n"
       },
       {
         "tipo": "code",
@@ -550,19 +495,14 @@
         "tipo": "llm",
         "nome": "Amplifier EN",
         "prompt": "Goal: Expand the content provided in {{saida_anterior}} up to a maximum of 25,000 characters, maintaining the original tone, pacing, and spiritual depth. You must amplify each section of the content (except for the Hook and Audience Interaction), adding more emotional resonance, metaphoric richness, illustrative detail, and narrative depth.\n\n🔒 STRICT RULES (DO NOT BREAK):\n\nNEVER start the text with any variation of:\n\n\"Hello beautiful souls, and welcome back to Starseed from Gaya. Today, we embark on a profound journey...\"\nor anything similar.\n\nThe channel name is NOT “Starseed from Gaya.”\nDo not insert or refer to this name in your text.\n\nYou are NOT responsible for writing the hook or audience interaction. Your task begins after these parts.\n\nThere are protected sections in the script marked as:\n<!-- CTA CLOSE START --> to <!-- CTA CLOSE END -->\nDo not edit these sections under any circumstances.\n\nDo not add new sections, greetings, or structural elements. Your output must be a continuous, uninterrupted block of text. Do not include formatting, headings, or labels.\n\nAbsolutely do not output anything like:\n\n“Hello beautiful souls”\n\n“Welcome back to the channel”\n\n“In today’s video…”\n\nOr anything similar.\nSkip straight into the subject matter.\n\nALWAYS INCLUDE THE EBOOK CTA\n\nInput:\n{{saida_anterior}}\n\nOutput:\nReturn only the expanded version of the script, as a single block of plain text, seamlessly enriching the existing structure and message.",
-        "credencial": "ff01fb83",
-        "modelo": "gemini-2.5-flash",
+        "credencial": "2a38491d",
+        "modelo": "gpt-5.2",
         "system_message": "You are an expert at amplifying and expanding spiritual YouTube scripts. Your task is to take the script provided and expand it to a minimum of 15,000 characters while maintaining its original tone, flow, and spiritual depth.\n\nYour expanded script must:\n\nPreserve the structure and voice of the original.\n\nEnrich the content with vivid metaphors, scripture, imagery, practical reflection, and spiritual insight.\n\nExpand naturally and meaningfully, avoiding repetition or filler.\n\n🔒 ABSOLUTELY DO NOT EDIT the following protected blocks:\nThere are fixed sections in the script. They are marked like this:\n\n<!-- FIXED INTRO START --> to <!-- FIXED INTRO END -->\n\n<!-- CTA CLOSE START --> to <!-- CTA CLOSE END -->\n\nYou must not modify, rewrite, rephrase, expand, or paraphrase anything inside these blocks.\n\nInstead, simply preserve these exact words in the final output and remove the HTML comment tags (<!-- ... -->) before returning your result.\n\nAny attempt to alter the content within those markers is considered a failure.\n\nREMOVE from your output:\nAgent descriptions or prefaces like “Here’s the expanded script…”\n\nAny formatting (e.g., headers, bullet points, numbered lists)\n\nLine breaks like \\n\n\nSymbols like #, *, or [Scene], [Pause], etc.\n\nFINAL OUTPUT RULES:\nReturn a single, clean, uninterrupted block of text, using natural paragraph breaks only.\nThe content must feel fluid, complete, and spiritually powerful from beginning to end."
       },
       {
         "tipo": "texto",
         "nome": "Closer",
-        "prompt": "If this word stirred something in you, don't ignore it—act on it. Send this video to another Chosen One who needs to hear it, and help this message travel further. Every soul who steps inside brings another closer to the Father's call."
-      },
-      {
-        "tipo": "texto",
-        "nome": "Closer",
-        "prompt": "{{saida_etapa_1}}\n{{saida_etapa_3}}\n{{saida_anterior}}\n"
+        "prompt": "{{saida_etapa_1}\n{{saida_anterior}}\n"
       },
       {
         "tipo": "code",
