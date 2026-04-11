@@ -1,0 +1,45 @@
+{
+  "example-pipeline": {
+    "id": "example-pipeline",
+    "nome": "Example Script Pipeline",
+    "tag": "EX",
+    "idioma": "en",
+    "ordem": 1,
+    "etapas": [
+      {
+        "nome": "Hooker",
+        "tipo": "llm",
+        "credencial": "cli_claude",
+        "modelo": "claude-sonnet-4-6",
+        "system_message": "You are a scriptwriter for YouTube videos. Create a powerful opening hook.",
+        "prompt": "Create a compelling 2-minute hook for a video about: {{tema}}"
+      },
+      {
+        "nome": "Developer",
+        "tipo": "llm",
+        "credencial": "cli_claude",
+        "modelo": "claude-sonnet-4-6",
+        "system_message": "You are a scriptwriter. Develop the main body of the script.",
+        "prompt": "Continue and develop this script hook into a full narrative:\n\n{{saida_anterior}}"
+      },
+      {
+        "nome": "Amplifier",
+        "tipo": "llm",
+        "credencial": "your_gemini_id",
+        "modelo": "gemini-2.5-flash",
+        "system_message": "Expand the content to 25000+ characters maintaining tone and depth.",
+        "prompt": "Expand this script to maximum length:\n\n{{saida_anterior}}"
+      },
+      {
+        "nome": "Closer",
+        "tipo": "texto",
+        "prompt": "{{saida_etapa_1}}\n{{saida_anterior}}"
+      },
+      {
+        "nome": "Final",
+        "tipo": "code",
+        "prompt": "import re\ncleaned = saida_anterior\ncleaned = re.sub(r'\\*\\*.*?\\*\\*', '', cleaned)\nresultado = cleaned.strip()"
+      }
+    ]
+  }
+}

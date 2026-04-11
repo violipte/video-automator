@@ -1,30 +1,36 @@
-# Cache e temporários
-cache/
-temp/
-__pycache__/
-*.pyc
+# === DADOS PESSOAIS (nunca commitar) ===
+credentials.json
+config.json
+templates.json
+pipelines.json
+temas.json
+historico.json
+production_state.json
 
-# Narrações, scripts e logs gerados
+# Agentes (instrucoes personalizadas)
+agents/*/CLAUDE.md
+agents/*/historico.json
+
+# === OUTPUTS ===
 narracoes/
+cache/
 scripts/
 logs/
+temp/
 
-# Dados sensíveis
-config.json
-credentials.json
-
-# Dados locais (podem ser recriados)
-historico.json
-temas.json
+# === SISTEMA ===
+__pycache__/
+*.pyc
+*.pyo
+.env
+*.log
 estado_batch.json
+narracoes/_pending_tasks.json
 
-# Agente histórico de chat
-agents/temas/historico.json
-
-# Windows
+# === WINDOWS ===
 Thumbs.db
 desktop.ini
 
-# IDE
+# === IDE ===
 .vscode/
 .idea/

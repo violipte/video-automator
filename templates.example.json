@@ -1,0 +1,43 @@
+{
+  "example-template": {
+    "id": "example-template",
+    "nome": "My Channel Template",
+    "tag": "MC",
+    "resolucao": [1920, 1080],
+    "fps": 30,
+    "tipo_fundo": "imagens",
+    "pasta_imagens": "C:/path/to/your/images",
+    "duracao_por_imagem": 10,
+    "efeito_zoom": true,
+    "zoom_ratio": 1.04,
+    "pasta_saida": "C:/path/to/output",
+    "idioma": "en",
+    "trilha_sonora": "C:/path/to/background-music.mp3",
+    "volume_narracao": 1.0,
+    "volume_trilha": 0.25,
+    "estilo_legenda": 1,
+    "legenda_config": {
+      "fonte": "Arial",
+      "tamanho": 16,
+      "cor_primaria": "&H00FFFFFF",
+      "cor_outline_ass": "&H00000000",
+      "outline_espessura": 3,
+      "sombra": 1,
+      "bold": true,
+      "posicao": "bottom",
+      "max_linhas": 2,
+      "max_chars": 30,
+      "maiuscula": true
+    },
+    "narracao_voz": {
+      "voice_id": "your-voice-id",
+      "provider": "minimax_clone",
+      "speed": 1.0,
+      "pitch": 0
+    },
+    "overlays": [],
+    "ajustes": {},
+    "cta": {},
+    "moldura": {}
+  }
+}
