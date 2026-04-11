@@ -5,17 +5,21 @@ O Monitor lê daqui para mostrar status em tempo real.
 """
 
 import json
+import threading
 import time
 from pathlib import Path
 from datetime import datetime
 
 BASE_DIR = Path(__file__).parent
 LOG_FILE = BASE_DIR / "production_state.json"
+_lock = threading.RLock()  # RLock pois adicionar_log chama _salvar
 
 # Estado da produção completa (persistente)
 _state = {
     "ativo": False,
     "data_ref": "",
+    "data_idx": None,          # índice da linha no temas (para auto-resume)
+    "ordem_colunas": None,     # ordem de produção (para auto-resume)
     "inicio": None,
     "total_canais": 0,
     "canal_atual": 0,
@@ -39,19 +43,22 @@ def _carregar():
 
 
 def _salvar():
-    try:
-        with open(LOG_FILE, "w", encoding="utf-8") as f:
-            json.dump(_state, f, ensure_ascii=False, default=str)
-    except Exception:
-        pass
+    with _lock:
+        try:
+            with open(LOG_FILE, "w", encoding="utf-8") as f:
+                json.dump(_state, f, ensure_ascii=False, default=str)
+        except Exception:
+            pass
 
 
-def iniciar(data_ref: str, canais: list):
+def iniciar(data_ref: str, canais: list, data_idx: int = None, ordem_colunas: list = None):
     """Inicia uma nova produção completa."""
     global _state
     _state = {
         "ativo": True,
         "data_ref": data_ref,
+        "data_idx": data_idx,
+        "ordem_colunas": ordem_colunas,
         "inicio": time.time(),
         "total_canais": len(canais),
         "canal_atual": 0,
@@ -81,19 +88,21 @@ def iniciar(data_ref: str, canais: list):
 
 
 def atualizar_canal(index: int, **kwargs):
-    """Atualiza estado de um canal específico."""
-    if 0 <= index < len(_state.get("canais", [])):
-        _state["canais"][index].update(kwargs)
-        _state["canal_atual"] = index
-        _salvar()
+    """Atualiza estado de um canal específico. Thread-safe."""
+    with _lock:
+        if 0 <= index < len(_state.get("canais", [])):
+            _state["canais"][index].update(kwargs)
+            _state["canal_atual"] = index
+            _salvar()
 
 
 def adicionar_log(msg: str):
-    """Adiciona entrada no log."""
-    _state.setdefault("log", []).append({"ts": datetime.now().isoformat(), "msg": msg})
-    if len(_state["log"]) > 500:
-        _state["log"] = _state["log"][-500:]
-    _salvar()
+    """Adiciona entrada no log. Thread-safe."""
+    with _lock:
+        _state.setdefault("log", []).append({"ts": datetime.now().isoformat(), "msg": msg})
+        if len(_state["log"]) > 500:
+            _state["log"] = _state["log"][-500:]
+        _salvar()
 
 
 def finalizar(cancelado: bool = False):

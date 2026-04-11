@@ -211,37 +211,49 @@ def gerar_narracao_minimax(
 # === TASK POLLING ===
 
 def consultar_tarefa(api_key: str, task_id: str) -> dict:
-    """Consulta status de uma tarefa."""
-    try:
-        resp = httpx.get(
-            f"{API_BASE}/v1/task/{task_id}",
-            headers=_headers(api_key),
-            timeout=15.0,
-        )
-        resp.raise_for_status()
-        return resp.json()
-    except Exception as e:
-        return {"status": "error", "error_message": str(e)}
+    """Consulta status de uma tarefa. Retry em 502/503/timeout."""
+    for attempt in range(5):
+        try:
+            resp = httpx.get(
+                f"{API_BASE}/v1/task/{task_id}",
+                headers=_headers(api_key),
+                timeout=15.0,
+            )
+            if resp.status_code in (502, 503, 429):
+                time.sleep(5 * (attempt + 1))
+                continue
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            if attempt < 4:
+                time.sleep(5 * (attempt + 1))
+                continue
+            return {"status": "error", "error_message": str(e)}
 
 
 def baixar_audio(url: str, destino: str) -> str:
-    """Baixa arquivo de áudio de uma URL para destino local."""
-    try:
-        resp = httpx.get(url, timeout=120.0, follow_redirects=True)
-        resp.raise_for_status()
-        Path(destino).parent.mkdir(parents=True, exist_ok=True)
-        with open(destino, "wb") as f:
-            f.write(resp.content)
-        return destino
-    except Exception as e:
-        raise RuntimeError(f"Falha ao baixar áudio: {e}")
+    """Baixa arquivo de audio de uma URL para destino local. Retry 3x com timeout generoso."""
+    import time as _time
+    Path(destino).parent.mkdir(parents=True, exist_ok=True)
+    for attempt in range(3):
+        try:
+            resp = httpx.get(url, timeout=300.0, follow_redirects=True)
+            resp.raise_for_status()
+            with open(destino, "wb") as f:
+                f.write(resp.content)
+            return destino
+        except Exception as e:
+            if attempt < 2:
+                _time.sleep(5 * (attempt + 1))
+                continue
+            raise RuntimeError(f"Falha ao baixar audio apos 3 tentativas: {e}")
 
 
-# === ESTADO DE NARRAÇÃO ===
+# === ESTADOS DE NARRACAO (separados: auto vs manual) ===
 
 ultimo_creditos = None
 
-estado_narracao = {
+_estado_base = {
     "ativo": False,
     "task_id": None,
     "provider": None,
@@ -252,6 +264,12 @@ estado_narracao = {
     "srt_url": None,
     "erro": None,
 }
+
+# Estado para modo manual (aba Producao/Narracao)
+estado_narracao = dict(_estado_base)
+
+# Estado para modo automatico (orchestrator/Produzir Tudo)
+estado_narracao_auto = dict(_estado_base)
 
 
 MINIMAX_CHUNK_LIMIT = 8000  # chars por chunk (margem do limite de 10k)
@@ -295,65 +313,181 @@ def _dividir_em_chunks(texto: str, max_chars: int) -> list:
     return final_chunks if final_chunks else [texto]
 
 
-def iniciar_narracao(api_key: str, provider: str, voice_id: str, texto: str, nome_saida: str, pasta: str = "", preview: bool = False, **kwargs) -> dict:
-    """Inicia geração de narração. Suporta chunking para textos longos."""
-    global estado_narracao
+PENDING_TASKS_FILE = BASE_DIR / "narracoes" / "_pending_tasks.json"
 
-    if estado_narracao.get("ativo"):
-        return {"ok": False, "erro": "Já existe uma narração em andamento. Aguarde."}
 
-    # Determinar pasta de saída
+def _salvar_pending_tasks(nome: str, task_ids: list, api_key: str):
+    """Salva task_ids em disco para recuperacao em caso de falha no download."""
+    pending = {}
+    if PENDING_TASKS_FILE.exists():
+        try:
+            with open(PENDING_TASKS_FILE, "r", encoding="utf-8") as f:
+                pending = json.load(f)
+        except Exception:
+            pass
+    pending[nome] = {"task_ids": task_ids, "api_key": api_key, "ts": time.time()}
+    with open(PENDING_TASKS_FILE, "w", encoding="utf-8") as f:
+        json.dump(pending, f, ensure_ascii=False)
+
+
+def _carregar_pending_tasks(nome: str) -> dict:
+    """Carrega task_ids pendentes de uma narracao anterior que falhou."""
+    if not PENDING_TASKS_FILE.exists():
+        return None
+    try:
+        with open(PENDING_TASKS_FILE, "r", encoding="utf-8") as f:
+            pending = json.load(f)
+        entry = pending.get(nome)
+        if entry and time.time() - entry.get("ts", 0) < 3600:  # valido por 1 hora
+            return entry
+    except Exception:
+        pass
+    return None
+
+
+def _limpar_pending_tasks(nome: str):
+    """Remove task_ids pendentes apos sucesso."""
+    if not PENDING_TASKS_FILE.exists():
+        return
+    try:
+        with open(PENDING_TASKS_FILE, "r", encoding="utf-8") as f:
+            pending = json.load(f)
+        pending.pop(nome, None)
+        with open(PENDING_TASKS_FILE, "w", encoding="utf-8") as f:
+            json.dump(pending, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def _get_estado(modo: str = "manual"):
+    """Retorna o estado correto baseado no modo."""
+    return estado_narracao_auto if modo == "auto" else estado_narracao
+
+
+def narrar_chunked_sequencial(api_key: str, provider: str, voice_id: str, texto: str, nome_saida: str, pasta: str = "", modo: str = "manual", **kwargs) -> dict:
+    """Narra texto longo chunk por chunk: gera 1 -> espera -> baixa -> proximo.
+    Retorna {"ok": bool, "audio_local": str, "erro": str, "chunks": int}.
+    """
+    global ultimo_creditos
+    estado = _get_estado(modo)
+
     output_dir = Path(pasta) if pasta else NARRACOES_DIR
     if not output_dir.is_absolute():
         output_dir = BASE_DIR / output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Chunking para Minimax com textos longos
-    needs_chunking = provider in ("minimax", "minimax_clone") and len(texto) > MINIMAX_CHUNK_LIMIT
+    destino = _output_path_com_data(output_dir, nome_saida)
+    destino_dir = Path(destino).parent
+    destino_dir.mkdir(parents=True, exist_ok=True)
 
-    if needs_chunking:
-        chunks = _dividir_em_chunks(texto, MINIMAX_CHUNK_LIMIT)
-        # Enviar todos os chunks como tasks separadas
-        task_ids = []
-        total_credits = 0
-        for i, chunk in enumerate(chunks):
+    chunks = _dividir_em_chunks(texto, MINIMAX_CHUNK_LIMIT)
+    total_chunks = len(chunks)
+    chunk_paths = []
+    total_cost = 0
+
+    estado.update({
+        "ativo": True, "task_id": None, "task_ids": None,
+        "chunks_total": total_chunks, "chunks_done": 0,
+        "provider": provider, "status": "processing", "progresso": 0,
+        "audio_url": None, "audio_local": None, "srt_url": None, "erro": None,
+        "nome_saida": nome_saida, "output_dir": str(output_dir),
+        "preview": False, "api_key": api_key, "credit_cost": 0,
+    })
+
+    try:
+        for i, chunk_text in enumerate(chunks):
+            if estado.get("erro"):
+                break
+
+            estado["status"] = "processing"
+            estado["progresso"] = int(i / total_chunks * 90)
+
+            print(f"[NARRACAO-SEQ] {nome_saida}: Chunk {i+1}/{total_chunks} - gerando...")
             result = gerar_narracao_minimax(
-                api_key, voice_id, chunk,
+                api_key, voice_id, chunk_text,
                 model=kwargs.get("model", "speech-2.6-hd"),
                 speed=kwargs.get("speed", 1.0),
                 pitch=kwargs.get("pitch", 0),
             )
             if not result.get("ok"):
-                return {"ok": False, "erro": f"Chunk {i+1}/{len(chunks)}: {result.get('erro', '')}"}
-            task_ids.append(result["task_id"])
-            total_credits = result.get("credits", 0)
+                raise RuntimeError(f"Chunk {i+1}/{total_chunks}: {result.get('erro', '')}")
 
-        global ultimo_creditos
-        ultimo_creditos = total_credits
+            task_id = result["task_id"]
+            estado["task_id"] = task_id
+            ultimo_creditos = result.get("credits", 0)
 
-        estado_narracao = {
-            "ativo": True,
-            "task_id": task_ids[0],  # primeiro para compatibilidade
-            "task_ids": task_ids,
-            "chunks_total": len(chunks),
-            "chunks_done": 0,
-            "provider": provider,
-            "status": "processing",
-            "progresso": 5,
-            "audio_url": None,
-            "audio_local": None,
-            "srt_url": None,
-            "erro": None,
-            "nome_saida": nome_saida,
-            "output_dir": str(output_dir),
-            "preview": preview,
-            "api_key": api_key,
-            "credit_cost": 0,
-        }
-        return {"ok": True, "task_id": task_ids[0], "credits": total_credits, "chunks": len(chunks)}
+            deadline = time.time() + 600
+            audio_url = None
+            while time.time() < deadline:
+                task = consultar_tarefa(api_key, task_id)
+                st = task.get("status", "doing")
+                if st == "done":
+                    metadata = task.get("metadata", {})
+                    audio_url = metadata.get("audio_url", "")
+                    total_cost += task.get("credit_cost", 0)
+                    break
+                elif st == "error":
+                    raise RuntimeError(f"Chunk {i+1}: {task.get('error_message', 'erro')}")
+                time.sleep(3)
+            else:
+                raise RuntimeError(f"Chunk {i+1}/{total_chunks}: timeout (10min)")
+
+            if audio_url:
+                chunk_path = str(destino_dir / f"_chunk_{nome_saida}_{i}.mp3")
+                print(f"[NARRACAO-SEQ] {nome_saida}: Chunk {i+1}/{total_chunks} - baixando...")
+                baixar_audio(audio_url, chunk_path)
+                chunk_paths.append(chunk_path)
+
+            estado["chunks_done"] = i + 1
+            print(f"[NARRACAO-SEQ] {nome_saida}: Chunk {i+1}/{total_chunks} - OK")
+
+        if len(chunk_paths) == total_chunks:
+            estado["progresso"] = 95
+            print(f"[NARRACAO-SEQ] {nome_saida}: Concatenando {total_chunks} chunks...")
+            _concatenar_audios(chunk_paths, destino)
+
+            for cp in chunk_paths:
+                Path(cp).unlink(missing_ok=True)
+
+            estado["audio_local"] = destino
+            estado["status"] = "done"
+            estado["progresso"] = 100
+            estado["credit_cost"] = total_cost
+            estado["ativo"] = False
+            _limpar_pending_tasks(nome_saida)
+            print(f"[NARRACAO-SEQ] {nome_saida}: Concluido -> {destino}")
+            return {"ok": True, "audio_local": destino, "erro": "", "chunks": total_chunks}
+        else:
+            raise RuntimeError(f"Apenas {len(chunk_paths)}/{total_chunks} chunks baixados")
+
+    except Exception as e:
+        estado["status"] = "error"
+        estado["erro"] = str(e)
+        estado["ativo"] = False
+        for cp in chunk_paths:
+            Path(cp).unlink(missing_ok=True)
+        return {"ok": False, "audio_local": "", "erro": str(e), "chunks": total_chunks}
+
+
+def iniciar_narracao(api_key: str, provider: str, voice_id: str, texto: str, nome_saida: str, pasta: str = "", preview: bool = False, modo: str = "manual", **kwargs) -> dict:
+    """Inicia geracao de narracao. modo='auto' usa estado separado do manual."""
+    estado = _get_estado(modo)
+
+    if estado.get("ativo"):
+        return {"ok": False, "erro": "Ja existe uma narracao em andamento. Aguarde."}
+
+    output_dir = Path(pasta) if pasta else NARRACOES_DIR
+    if not output_dir.is_absolute():
+        output_dir = BASE_DIR / output_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    needs_chunking = provider in ("minimax", "minimax_clone") and len(texto) > MINIMAX_CHUNK_LIMIT
+
+    if needs_chunking:
+        result = narrar_chunked_sequencial(api_key, provider, voice_id, texto, nome_saida, pasta, modo=modo, **kwargs)
+        return result
 
     else:
-        # Single request (sem chunking)
         if provider in ("minimax", "minimax_clone"):
             result = gerar_narracao_minimax(
                 api_key, voice_id, texto,
@@ -370,27 +504,17 @@ def iniciar_narracao(api_key: str, provider: str, voice_id: str, texto: str, nom
         if not result.get("ok"):
             return result
 
+        global ultimo_creditos
         ultimo_creditos = result.get("credits")
 
-        estado_narracao = {
-            "ativo": True,
-            "task_id": result["task_id"],
-            "task_ids": None,
-            "chunks_total": 1,
-            "chunks_done": 0,
-            "provider": provider,
-            "status": "processing",
-            "progresso": 10,
-            "audio_url": None,
-            "audio_local": None,
-            "srt_url": None,
-            "erro": None,
-            "nome_saida": nome_saida,
-            "output_dir": str(output_dir),
-            "preview": preview,
-            "api_key": api_key,
-            "credit_cost": 0,
-        }
+        estado.update({
+            "ativo": True, "task_id": result["task_id"], "task_ids": None,
+            "chunks_total": 1, "chunks_done": 0, "provider": provider,
+            "status": "processing", "progresso": 10,
+            "audio_url": None, "audio_local": None, "srt_url": None, "erro": None,
+            "nome_saida": nome_saida, "output_dir": str(output_dir),
+            "preview": preview, "api_key": api_key, "credit_cost": 0,
+        })
         return result
 
 
@@ -411,22 +535,21 @@ def _concatenar_audios(paths: list, output: str):
         raise RuntimeError(f"FFmpeg concat falhou: {proc.stderr.decode('utf-8', errors='replace')[:200]}")
 
 
-def poll_narracao() -> dict:
-    """Verifica status da narração em andamento."""
-    global estado_narracao
+def poll_narracao(modo: str = "manual") -> dict:
+    """Verifica status da narracao em andamento."""
+    estado = _get_estado(modo)
 
-    if not estado_narracao["ativo"] or not estado_narracao["task_id"]:
-        safe = {k: v for k, v in estado_narracao.items() if k != "api_key"}
+    if not estado.get("ativo") or not estado.get("task_id"):
+        safe = {k: v for k, v in estado.items() if k != "api_key"}
         return safe
 
-    task_ids = estado_narracao.get("task_ids")
-    api_key = estado_narracao["api_key"]
-    nome = estado_narracao.get("nome_saida", "narracao")
-    output_dir = Path(estado_narracao.get("output_dir", str(NARRACOES_DIR)))
-    is_preview = estado_narracao.get("preview", False)
+    task_ids = estado.get("task_ids")
+    api_key = estado.get("api_key", "")
+    nome = estado.get("nome_saida", "narracao")
+    output_dir = Path(estado.get("output_dir", str(NARRACOES_DIR)))
+    is_preview = estado.get("preview", False)
 
     if task_ids and len(task_ids) > 1:
-        # === MODO CHUNKED: múltiplas tasks ===
         all_done = True
         any_error = False
         total_cost = 0
@@ -441,57 +564,58 @@ def poll_narracao() -> dict:
                 total_cost += task.get("credit_cost", 0)
             elif st == "error":
                 any_error = True
-                estado_narracao["erro"] = f"Chunk {i+1}: {task.get('error_message', 'erro')}"
+                estado["erro"] = f"Chunk {i+1}: {task.get('error_message', 'erro')}"
                 break
             else:
                 all_done = False
 
         chunks_done = len(audio_urls)
         chunks_total = len(task_ids)
-        estado_narracao["chunks_done"] = chunks_done
-        estado_narracao["progresso"] = int(chunks_done / chunks_total * 90) if chunks_total else 0
-        estado_narracao["status"] = "processing"
+        estado["chunks_done"] = chunks_done
+        estado["progresso"] = int(chunks_done / chunks_total * 90) if chunks_total else 0
+        estado["status"] = "processing"
 
         if any_error:
-            estado_narracao["status"] = "error"
-            estado_narracao["ativo"] = False
+            estado["status"] = "error"
+            estado["ativo"] = False
 
         elif all_done:
-            # Baixar todos os áudios e concatenar
-            estado_narracao["progresso"] = 92
+            estado["progresso"] = 92
             audio_urls.sort(key=lambda x: x[0])
 
             if not is_preview:
                 try:
+                    destino = _output_path_com_data(output_dir, nome)
+                    destino_dir = Path(destino).parent
+                    destino_dir.mkdir(parents=True, exist_ok=True)
+
                     chunk_paths = []
                     for i, url in audio_urls:
-                        chunk_path = str(output_dir / f"_chunk_{nome}_{i}.mp3")
+                        chunk_path = str(destino_dir / f"_chunk_{nome}_{i}.mp3")
                         baixar_audio(url, chunk_path)
                         chunk_paths.append(chunk_path)
 
-                    # Concatenar
-                    destino = _output_path_com_data(output_dir, nome)
                     _concatenar_audios(chunk_paths, destino)
 
-                    # Limpar chunks temporários
                     for cp in chunk_paths:
                         Path(cp).unlink(missing_ok=True)
 
-                    estado_narracao["audio_local"] = destino
+                    estado["audio_local"] = destino
+                    _limpar_pending_tasks(nome)
                 except Exception as e:
-                    estado_narracao["erro"] = str(e)
+                    estado["erro"] = str(e)
             else:
-                estado_narracao["audio_local"] = "(preview - não salvo)"
+                estado["audio_local"] = "(preview - nao salvo)"
+                _limpar_pending_tasks(nome)
 
-            estado_narracao["audio_url"] = audio_urls[-1][1] if audio_urls else ""
-            estado_narracao["credit_cost"] = total_cost
-            estado_narracao["status"] = "done"
-            estado_narracao["progresso"] = 100
-            estado_narracao["ativo"] = False
+            estado["audio_url"] = audio_urls[-1][1] if audio_urls else ""
+            estado["credit_cost"] = total_cost
+            estado["status"] = "done"
+            estado["progresso"] = 100
+            estado["ativo"] = False
 
     else:
-        # === MODO SINGLE: uma task ===
-        task = consultar_tarefa(api_key, estado_narracao["task_id"])
+        task = consultar_tarefa(api_key, estado["task_id"])
         status = task.get("status", "doing")
 
         if status == "done":
@@ -500,32 +624,31 @@ def poll_narracao() -> dict:
             srt_url = metadata.get("srt_url", "")
 
             if not is_preview:
-                destino = str(output_dir / f"{nome}.mp3")
+                destino = _output_path_com_data(output_dir, nome)
                 try:
                     baixar_audio(audio_url, destino)
-                    estado_narracao["audio_local"] = destino
+                    estado["audio_local"] = destino
                 except Exception as e:
-                    estado_narracao["erro"] = str(e)
+                    estado["erro"] = str(e)
             else:
-                estado_narracao["audio_local"] = "(preview - não salvo)"
+                estado["audio_local"] = "(preview - nao salvo)"
 
-            estado_narracao["audio_url"] = audio_url
-            estado_narracao["srt_url"] = srt_url
-            estado_narracao["credit_cost"] = task.get("credit_cost", 0)
-            estado_narracao["status"] = "done"
-            estado_narracao["progresso"] = 100
-            estado_narracao["ativo"] = False
+            estado["audio_url"] = audio_url
+            estado["srt_url"] = srt_url
+            estado["credit_cost"] = task.get("credit_cost", 0)
+            estado["status"] = "done"
+            estado["progresso"] = 100
+            estado["ativo"] = False
 
         elif status == "error":
-            estado_narracao["status"] = "error"
-            estado_narracao["erro"] = task.get("error_message", "Erro desconhecido")
-            estado_narracao["ativo"] = False
+            estado["status"] = "error"
+            estado["erro"] = task.get("error_message", "Erro desconhecido")
+            estado["ativo"] = False
 
         else:
-            estado_narracao["status"] = "processing"
+            estado["status"] = "processing"
             progress = task.get("progress", 0)
-            estado_narracao["progresso"] = max(10, progress) if progress else 30
+            estado["progresso"] = max(10, progress) if progress else 30
 
-    # Limpar api_key do estado antes de retornar
-    safe = {k: v for k, v in estado_narracao.items() if k != "api_key"}
+    safe = {k: v for k, v in estado.items() if k != "api_key"}
     return safe

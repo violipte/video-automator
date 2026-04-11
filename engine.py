@@ -11,6 +11,7 @@ import os
 import random
 import re
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import cv2
@@ -103,7 +104,33 @@ class VideoEngine:
 
         # === PASSO 1: Preparar clips de fundo (com cache) ===
         arquivos_fundo = self._listar_arquivos_fundo()
-        n_itens = max(1, int(self.duracao_total / dur_por_item) + 1)
+
+        # Duracao escalonada para imagens:
+        # 0:00-2:00 = dur_por_item (10s), 2:00-15:00 = 15s, 15:00+ = 20s
+        # Equilibrio entre menos clips e velocidade de geracao por clip
+        faixas_duracao = [
+            (120, dur_por_item),   # primeiros 2min: ritmo rapido (hook)
+            (900, 15),             # 2min-15min: ritmo medio
+            (999999, 20),          # 15min+: ritmo relaxado
+        ]
+
+        duracoes = []
+        tempo_acumulado = 0.0
+        while tempo_acumulado < self.duracao_total:
+            # Determinar duracao do proximo clip baseado no tempo atual
+            dur_clip = dur_por_item  # fallback
+            for limite, dur in faixas_duracao:
+                if tempo_acumulado < limite:
+                    dur_clip = dur
+                    break
+            # Nao ultrapassar duracao total
+            dur_clip = min(dur_clip, self.duracao_total - tempo_acumulado)
+            if dur_clip < 1:
+                break
+            duracoes.append(dur_clip)
+            tempo_acumulado += dur_clip
+
+        n_itens = len(duracoes)
 
         lista_expandida = []
         while len(lista_expandida) < n_itens:
@@ -111,11 +138,6 @@ class VideoEngine:
             random.shuffle(copia)
             lista_expandida.extend(copia)
         lista_expandida = lista_expandida[:n_itens]
-
-        duracoes = [dur_por_item] * n_itens
-        excesso = dur_por_item * n_itens - self.duracao_total
-        if excesso > 0:
-            duracoes[-1] = max(1, duracoes[-1] - excesso)
 
         # Pré-renderizar clips com efeitos suaves (cacheados)
         # Alterna entre efeitos para variedade sem ser agressivo
@@ -125,16 +147,62 @@ class VideoEngine:
             total_clips = len(lista_expandida)
             if callback_etapa:
                 callback_etapa(f"Gerando clips (0/{total_clips})")
+
+            # Preparar argumentos para cada clip
+            clip_args = []
             for i, (img, dur) in enumerate(zip(lista_expandida, duracoes)):
-                if self.cancelado:
-                    raise RuntimeError("Produção cancelada pelo usuário.")
                 efeito = efeitos_pool[i % len(efeitos_pool)] if zoom else "static"
-                clip_path = self._gerar_clip_cached(img, dur, w, h, fps, zoom_ratio, efeito)
-                clips.append(clip_path)
-                if callback_progresso:
-                    callback_progresso((i + 1) / total_clips * 60)
-                if callback_etapa:
-                    callback_etapa(f"Gerando clips ({i+1}/{total_clips})")
+                clip_args.append((i, img, dur, w, h, fps, zoom_ratio, efeito))
+
+            # Paralelizar geração de clips (4 workers - equilibrio CPU pipe + encode)
+            clips_done = [0]
+            clips_ordered = [None] * total_clips
+
+            def _gen_clip(args):
+                idx, img, dur, w, h, fps, zr, ef = args
+                if self.cancelado:
+                    return idx, None
+                return idx, self._gerar_clip_cached(img, dur, w, h, fps, zr, ef)
+
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                futures = {pool.submit(_gen_clip, a): a[0] for a in clip_args}
+                for future in as_completed(futures):
+                    if self.cancelado:
+                        raise RuntimeError("Produção cancelada pelo usuário.")
+                    idx, clip_path = future.result()
+                    clips_ordered[idx] = clip_path
+                    clips_done[0] += 1
+                    if callback_progresso:
+                        callback_progresso(clips_done[0] / total_clips * 60)
+                    if callback_etapa:
+                        callback_etapa(f"Gerando clips ({clips_done[0]}/{total_clips})")
+
+            clips = clips_ordered
+
+            # Pre-concatenar clips Ken Burns em 1 arquivo (igual video backgrounds)
+            # Reduz 138 inputs -> 1 input no render final = MUITO mais rapido
+            if callback_etapa:
+                callback_etapa("Concatenando clips de fundo...")
+            bg_concat_path = str(TEMP_DIR / "bg_clips_concat.mp4")
+            concat_list = TEMP_DIR / "bg_clips_concat.txt"
+            with open(concat_list, "w", encoding="utf-8") as f:
+                for cp in clips:
+                    if cp:
+                        f.write(f"file '{cp}'\n")
+            concat_cmd = [
+                "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                "-i", str(concat_list), "-c", "copy",
+                "-t", f"{self.duracao_total:.2f}",
+                bg_concat_path
+            ]
+            proc = subprocess.run(concat_cmd, capture_output=True, timeout=120)
+            concat_list.unlink(missing_ok=True)
+            if proc.returncode != 0:
+                raise RuntimeError(f"Concat clips falhou: {proc.stderr.decode('utf-8', errors='replace')[:200]}")
+
+            # Passa como video background (1 arquivo, nao lista de clips)
+            clips = bg_concat_path
+            tipo_fundo = "videos_preconcat"
         else:
             clips = list(zip(lista_expandida, duracoes))
 
@@ -210,13 +278,13 @@ class VideoEngine:
 
             boxes.append((cx, cy, cw, ch))
 
-        # Pipe frames pro FFmpeg
+        # Pipe frames pro FFmpeg (libx264 CPU = sem limite de sessoes, 8+ workers)
+        # NVENC reservado pro render final
         for codec_args in [
-            ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "24"],
-            ["-c:v", "libx264", "-preset", "fast", "-crf", "22"],
+            ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "23"],
         ]:
             cmd = [
-                "ffmpeg", "-y", "-threads", "2",
+                "ffmpeg", "-y", "-threads", "4",
                 "-f", "rawvideo", "-pix_fmt", "bgr24",
                 "-s", f"{w}x{h}", "-r", str(fps), "-i", "pipe:0",
                 *codec_args, "-pix_fmt", "yuv420p",
@@ -269,7 +337,12 @@ class VideoEngine:
         input_idx = 0
 
         # Inputs: clips de fundo (já renderizados)
-        if tipo_fundo == "imagens":
+        if tipo_fundo == "videos_preconcat":
+            # Clips Ken Burns ja pre-concatenados em 1 arquivo
+            inputs.extend(["-i", clips])  # clips = path string do arquivo unico
+            input_idx += 1
+            n_clips = 1
+        elif tipo_fundo == "imagens":
             if len(clips) > 50:
                 # Muitos clips: pré-concatenar para evitar OOM no FFmpeg
                 if callback_etapa:
@@ -661,15 +734,15 @@ class VideoEngine:
 
         if callback_etapa:
             callback_etapa("Renderizando vídeo final...")
-        cmd = ["ffmpeg", "-y", "-threads", "4"]
+        cmd = ["ffmpeg", "-y", "-threads", "16"]
         cmd.extend(inputs)
         cmd.extend(["-filter_complex_script", str(filter_file)])
         cmd.extend([
             "-map", f"[{ultimo_video}]",
             "-map", f"[{audio_label}]",
             "-c:v", "h264_nvenc",
-            "-preset", "p4",
-            "-cq", "20",
+            "-preset", "p1",
+            "-cq", "24",
             "-pix_fmt", "yuv420p",
             "-c:a", "aac",
             "-b:a", "192k",

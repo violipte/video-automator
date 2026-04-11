@@ -980,7 +980,7 @@
       1080
     ],
     "fps": 30,
-    "pasta_imagens": "F:/Canal Dark/Imagens/Chosen One/Estilo Chosen One/Chosen CON/CON'",
+    "pasta_imagens": "F:/Canal Dark/Imagens/Chosen One/Estilo Chosen One/Chosen CON/CON",
     "tipo_fundo": "imagens",
     "video_loop": true,
     "duracao_por_imagem": 10,
@@ -1007,8 +1007,8 @@
       "vinheta": 0
     },
     "narracao_voz": {
-      "voice_id": "pqHfZKP75CvOlQylNhV4",
-      "provider": "elevenlabs",
+      "voice_id": "2585483",
+      "provider": "minimax_clone",
       "speed": 1,
       "pitch": 0
     },
@@ -1035,6 +1035,9 @@
     },
     "pasta_saida": "F:/Canal Dark/",
     "formato_nome_saida": "{tag}_{data}_{sequencia}",
+    "min_roteiro_chars": 22000,
+    "proxy": "",
+    "link_destino": "",
     "moldura": {
       "arquivo": "",
       "tipo": "chromakey",

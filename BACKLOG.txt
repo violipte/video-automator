@@ -3,7 +3,7 @@
 ================================================================================
   Automacao completa de producao de videos YouTube
   Substitui o Premiere Pro por Python + FFmpeg
-  Criado em: 2026-04-01 | Atualizado: 2026-04-07
+  Criado em: 2026-04-01 | Atualizado: 2026-04-10
 ================================================================================
 
 
@@ -15,631 +15,496 @@
     - Cache de clips por hash MD5 (img path + dur + resolucao + fps + zoom + efeito)
     - FFmpeg concat de clips pre-renderizados + overlay + legendas + audio
     - Anti-jitter: coordenadas float no OpenCV, interpolacao INTER_LINEAR
-    - Imagens escaladas via INTER_LANCZOS4 para tamanho de trabalho
-    - Frames enviados por pipe rawvideo ao FFmpeg para encode H.264
     - Fallback automatico h264_nvenc -> libx264 para clips
-    - Renderizacao final com h264_nvenc, CRF 20, AAC 192k, faststart
-    - Ajustes visuais Lumetri-style: exposicao (gamma), brilho, contraste,
-      saturacao, realces, sombras, brancos, pretos, temperatura, tonalidade, vinheta
-    - Randomizacao de ajustes visuais com variacoes sutis centradas nos valores base
-    - Filtros FFmpeg: eq, curves, colorbalance, vignette
+    - Ajustes visuais Lumetri-style: exposicao, brilho, contraste, saturacao,
+      realces, sombras, brancos, pretos, temperatura, tonalidade, vinheta
     - Tipo fundo: imagens (com zoom) ou videos (sem zoom, com scale+pad+fps)
-    - Suporte a multiplos overlays por template com opacidade individual
-    - Filter complex escrito em arquivo temporario para evitar limite de cmd line
-    - Callback de progresso por etapa (clips 0-60%, render 65-100%)
+    - Overlays com colorkey + opacidade, moldura (alpha/chromakey)
+    - CTA overlay com chromakey verde, escala, posicao, scheduling periodico
+    - Filter complex escrito em arquivo para evitar limite de cmd line
     - Cancelamento mid-render com processo.kill()
+    - FFmpeg watchdog (10min stall timeout)
+    - Orphan FFmpeg cleanup on crash (taskkill)
+    - Metadata stripping (-map_metadata -1) pos-render
+    - Pre-concatenacao para >50 image clips (previne OOM)
+    - Pre-concatenacao de video backgrounds com fps/scale normalization
+    - Video loop option (template.video_loop)
+    - Audio mix com normalize=0 + weights (preserva volume narracao)
+
+[x] RENDER PERFORMANCE OPTIMIZATION (engine.py) — 2026-04-10
+    - NVENC preset p4 -> p1 (clips e render final)
+    - CQ 20 -> 24 no render final (YouTube recomprime de qualquer forma)
+    - Ken Burns paralelo com ThreadPoolExecutor (6 workers)
+    - FFmpeg threads: 4 -> 16 no render final, 2 -> 4 nos clips
+    - Otimizado para Ryzen 9 9950X (16c/32t)
 
 [x] FFMPEG PRIORITY MANAGEMENT
     - Processos FFmpeg rodam com BELOW_NORMAL_PRIORITY_CLASS via psutil
-    - Fallback sem psutil via ctypes/kernel32 para Windows
-    - Evita travar o servidor durante renders pesados
+    - Fallback sem psutil via ctypes/kernel32
 
 [x] SUBTITLE SYSTEM (subtitle_fixer.py + engine.py)
-    - ASS format com PlayResX/Y = resolucao real do video (pixel-perfect)
-    - Whisper transcricao (faster-whisper com GPU CUDA, fallback CPU)
-    - Correcao automatica de SRT: substituicoes, hesitacoes, capitalizacao
-    - Regras por idioma (en/de/pt/es) em rules/*.json com merge global + template
-    - Regras embutidas no template (prioridade sobre arquivo JSON)
-    - Quebra de linha inteligente: equilibrio entre linhas, nunca corta palavras
-    - Remocao de hesitacoes por idioma (uh, um, ah, eh, tipo, naja, etc)
-    - Palavras customizadas para remover
-    - SRT -> ASS conversion com estilo completo (fonte, tamanho, cor, outline, sombra)
+    - ASS format com PlayResX/PlayResY = resolucao real (pixel-perfect)
+    - Whisper transcricao (faster-whisper GPU CUDA, fallback CPU)
+    - Correcao automatica: substituicoes, hesitacoes, capitalizacao
+    - Regras por idioma (en/de/pt/es) com merge global + template
+    - Quebra de linha inteligente, max chars/linhas configuraveis
     - Font scaling formula: FontSize * (resolucao_real / 288)
-    - Outline e Shadow tambem escalados pela mesma formula
-    - 5 estilos preset + customizacao completa via legenda_config
     - Posicionamento: bottom, top, center, custom (X%/Y%)
-    - Maiuscula opcional por template
-    - Max chars por linha e max linhas configuraveis
-    - Liberacao de VRAM apos transcricao (del model + gc + torch.cuda.empty_cache)
+    - Liberacao de VRAM apos transcricao
 
 [x] TEMPLATE SYSTEM (app.py + templates.json)
-    - CRUD completo de templates via API REST
-    - Cada template define: resolucao, fps, pasta imagens, tipo fundo,
-      duracao por imagem, efeito zoom, zoom ratio, overlays[], ajustes{},
-      trilha sonora, volumes, estilo legenda, legenda_config{}, pasta saida,
-      formato nome saida, CTA config, regras de correcao
-    - Overlays com colorkey (fundo preto -> transparente) e opacidade
-    - CTA overlay com chromakey verde, escala, posicao (7 opcoes),
-      inicio, duracao, intervalo entre aparicoes (enable expr)
-    - Formato de nome de saida com {tag}_{data}_{sequencia}
-    - Regras de correcao embutidas no template (substituicoes, max_chars, etc)
+    - CRUD completo via API REST
+    - Resolucao, fps, pasta imagens, tipo fundo, duracao por imagem,
+      zoom ratio, overlays[], ajustes{}, trilha sonora, volumes,
+      estilo legenda, legenda_config{}, pasta saida, CTA config, regras
+    - Voz por template (narracao_voz: voice_id, provider, speed, pitch)
 
 [x] BATCH VIDEO PRODUCTION (app.py)
     - Selecao de multiplos templates + narracoes
-    - Fila de processamento com thread por job
-    - Estado global com progresso por job (porcentagem + etapa)
-    - Cancelamento de batch em andamento
-    - Nome de saida com data + sequencia automaticos
-    - Historico de producoes em historico.json
+    - Fila com thread por job, progresso por job
+    - Cancelamento de batch, historico em historico.json
 
 [x] PIPELINE/ROTEIROS SYSTEM (scriptwriter.py)
-    - Multi-step LLM pipelines com etapas encadeadas
-    - Suporte Claude, GPT e Gemini via APIs diretas (httpx)
-    - System message + prompt por etapa com substituicao de variaveis
-    - Variaveis: {{entrada}}, {{saida_anterior}}, {{saida_etapa_N}}, {{roteiro_atual}}
-    - Estado de execucao com status por etapa (aguardando/processando/concluido/erro)
-    - Cancelamento de pipeline em andamento
-    - Resultado salvo automaticamente em scripts/ com nome + timestamp
-    - CRUD de pipelines via API
+    - Multi-step LLM pipelines (Claude, GPT, Gemini)
+    - 3 tipos de etapa: llm, texto, code
+    - Variaveis: {{entrada}}, {{saida_anterior}}, {{saida_etapa_N}}, etc
+    - GPT 5.x: max_completion_tokens auto-detection
+    - 429 retry com backoff (30s, 60s, 90s) para todos os providers
+    - Fallback inteligente com cadeia: Claude -> Gemini -> GPT
+      (pula o provider que falhou, evita fallback GPT->GPT)
+    - Pipeline aborta se etapa LLM falhar (nao continua com lixo)
+    - Limpeza automatica de variaveis nao-substituidas no resultado
+    - Resultado salvo em scripts/ com nome + timestamp
+    - Logs persistentes em logs/pipeline_{id}_{timestamp}.log
 
 [x] MULTI-CREDENTIAL SYSTEM (scriptwriter.py)
     - Credenciais multiplas para Claude, GPT, Gemini
-    - Listagem automatica de modelos via API de cada provedor
-    - Teste de credencial com retorno de status + modelos disponiveis
-    - Claude: api.anthropic.com/v1/models
-    - GPT: api.openai.com/v1/models (filtro gpt-4/gpt-3.5/o1/o3/o4)
-    - Gemini: generativelanguage.googleapis.com/v1beta/models (filtro generateContent)
-    - Persistencia em credentials.json
+    - Listagem automatica de modelos via API
+    - Teste de credencial com status + modelos
 
 [x] TEMAS GRID (app.py)
-    - Grid Notion-style com colunas e linhas
-    - Drag & drop de colunas e linhas (reordenamento)
-    - Cell editor com campos: tema, titulo, thumb
-    - Estrutura JSON: colunas[], linhas[], celulas{colId_linhaId}
-    - API: GET/POST /api/temas
+    - Grid Notion-style: colunas (canais) x linhas (datas)
+    - Drag & drop de colunas e linhas
+    - Cell editor: tema, titulo, thumb, roteiro, pipeline
+    - Replicar campo para outras celulas (individual e "Replicar Tudo")
+    - Undo com "Desfazer"
+    - Light mode API (sem roteiros, economiza ~380KB)
+    - Endpoint dedicado /api/temas/roteiro/{key} para roteiro individual
+    - Producao prioridade modal (drag & drop, checkboxes)
 
 [x] CLAUDE CLI CHAT ASSISTANT (app.py + agents/temas/)
-    - Chat integrado na interface para geracao de temas
-    - CLAUDE.md agent em agents/temas/ com contexto espiritual completo
-    - Instrucoes editaveis via API (/api/chat/instructions)
-    - Execucao do Claude CLI como subprocess com env vars limpas
-      (CLAUDE_CODE_*, ANTHROPIC_* removidas para evitar nested session error)
-    - Diretorio de trabalho: agents/temas/
+    - Chat integrado para geracao de temas
+    - CLAUDE.md agent editavel via API
+    - Multi-agent (temas + titulos)
 
 [x] NARRATION VIA ai33.pro (narrator.py)
-    - ElevenLabs TTS: vozes de banco + modelos (eleven_multilingual_v2, etc)
-    - Minimax TTS: speech-2.6-hd, turbo, etc + speed/pitch control
-    - Voice cloning listing (Minimax cloned voices)
-    - Task polling assincrono com retry
-    - Download de audio gerado para pasta local
+    - ElevenLabs + Minimax TTS com polling assincrono
+    - Voice cloning listing
+    - TTS chunking para textos >8000 chars (Minimax limit)
+    - Concatenacao com FFmpeg (chunks na mesma pasta de data)
+    - Output com subpasta de data: narracoes/YYYY-MM-DD/TAG DD-MM.mp3
+    - Backend voice cache (10 min TTL)
     - Creditos restantes rastreados
 
 [x] BATCH NARRATION (app.py)
-    - Cards por template com selecao de voz e texto
-    - Nomeacao baseada em data: {tag}_{data}_{sequencia}
-    - Log de progresso por narracao
-    - Pasta de saida configurable por template
+    - Cards por template, skip existing MP3s
+    - Cancel/skip individual, timer por job
+    - Date-based naming
+
+[x] FULL PRODUCTION ORCHESTRATOR (orchestrator.py) — 2026-04-05
+    - "Produzir Tudo": Roteiro -> Narracao -> Video por canal
+    - Skip existing (roteiro, MP3, MP4)
+    - Min chars validation com retry ate 2x
+    - Video retry ate 2x com delay 10s
+    - Lost narration state detection
+    - Date-based output folders
+
+[x] PRODUCTION RESILIENCE (orchestrator.py + app.py) — 2026-04-10
+    - Auto-resume apos restart: le production_state.json, retoma pendentes
+    - Health monitor thread (60s): detecta thread morta, retoma
+    - Timeouts por etapa: roteiro 10min, narracao 20min, video 45min
+    - Video render com timeout thread + taskkill FFmpeg
+    - data_idx + ordem_colunas persistidos para auto-resume
+    - Endpoint /api/health para watchdog externo
+
+[x] PRODUCTION STATE PERSISTENCE (production_log.py)
+    - Estado em production_state.json (sobrevive F5/restart)
+    - Monitor tab com estado persistente
+    - Log detalhado de cada acao (max 500 entradas)
+
+[x] REGRAS DE OUTPUT PARA ROTEIRO (MIN/MAX CHARS)
+    - min_roteiro_chars configuravel por template (default 22000)
+    - Auto-retry ate 2x se roteiro curto
+    - Se falhar apos retries, marca erro e pula
+
+[x] METADATA STRIPPING
+    - ffmpeg -map_metadata -1 -fflags +bitexact apos render
+    - Remove encoder, software, timestamps do MP4 final
+
+[x] RETRY AUTOMATICO POR ETAPA
+    - Roteiro: retry pipeline ate 2x (min chars)
+    - Narracao: retry polling com deteccao de estado perdido
+    - Video: retry ate 2x com delay 10s, cleanup de arquivo corrompido
+
+[x] WATCHDOG DO SERVIDOR (watchdog.bat)
+    - Loop .bat que reinicia python app.py se morrer
+    - Mata FFmpeg orfao antes de reiniciar
+    - Auto-resume retoma producao interrompida
 
 [x] PREVIEW MODE
-    - Ouvir narracao sem salvar (preview: true)
-    - Preview de frame do video (GET /api/preview/frame)
-    - Preview de imagem individual (GET /api/preview/image)
-    - Preview de audio (POST /api/preview/audio + GET play)
-
-[x] NARRATION HISTORY
-    - Historico de narracoes geradas em historico.json
+    - Narracao sem salvar, frame preview, imagem preview, audio preview
 
 [x] CONFIG PAGE (app.py)
-    - Credenciais LLM (Claude/GPT/Gemini) com CRUD
-    - ai33.pro API key em config.json como ai33_api_key
-    - Supabase sync settings
-    - Google Sheets sync settings
-    - GET/PUT /api/config
+    - Credenciais LLM, ai33.pro key, Supabase/Sheets settings
+    - Key masking no GET, skip masked values no PUT
 
-[x] FILE BROWSER (app.py)
-    - Browse de sistema de arquivos via GET /api/browse
-    - Memoria de ultima pasta por campo (per-field last-folder)
-    - Filtro por extensao
+[x] FILE BROWSER + FONT LISTING
 
-[x] SUBTITLE RULES PER TEMPLATE
-    - Regras embutidas no template JSON (substituicoes, max_chars, etc)
-    - Merge com regras globais por idioma (rules/*.json)
-    - Template-specific rules sobrescrevem global
+[x] GZip MIDDLEWARE (response compression)
 
-[x] CTA OVERLAY WITH CHROMA KEY
-    - Arquivo de video com fundo verde
-    - Chromakey 0x00FF00 com similaridade 0.2 e blend 0.1
-    - Escala configuravel (% do video)
-    - 7 posicoes: bottom-right/center/left, top-right/center/left, center
-    - Scheduling: inicio, duracao, intervalo (aparece periodicamente)
-    - Enable expression com between(t,start,end) encadeados
-
-[x] RESILIENT POLLING
-    - Retry em falhas de fetch na narracao
-    - Estado persistente durante polling
-    - Timeout handling com mensagens de erro claras
+[x] LINK TRACKER MODULE (link_tracker.py)
+    - Criacao de links rastreaveis com formato {canal}-{DDMM}
+    - UTM parameters: source=youtube, medium=canal, campaign=data
 
 
 ========================== TODO (PENDENTE) =====================================
 
---- CRÍTICO / BUGS ---
+--- BUGS / CORRECOES ---
 
-[ ] REFATORAR ORQUESTRADOR "PRODUZIR TUDO"
-    O fluxo completo está com bugs graves:
-    - Roteiros gerados mas não salvos na célula do Temas
-    - Narrações com chunks não concatenados (encoding issue)
-    - Monitor não alimentado corretamente
-    - Etapas sendo puladas por verificações incorretas de "já existe"
-    Precisa reescrever produzirDataCompleta do zero com:
-    - Cada etapa com verificação robusta
-    - Salvamento explícito após cada etapa
-    - Log persistente (production_log) alimentado a cada passo
-    - Nomenclatura e pastas consistentes (data + canal)
-    Prioridade: CRÍTICA — EM ANDAMENTO
-
-[ ] REGRAS DE OUTPUT PARA ROTEIRO (MIN/MAX CHARS)
-    Configuração por pipeline ou template de quantidade mínima/máxima
-    de caracteres do roteiro. Se não atender:
-    - Deletar roteiro gerado
-    - Refazer geração automaticamente (até 2x)
-    - Se falhar 2x, marcar como erro e pular
-    Campo configurável no template ou pipeline: min_chars, max_chars
+[ ] AGENTE DE TITULO NAO FUNCIONA CORRETAMENTE
+    O agente de titulos nao entende as instrucoes e da output errado.
+    As vezes nao retorna nada e fica pensando eternamente (timeout?).
+    Revisar: instrucoes do agent CLAUDE.md, timeout do subprocess,
+    parsing da resposta, formato esperado do output.
     Prioridade: ALTA
 
---- THUMBNAIL (REFATORAÇÃO COMPLETA) ---
+[ ] ABA NARRACOES NAO PUXA ROTEIROS DA DATA
+    A aba Narracoes nao carrega mais os roteiros ao selecionar uma data.
+    Provavelmente causado pela mudanca para light mode na API /api/temas
+    (roteiros nao vem mais no payload). Precisa ajustar para buscar
+    roteiros individualmente ou usar endpoint dedicado.
+    Prioridade: ALTA
 
-[ ] ABA THUMBNAIL NO TEMPLATE (CONFIGURAÇÕES POR CANAL)
+[ ] MONITOR: MOSTRADOR DETALHADO DO RENDER EM ANDAMENTO
+    Mostrar no card do canal que esta renderizando:
+    - Etapa atual: "Gerando clips (45/81)" ou "Renderizando final..."
+    - Barra de progresso real (nao so 30% fixo)
+    - Tempo estimado restante
+    Semelhante ao que a aba Producao mostra no batch manual.
+    Requer: engine.py enviar callbacks de progresso pro production_log.
+    Prioridade: ALTA
+
+[ ] CHAT NAO BLOQUEAR INTERFACE
+    O painel do chat sobrepoem as colunas do grid e nao da pra interagir
+    com o conteudo enquanto espera resposta do Claude.
+    Solucoes:
+    [ ] Tornar chat redimensionavel/arrastavel (drag to resize)
+    [ ] Ou mover chat pra uma aba separada em vez de overlay
+    [ ] Chat nao bloquear scroll/click no grid atras dele
+    Prioridade: ALTA
+
+[ ] TEMAS GRID: CONGELAR COLUNA DATA + LINHA CANAIS (STICKY)
+    Ao rolar o grid horizontalmente, a coluna "Data" (primeira) fica fixa.
+    Ao rolar verticalmente, a linha com nomes dos canais fica fixa no topo.
+    Implementar com CSS: position:sticky + left:0 / top:0 + z-index.
+    Prioridade: MEDIA
+
+[ ] BOTAO REFRESH POR ABA (SEM RECARREGAR PAGINA)
+    Adicionar botao de refresh em cada aba que recarrega apenas os dados
+    daquela aba (ex: Temas recarrega grid, Narracoes recarrega cards,
+    Templates recarrega lista, Monitor recarrega estado).
+    Evita perder estado de outras abas ao atualizar dados.
+    Prioridade: MEDIA
+
+--- PRIORIDADE ALTA ---
+
+[ ] ABA THUMBNAIL (REFATORACAO COMPLETA)
     Mover configs de thumb para dentro do Template (nova aba "Thumbnail"):
 
     IMAGEM DE FUNDO (switch 2 lados):
     [ ] Lado 1: Pasta de imagens prontas + checkbox "Randomizar"
-    [ ] Lado 2: Gerar via IA
+    [ ] Lado 2: Gerar via IA (ai33.pro Nano Banana)
         - Checkboxes: usar thumbnail/titulo/tema como input pro prompt
-        - Escolher LLM (credencial + modelo)
-        - Box de prompt para o agente
-        - Gerar imagem via Nano Banana (ai33.pro API)
+        - Escolher LLM (credencial + modelo) para gerar prompt
+        - Gerar imagem via Nano Banana
 
     TEXTO (1 a 3 frases):
-    [ ] Seletor de quantidade de frases (1, 2 ou 3)
-    [ ] Cada frase com config independente:
-        fonte, tamanho, cor, outline, sombra, bg_box
+    [ ] Seletor de quantidade de frases
+    [ ] Cada frase com config independente: fonte, tamanho, cor, outline, sombra, bg_box
 
-    POSIÇÃO:
-    [ ] Posição padrão fixa (topo/centro/inferior/esquerdo/direito)
-    [ ] Posição randomizada com pool de checkboxes habilitadas
+    POSICAO:
+    [ ] Posicao padrao fixa ou randomizada (pool de checkboxes)
 
-    ZOOM: valor padrão da imagem de fundo
+    THUMB DA REFERENCIA (checkbox opcional):
+    [ ] URL do video YouTube -> extrai thumb -> LLM gera prompt -> Nano Banana
 
-    THUMB DA REFERÊNCIA (checkbox opcional):
-    [ ] Quando ON: campo LLM + prompt de modelagem
-    [ ] No processo: se link vazio na célula → pula thumb
-    [ ] Se tem link → extrai thumb YT → LLM gera prompt → Nano Banana
+    PREVIEW: com textos pre-definidos para visualizar estilo
 
-    PREVIEW: com textos pré-definidos para visualizar estilo
+    [ ] Geracao em lote por data
+    [ ] Exportar como JPG/PNG (1280x720)
 
-[ ] ABA THUMBNAIL (SIDEBAR) - EXECUÇÃO
-    Manter aba no sidebar para:
-    - Preview real com texto da thumb da data/canal
-    - Edição/retoque manual isolado
-    - Geração individual ou em lote
-    - Extração de thumbnail do YouTube (movido pra cá)
+[ ] ABA UPLOAD (NOVA)
+    Upload direto para YouTube via YouTube Data API v3:
+    [ ] Autenticacao OAuth2 por canal (token refresh automatico)
+    [ ] Upload de video com metadata (titulo, descricao, tags, categoria)
+    [ ] Upload de thumbnail customizada
+    [ ] Agendamento de publicacao (scheduled visibility)
+    [ ] Proxy por canal (HTTP/SOCKS5) para mascarar IP multi-canal
+    [ ] Comentario fixado automatico (postar via API, fixar via Selenium)
+    [ ] Template de descricao/comentario com variaveis
+    [ ] Upload em lote por data
+    [ ] Integracao Link Tracker (link rastreavel no comentario)
 
-[ ] CAMPO "LINK DO VÍDEO REFERÊNCIA" NAS CÉLULAS DO TEMAS
-    Novo campo opcional na célula do grid de Temas.
-    Quando preenchido + "Usar Thumb da Referência" ON:
-    → extrai thumb do YT → gera via IA
-    Quando vazio → ignora etapa de thumb no fluxo completo
+    RISCOS E MITIGACOES DA YOUTUBE API (IMPORTANTE):
 
---- INFRAESTRUTURA ---
+    Conta e Privacidade:
+    - Projeto Google Cloud NAO VERIFICADO = videos ficam LOCKED como PRIVATE
+      Nao da pra mudar pra public ate passar pelo YouTube API Audit formal
+    - Uploads automatizados muito rapidos ou com metadata repetitiva podem
+      ser flaggados como spam -> suspensao/terminacao do canal
+    - Respeitar Community Guidelines estritamente
+
+    Operacional e Seguranca:
+    - NUNCA hardcodar API Key ou OAuth client secret no codigo
+      (se vazar, terceiros podem fazer upload no canal ou drenar quota)
+    - Quota limitada: 1 upload = 1600 units, limite diario = 10000 units
+      = MAXIMO ~6 videos/dia por projeto. Para 12+ videos precisa de
+      quota increase request ou multiplos projetos GCP
+    - OAuth2 mal configurado pode causar data breach ou acesso nao autorizado
+
+    Mitigacoes ja planejadas:
+    - Proxy por canal: cada canal faz upload via IP diferente, YouTube nao
+      correlaciona volume de uploads a um unico IP/origem
+    - Metadata stripping: videos ja saem sem metadados de encoder/software
+      (ffmpeg -map_metadata -1), nao tem fingerprint de automacao
+    - Metadata variada: cada canal tem titulo/descricao/tags unicos por
+      natureza (nichos diferentes, idiomas diferentes)
+    - OAuth por canal: cada canal com credencial GCP separada = quota
+      independente (~6 uploads/dia por canal, nao por projeto global)
+
+    Boas Praticas Obrigatorias:
+    [ ] Usar Resumable Uploads (protege contra falha de rede)
+    [ ] Testar em canal "burner" antes de usar no canal principal
+    [ ] Credenciais em variaveis de ambiente (nunca no codigo fonte)
+    [ ] Rate limiting entre uploads (delay minimo entre cada upload)
+    [ ] Monitorar quota restante antes de cada upload
+    [ ] Verificacao do projeto GCP ANTES de implementar (audit process)
+    [ ] 1 projeto GCP por canal (quota isolada, 6 uploads/dia cada)
+
+[ ] PIPELINE PARALELA: ROTEIRO + NARRACAO EM PARALELO, RENDER EM FILA
+    Hoje o fluxo e 100% sequencial:
+      Canal1: Roteiro -> Narracao -> Render -> Canal2: Roteiro -> Narracao -> Render
+    Enquanto espera API de roteiro/narracao (30-180s), CPU/GPU ficam ociosos.
+    Enquanto renderiza (15-30min), APIs ficam ociosas.
+
+    FLUXO PROPOSTO (3 fases):
+
+    FASE 1 - ROTEIROS (paralelo, max 3 simultaneos por rate limit)
+    [ ] Gerar todos os roteiros em paralelo (ThreadPool, 3 workers)
+    [ ] Cada worker roda a pipeline LLM do canal
+    [ ] Salvar roteiro no temas.json conforme vai terminando
+    [ ] Se falhar, retry 2x, se falhar marca erro e segue
+    [ ] Limitacao: Claude/GPT/Gemini tem rate limit, 3 simultaneos e seguro
+
+    FASE 2 - NARRACOES (paralelo, max 2-3 simultaneos)
+    [ ] Assim que roteiro de um canal fica pronto, ja inicia narracao
+    [ ] Pode rodar 2-3 narracoes simultaneas (ai33.pro suporta)
+    [ ] Precisa remover trava de "1 narracao por vez" do narrator.py
+    [ ] Cada narracao tem seu proprio estado (dict por canal, nao global)
+    [ ] Chunking e polling independentes por canal
+
+    FASE 3 - RENDER (fila sequencial, 1 por vez)
+    [ ] Render usa 100% GPU + CPU, nao da pra paralelizar
+    [ ] Fila FIFO: primeiro canal com narracao pronta entra primeiro
+    [ ] Enquanto renderiza Canal 1, narracoes dos Canais 2-12 continuam
+
+    GANHO ESTIMADO:
+    - Hoje (sequencial 12 canais): ~8-10 horas
+      Roteiro: 12 x 3min = 36min (sequencial)
+      Narracao: 12 x 3min = 36min (sequencial)
+      Render: 12 x 20min = 240min (sequencial)
+      Total: ~312min = 5.2h + overhead
+    - Proposto (paralelo + fila):
+      Roteiro: todos em ~10min (3 paralelos)
+      Narracao: todos em ~12min (3 paralelos, comecam durante roteiros)
+      Render: 12 x 20min = 240min (sequencial, mas comeca mais cedo)
+      Total: ~262min = 4.3h (ganho ~50min no inicio)
+    - Ganho principal: render comeca MUITO antes (nao espera 72min de APIs)
+
+    MUDANCAS NECESSARIAS:
+    [ ] orchestrator.py: reescrever produzir_data_completa em 3 fases
+    [ ] narrator.py: suportar multiplas narracoes simultaneas
+        (estado por canal em vez de estado global unico)
+    [ ] scriptwriter.py: suportar multiplas pipelines simultaneas
+        (estado por execucao em vez de global unico)
+    [ ] production_log.py: atualizar canais fora de ordem (nao mais sequencial)
+
+    EVOLUCAO: PIPELINE CONTINUA (render nao espera todos narrarem)
+    Em vez de 3 fases rigidas, usar fila de render que consome canais
+    conforme ficam prontos. Enquanto ENO narra, CO3/CO1/etc ja renderizam.
+    Implementar com threading.Queue ou similar:
+    - Thread de narracoes alimenta a fila de render
+    - Thread de render consome da fila (1 por vez)
+    - Canal entra na fila assim que tem roteiro + MP3 prontos
+    Ganho: render comeca IMEDIATAMENTE, nao espera ultimo canal narrar
+
+    Prioridade: ALTA (ganho significativo de tempo)
+
+[ ] PRODUZIR TUDO EM LOOP (MULTI-DATA SEQUENCIAL)
+    Checkbox "Produzir em Loop" ao lado do botao "Produzir Tudo".
+    Quando ativado:
+    - Ao concluir 100% dos videos de uma data, avanca automaticamente
+      para a proxima data no grid
+    - Validacao antes de avancar:
+      [ ] Todos os canais da proxima data devem ter tema preenchido
+      [ ] Se algum canal nao tem tema, pula esse canal (nao bloqueia)
+      [ ] Se NENHUM canal tem tema, para o loop
+    - Continua ate acabar as datas do grid ou ate ser cancelado
+    - Monitor mostra: "Data 2/5 - 10/04/2026" com progresso global
+    - Botao "Cancelar Loop" para apos a data atual terminar (nao mata
+      o render em andamento, so nao avanca pra proxima)
+    - production_state.json salva: loop_ativo, data_atual_idx, datas_total
+      para auto-resume funcionar com loop tambem
+
+    Caso de uso: preencher temas de 5 dias, ativar loop, ir dormir.
+    Acordar com 60 videos prontos.
+    Prioridade: ALTA
+
+[ ] BOTAO DE EMERGENCIA EM TODAS AS OPERACOES
+    Cancelar/pular individual + cancelar lote em:
+    - Geracao de roteiros em lote
+    - "Produzir Tudo"
+    - Producao de video em lote
+    - Narracao em lote (ja implementado)
+
+--- PRIORIDADE MEDIA ---
 
 [ ] CLOUDFLARE TUNNEL / TAILSCALE
     Acesso remoto ao servidor sem expor porta publica
-    Prioridade: MEDIA
 
 [ ] GIT REPOSITORY + GITHUB PUSH
-    Inicializar repositorio, .gitignore, primeiro commit, push
-    Prioridade: MEDIA
-
-[ ] MOBILE-RESPONSIVE UI
-    Adaptar interface SPA para uso em celular/tablet
-    Prioridade: BAIXA
-
---- AUTOMACAO COMPLETA ---
-
-[ ] FULL PIPELINE AUTOMATICO (por data)
-    Gatilho: usuario seleciona uma DATA e clica "Produzir Tudo"
-    Pre-requisito: todas as celulas da data devem ter TEMA preenchido
-
-    O fluxo completo roda em sequencia para cada coluna da data:
-
-    ETAPA 1 - GERAR ROTEIRO
-    [ ] Pegar o tema da celula
-    [ ] Rodar a pipeline da coluna (LLM multi-step)
-    [ ] Salvar roteiro gerado na celula
-    [ ] Variáveis: {{tema}}, {{canal}}, {{data}}, {{titulo}}, {{thumb}}
-
-    ETAPA 2 - NARRAR
-    [ ] Pegar o roteiro gerado na etapa anterior
-    [ ] Usar a voz configurada no template associado à coluna
-    [ ] Gerar TTS via ai33.pro (ElevenLabs ou Minimax)
-    [ ] Poll até concluir, baixar MP3
-    [ ] Salvar em pasta configurada como TAG DD-MM.mp3
-
-    ETAPA 3 - TRANSCREVER (legendas)
-    [ ] Rodar Whisper no MP3 gerado
-    [ ] Aplicar regras do template (substituicoes, max_chars, maiuscula)
-    [ ] Gerar SRT corrigido -> ASS com estilo do template
-
-    ETAPA 4 - PRODUZIR VIDEO
-    [ ] Montar video com engine.py usando template da coluna
-    [ ] Input: MP3 (narracao) + imagens + overlay + trilha + legenda ASS
-    [ ] Efeitos: zoom OpenCV, ajustes visuais, CTA chroma key
-    [ ] Output: TAG_YYYYMMDD_SEQ.mp4 na pasta de saida do template
-
-    ETAPA 5 - POS-PRODUCAO (futuro)
-    [ ] Sync Supabase (marcar como concluido)
-    [ ] Upload YouTube via API (se configurado)
-    [ ] Agendar publicacao
-
-    INTEGRAÇÕES NECESSÁRIAS:
-    [ ] Mapear coluna do grid -> template de video (cada coluna precisa
-        saber qual template usar para producao)
-    [ ] Mapear coluna do grid -> voz de narracao (cada coluna precisa
-        saber qual voz/provider/modelo TTS usar)
-    [ ] Botao "Produzir Data Completa" na aba Temas
-    [ ] Botao "Produzir" individual por celula
-    [ ] Painel de status mostrando cada etapa de cada coluna
-    [ ] Fila de processamento (uma coluna por vez para nao sobrecarregar)
-    [ ] Log detalhado com tempo/creditos por etapa
-    [ ] Tratamento de erro: se uma etapa falha, pular para proxima coluna
-    [ ] Opcao de pular etapas ja concluidas (ex: roteiro ja existe, pular)
-
-    Prioridade: ALTA
+    Inicializar repositorio, .gitignore, primeiro commit
 
 [ ] SUPABASE/SHEETS SYNC TESTING
-    Testar e refinar sincronizacao real com Supabase e Google Sheets
-    Prioridade: MEDIA
+    Testar e refinar sincronizacao real
 
 [ ] GOOGLE SHEETS READ/WRITE INTEGRATION
-    Leitura e escrita de dados em planilhas Google
-    Prioridade: MEDIA
 
---- ABA THUMBNAIL ---
+[ ] NOTIFICACAO DE CONCLUSAO/ERRO
+    Webhook para Telegram/Discord quando producao terminar ou der erro
 
-[ ] ABA THUMBNAIL (NOVA)
-    Cards por canal (como narração em lote). Cada card tem:
-    - Template de thumb configurado (fonte, posição texto, estilo)
-    - Texto da thumb puxado da célula Temas (data + canal)
-    - 3 modos de geração de imagem de fundo:
-
-    MODO 1: IMAGEM EXISTENTE
-    [ ] Seleção de imagem local (file browser)
-    [ ] Preview da thumb com texto sobreposto
-    [ ] Exportar como JPG/PNG
-
-    MODO 2: GERAR IMAGEM POR PROMPT
-    [ ] Agente LLM gera prompt de imagem baseado no tema/título
-    [ ] Pipeline configurável para o agente de prompt
-    [ ] Enviar prompt para ai33.pro Nano Banana (geração de imagem)
-    [ ] Receber imagem gerada, aplicar texto, exportar
-    Prioridade: ALTA
-
-    MODO 3: MODELAR DA REFERÊNCIA
-    [ ] Campo opcional: URL do vídeo YouTube de referência
-    [ ] Extrair thumbnail do vídeo de referência (YouTube oEmbed ou yt-dlp)
-    [ ] Agente LLM analisa a thumb de referência e gera prompt de modelagem
-    [ ] Switch "Usar texto no prompt": se ON, inclui o texto da thumb no prompt
-        do agente que modela a imagem (texto fica embutido na imagem gerada)
-    [ ] Switch "Aplicar texto": se ON, o texto é aplicado como overlay
-        DEPOIS da geração da imagem (queimado por cima com fonte/estilo)
-    [ ] Os dois switches são independentes — pode ativar ambos, só um, ou nenhum
-    [ ] Gerar nova imagem inspirada via Nano Banana
-    [ ] Se "Aplicar texto" ON: sobrepor texto com fonte/estilo configurado
-    [ ] Exportar thumb final
-    Prioridade: MEDIA
-
-    CONFIGURAÇÃO DO CARD:
-    [ ] Fonte, tamanho, cor, posição do texto
-    [ ] Estilo (outline, shadow, background box)
-    [ ] Resolução (1280x720 padrão YouTube)
-    [ ] Template de layout (onde fica o texto, margens)
-    [ ] Salvamento: {TAG}_{data}_thumb.jpg na pasta configurada
-    Prioridade: ALTA
-
-    INTEGRAÇÃO:
-    [ ] Puxar texto da thumb da célula Temas (data + canal)
-    [ ] Geração em lote por data (gera todas as thumbs de uma data)
-    [ ] Link com ai33.pro Nano Banana API para geração de imagem
-    [ ] Link com Canva API (MCP) para edição avançada (futuro)
-    Prioridade: ALTA
-
---- ABA UPLOAD ---
-
-[ ] ABA UPLOAD (NOVA)
-    Upload direto para YouTube via YouTube Data API v3.
-    Cards por canal com:
-    - Vídeo (path do MP4 gerado)
-    - Título (puxado da célula Temas)
-    - Descrição (template configurável com variáveis)
-    - Tags (configuráveis por template)
-    - Thumbnail (path do JPG gerado na aba Thumbnail)
-    - Categoria (Education, Entertainment, etc)
-    - Visibilidade (public, unlisted, private, scheduled)
-    - Data de agendamento (se scheduled)
-
-    [ ] Autenticação OAuth2 com YouTube Data API v3
-        - Cada canal precisa de OAuth separado (consent screen)
-        - Token refresh automático
-        - Armazenar tokens em credentials.json ou separado
-
-    [ ] Upload de vídeo com metadata
-    [ ] Upload de thumbnail customizada
-    [ ] Agendamento de publicação (scheduled visibility)
-
-    [ ] PROXY POR CANAL
-        - Campo de proxy por card/canal (HTTP ou SOCKS5)
-        - Formato: http://user:pass@ip:port ou socks5://ip:port
-        - Cada canal pode ter proxy diferente para mascarar IP
-        - Evita que YouTube detecte múltiplos uploads do mesmo IP
-        - Proxy configurável no template ou na coluna do Temas
-        - httpx suporta proxy nativo: httpx.Client(proxy="...")
-        Viabilidade: ALTA — suportado nativamente pelo httpx
-        Prioridade: ALTA
-
-    [ ] COMENTÁRIO FIXADO AUTOMÁTICO
-        - Após upload, postar comentário no vídeo
-        - YouTube API: POST /commentThreads (insert comment)
-        - Fixar: POST /comments/setModerationStatus ou marcar via API
-          Nota: a API do YouTube não tem endpoint direto "pin comment"
-          Workaround: usar Selenium/Playwright para fixar via interface
-          OU usar a API interna do YouTube (não oficial, pode quebrar)
-          Alternativa mais segura: postar o comentário como primeiro
-          (geralmente fica no topo por ser do owner)
-        - Template de comentário com variáveis {{titulo}}, {{canal}}, etc
-        - Configurável por template/canal
-        Viabilidade: PARCIAL — postar é fácil, fixar é limitado pela API
-        Prioridade: MEDIA
-
-    [ ] Upload em lote por data
-    [ ] Status de upload (progresso, concluído, erro)
-    [ ] Histórico de uploads com link do vídeo
-    [ ] Template de descrição com variáveis ({{titulo}}, {{canal}}, {{data}}, etc)
-    [ ] Template de tags por canal
-    [ ] Retry automático em caso de falha
-    Prioridade: MEDIA
-
-    [ ] INTEGRAÇÃO LINK TRACKER (COMENTÁRIO COM LINK RASTREÁVEL)
-        O Link Tracker roda em "F:\Canal Dark\Automação\link-tracker"
-        É uma FastAPI com SQLite. API endpoints relevantes:
-        - POST /api/links → criar_link(slug, url_destino, titulo, grupo, repassar_params)
-        - POST /api/links/bulk → criar_links_em_lote (modo automatico ou manual)
-        - GET /{slug} → redireciona + registra clique com UTMs
-
-        FLUXO AUTOMÁTICO NO UPLOAD:
-        1. Antes do upload, o Video Automator chama a API do Link Tracker
-        2. Cria um link rastreável com formato:
-           slug: {canal}-{DDMM} (ex: "en-0904", "co2-0904")
-           url_destino: URL de destino configurada por canal (bio link, Hotmart, etc)
-           titulo: título do vídeo
-           grupo: canal/tag do template
-        3. Monta o link completo: https://{dominio_tracker}/{slug}
-           Com UTMs: ?utm_source=youtube&utm_medium={canal}&utm_campaign={data}
-        4. Insere o link no template do comentário:
-           Template: "🔗 Link exclusivo: {link_rastreavel}\n\n{texto_fixo}"
-        5. Posta o comentário no vídeo após upload
-        6. Fixa o comentário (via Selenium/Playwright)
-
-        CONFIGURAÇÃO NECESSÁRIA:
-        [ ] URL base do Link Tracker (ex: https://track.seudominio.com)
-        [ ] Credenciais do tracker (user/password para session cookie)
-        [ ] URL de destino padrão por canal
-        [ ] Template de comentário com variáveis:
-            {{link}}, {{titulo}}, {{canal}}, {{data}}
-        [ ] Formato do slug: configurável (default: {canal}-{DDMM})
-
-        WEBHOOK ALTERNATIVO:
-        [ ] Em vez de chamar a API do tracker direto, pode usar webhook
-            que o tracker recebe e cria o link automaticamente
-        [ ] Útil se tracker estiver em servidor remoto (Contabo)
-
-        Prioridade: ALTA (faz parte do fluxo completo de produção)
-
---- DISTRIBUICAO ---
-
-[ ] YOUTUBE UPLOAD INTEGRATION
-    Upload direto via YouTube Data API v3
-    Prioridade: MEDIA
-
-[ ] UPLOAD SCHEDULING
-    Agendar uploads para horarios especificos
-    Prioridade: BAIXA
-
-[ ] LINK TRACKER INTEGRATION
-    Criar links automaticamente no tracker apos gerar videos
-    Prioridade: BAIXA
-
---- NARRACAO AVANCADA ---
-
-[ ] VOICE PRESET PER TEMPLATE
-    Salvar voz + modelo + settings por template para batch rapido
-    Prioridade: ALTA
+[ ] VOICE PRESET PER TEMPLATE (parcialmente feito - narracao_voz)
+    Falta: modelo TTS selecionavel por voz (ElevenLabs model, Minimax model)
 
 [ ] FAVORITE VOICES (LOCAL BOOKMARKS)
     Marcar vozes favoritas localmente para acesso rapido
-    Prioridade: MEDIA
 
-[ ] TTS MODEL SELECTION PER VOICE
-    Selecao de modelo ElevenLabs (eleven_v3, eleven_multilingual_v2, etc)
-    por voz individual
-    Prioridade: MEDIA
+--- PRIORIDADE BAIXA ---
 
-[ ] MINIMAX MODEL SELECTION
-    Selecao de modelo Minimax (speech-2.6-hd, turbo, etc) por voz
-    Prioridade: MEDIA
-
-[ ] SOUND EFFECTS GENERATION
-    Gerar efeitos sonoros via ai33.pro API
-    Prioridade: BAIXA
-
-[ ] MUSIC GENERATION
-    Gerar musica/trilha sonora via ai33.pro API
-    Prioridade: BAIXA
-
-[ ] VOICE CLONING FROM THE APP
-    Interface para clonar vozes diretamente do app (upload de samples)
-    Prioridade: BAIXA
-
-[ ] DUBBING (TRANSLATE NARRATIONS)
-    Traduzir narracoes existentes para outros idiomas via ai33.pro
-    Prioridade: BAIXA
-
-[ ] MULTI-LANGUAGE SUPPORT FOR SAME PIPELINE
-    Gerar multiplos idiomas de um mesmo roteiro automaticamente
-    Prioridade: BAIXA
-
---- MONITORAMENTO ---
+[ ] MOBILE-RESPONSIVE UI
 
 [ ] DASHBOARD WITH PRODUCTION STATS
     Metricas: videos produzidos/dia, tempo medio, erros, creditos TTS
-    Prioridade: BAIXA
 
-[ ] ERROR RECOVERY FOR FAILED PRODUCTIONS
-    Retry automatico de producoes que falharam, com log de erros
-    Prioridade: MEDIA
+[ ] SOUND EFFECTS / MUSIC GENERATION (ai33.pro API)
 
---- BLINDAGEM PARA OPERAÇÃO REMOTA (CELULAR) ---
+[ ] VOICE CLONING FROM THE APP
 
-[ ] LIMPEZA DE METADADOS DO VÍDEO EXPORTADO
-    Remover metadados do MP4 final (encoder, software, creation_time, etc)
-    para que o YouTube não detecte automação.
-    Implementar como passo final após renderização:
-    ffmpeg -i input.mp4 -map_metadata -1 -c copy output_clean.mp4
-    Ou usar -metadata title="" -metadata comment="" etc
-    Aplicar automaticamente no "Produzir Tudo" e na produção manual.
-    Prioridade: ALTA
+[ ] DUBBING (TRANSLATE NARRATIONS)
 
-[ ] RETRY AUTOMÁTICO POR ETAPA
-    Se uma etapa falha (timeout API, erro de rede, FFmpeg crash),
-    tentar novamente até 3x com delay crescente entre tentativas (5s, 15s, 30s).
-    Se falhar 3x, pular pra próxima coluna e marcar como erro.
-    Aplicar em: geração de roteiro, narração TTS, produção de vídeo.
-    Prioridade: ALTA
+[ ] MULTI-LANGUAGE SUPPORT FOR SAME PIPELINE
 
-[ ] BOTÃO DE EMERGÊNCIA EM TODAS AS OPERAÇÕES
-    Adicionar cancelar/pular individual + cancelar lote em:
-    - Geração de roteiros em lote (já tem "Gerar Roteiros" mas sem cancel)
-    - "Produzir Tudo" (roteiro+narração+vídeo)
-    - Produção de vídeo em lote
-    - Narração em lote (já implementado)
-    Cada operação precisa:
-    - Botão "Cancelar Tudo" no header (para o lote inteiro)
-    - Botão "Pular" individual por item (pula e vai pro próximo)
-    - Estado visual: Cancelado/Pulado com badge
-    Prioridade: ALTA
-
-[ ] WATCHDOG DO SERVIDOR
-    Se o Python/uvicorn morrer, reiniciar automaticamente.
-    Opções: Windows Service (nssm), ou script .bat com loop,
-    ou supervisord se migrar pra Linux.
-    Crítico para operação remota sem acesso ao PC.
-    Prioridade: ALTA
-
-[ ] PERSISTÊNCIA DO ESTADO DE PRODUÇÃO
-    Salvar estado da produção em disco (producao_estado.json).
-    Se o servidor reiniciar no meio de uma produção, retomar
-    de onde parou baseado no que já existe em disco.
-    Verificar: roteiro existe? MP3 existe? MP4 existe? -> pular.
-    Prioridade: ALTA
-
-[ ] LOG PERSISTENTE EM ARQUIVO
-    Salvar log da produção completa em arquivo timestamped
-    (logs/producao_YYYYMMDD_HHMMSS.txt).
-    Se o browser fechar/recarregar, o log não se perde.
-    Endpoint GET /api/producao/log para consultar último log.
-    Prioridade: MEDIA
-
-[ ] TIMEOUT POR ETAPA
-    Se uma etapa travar (API não responde, FFmpeg congelou):
-    - Roteiro: timeout 5 min por etapa LLM
-    - Narração: timeout 10 min (polling)
-    - Vídeo: timeout 30 min (renderização)
-    Após timeout: kill processo, marcar como erro, seguir pro retry.
-    Prioridade: MEDIA
-
-[ ] NOTIFICAÇÃO DE CONCLUSÃO/ERRO
-    Quando produção terminar ou der erro crítico, notificar:
-    - Webhook para URL configurável (pode ser Telegram bot, Discord, etc)
-    - Endpoint GET /api/producao/ultimo-status pra celular consultar
-    - Opcional: som/vibração no browser via Notification API
-    Prioridade: BAIXA
+[ ] AGENTE AUTONOMO
+    Opcao 1: Claude Code Scheduled Agent (cron)
+    Opcao 2: Agent SDK (continuo, inteligente)
+    Opcao 3: monitor.py (loop Python, regras fixas)
+    Ideal futuro: monitor.py (estabilidade) + Claude agent (inteligencia)
 
 
---- AGENTE AUTÔNOMO (FUNCIONÁRIO VIRTUAL) ---
+--- ARQUITETURA ---
 
-[ ] OPÇÃO 1: CLAUDE CODE SCHEDULED AGENT
-    Usar o recurso de schedule/cron do Claude Code para criar um agente
-    que roda em intervalos programados.
-    Tarefas:
-    - A cada 30 min: verificar se servidor está rodando
-    - Checar se há produções travadas ou com erro
-    - Verificar se há temas pendentes para a data de hoje
-    - Relatar status via log ou webhook
-    - Reiniciar servidor se caiu
-    Vantagem: integrado com Claude Code, fácil de configurar
-    Limitação: roda em intervalos, não é contínuo
-    Prioridade: MEDIA
+[ ] SEPARAR PLATAFORMA EM 2 MODOS (AUTOMATICO + MANUAL)
+    O fluxo atual e engessado — mistura automacao completa com controle
+    manual na mesma interface, causando conflitos de estado e travamentos.
 
-[ ] OPÇÃO 2: AGENT SDK (AGENTE INTELIGENTE)
-    Usar claude_agent_sdk da Anthropic para criar agente autônomo
-    que roda continuamente com acesso às APIs do app.
-    Tarefas:
-    - Monitorar status de produções em tempo real
-    - Detectar falhas e re-executar automaticamente
-    - Verificar temas pendentes e iniciar produção proativamente
-    - Tomar decisões: "roteiro muito curto → re-gerar"
-    - Validar qualidade: contar chars, verificar estrutura do roteiro
-    - Reportar via webhook (Telegram, Discord)
-    - Sugerir temas baseado em tendências anteriores
-    Vantagem: mais inteligente, toma decisões, contínuo
-    Limitação: consome créditos de API, mais complexo
-    Prioridade: BAIXA
+    MODO 1: PRODUCAO AUTOMATICA (Produzir Tudo)
+    - Interface minima: seleciona data, clica play, acompanha no monitor
+    - Zero intervencao manual durante o processo
+    - Pipeline continua: roteiro paralelo -> narracao -> render
+    - Resiliencia total: auto-resume, retry, timeouts
+    - Foco: confiabilidade e velocidade
 
-[ ] OPÇÃO 3: MONITOR PYTHON (PRÁTICO / SEM API)
-    Script monitor.py que roda em loop independente do app.
-    Tarefas:
-    - Loop infinito com checagem a cada N minutos
-    - Verificar saúde: GET /api/batch/status
-    - Se servidor morto → reiniciar (subprocess)
-    - Se produção travada (>30 min sem progresso) → cancelar e retentar
-    - Se hora configurada (ex: 06:00) → iniciar produção da data de hoje
-    - Se hora configurada (ex: 22:00) → gerar relatório do dia
-    - Log tudo em arquivo rotativo
-    - Webhook opcional para notificações
-    Vantagem: robusta, sem custo de API, roda 24/7
-    Limitação: não toma decisões inteligentes, só regras fixas
-    Prioridade: ALTA
+    MODO 2: PRODUCAO MANUAL (aba Producao atual)
+    - Controle individual por canal/etapa
+    - Pode rodar roteiro isolado, narracao isolada, render isolado
+    - Pode substituir arquivos (trocar narracao, editar roteiro)
+    - Foco: flexibilidade e controle
 
-    Implementação sugerida:
-    ```
-    monitor.py
-    - check_server_health() → ping /api/batch/status
-    - check_stuck_production() → se ativo>30min, cancelar
-    - auto_start_production(data) → POST /api/producao-completa
-    - restart_server() → subprocess python app.py
-    - send_notification(msg) → webhook POST
-    - main loop: while True → check → sleep(interval)
-    ```
+    DADOS COMPARTILHADOS:
+    - Ambos leem/escrevem no mesmo temas.json
+    - Ambos usam mesmas pastas de narracoes/ e saida de video
+    - Ambos usam mesmos templates e pipelines
+    - O modo manual pode complementar/corrigir o que o automatico fez
 
-[ ] COMBINAÇÃO IDEAL (FUTURO)
-    Usar Opção 3 (monitor.py) como base de estabilidade +
-    Opção 1 (Claude scheduled) para tarefas inteligentes:
-    - monitor.py cuida de saúde, restart, timeout
-    - Claude agent cuida de decisões, qualidade, sugestões
-    - Ambos reportam pro mesmo webhook
-    Prioridade: BAIXA (depois de implementar 1 e 3 separadamente)
+    IMPLEMENTACAO:
+    [ ] Separar estados: orchestrator (automatico) vs batch (manual) independentes
+    [ ] Garantir que nao conflitam (locks, verificacao de processo ativo)
+    [ ] Modo automatico nao trava modo manual e vice-versa
+    [ ] Cada modo com seu proprio monitor/status
+
+    Prioridade: ALTA (resolve a raiz dos problemas de engessamento)
+
+
+========================== ANALISE DE VIABILIDADE ==============================
+
+--- MULTI-SERVIDOR / ARQUITETURA DISTRIBUIDA ---
+
+Pergunta: faz sentido dividir em mais de um servidor pra ficar mais rapido?
+
+SITUACAO ATUAL (1 PC, 1 processo Python):
+- Interface HTML inline carrega em <1s
+- JSONs com light mode: ~30KB (de 400KB+)
+- Gargalo REAL: FFmpeg/OpenCV (CPU/GPU 100% por 15-30min) + APIs externas
+- A interface NAO e o gargalo — o render e
+
+ONDE DIVIDIR AJUDARIA:
+- Render em processo/maquina separado -> interface responsiva durante render
+- LLM paralelo (multiplas pipelines simultaneas) -> roteiros mais rapidos
+- Worker queue (Celery/RQ) -> desacopla tarefas pesadas do servidor web
+
+ONDE NAO AJUDARIA:
+- Interface ja e leve (sem framework frontend, sem build)
+- TTS limitado pela API externa (ai33.pro), nao pelo servidor
+- Dados sao JSONs pequenos, nao precisa de banco dedicado
+
+CUSTO DA COMPLEXIDADE:
+- Sincronizar estado entre processos (Redis/banco necessario)
+- Manter 2+ servidores (deploy, monitoramento, restart)
+- Rede entre servidores adiciona latencia
+- Debugging mais dificil (logs distribuidos)
+
+VEREDICTO:
+- Para 12 videos/dia em 1 PC: NAO COMPENSA. O ganho e minimo vs complexidade.
+- Para 30+ videos/dia ou multiplas maquinas: CONSIDERAR separar:
+  1. Servidor web (interface + API) — leve, sempre responsivo
+  2. Worker de render (FFmpeg + Whisper) — maquina com GPU dedicada
+  3. Worker de LLM (pipelines) — pode rodar em paralelo
+  Comunicacao via fila de tarefas (Redis + Celery ou similar)
+- Para escala massiva (100+ videos): render farm com multiplas GPUs
+
+ALTERNATIVA SIMPLES (sem multi-servidor):
+- Rodar render em processo separado (multiprocessing) no mesmo PC
+- Ja implementado parcialmente: orchestrator roda em thread separada
+- Ken Burns ja paralelo com ThreadPoolExecutor (6 workers)
+- Principal otimizacao restante: paralelizar LLM calls entre canais
+
+Prioridade: BAIXA (reavaliar quando escalar para 30+ videos/dia)
 
 
 ================================================================================
   Legenda:  [x] Concluido   [ ] Pendente   [-] Cancelado
-  Ultima atualizacao: 2026-04-08
+  Ultima atualizacao: 2026-04-10
+================================================================================
+  Legenda:  [x] Concluido   [ ] Pendente   [-] Cancelado
+  Ultima atualizacao: 2026-04-10
 ================================================================================

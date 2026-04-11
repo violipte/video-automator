@@ -37,6 +37,7 @@ import narrator
 import thumbnail
 import production_log
 import orchestrator
+import render_queue
 from engine import VideoEngine
 
 # === CONFIG ===
@@ -946,14 +947,25 @@ def listar_temas(light: bool = True):
     return data
 
 
+_temas_cache = {"data": None, "mtime": 0}
+
 @app.get("/api/temas/roteiro/{key}")
 def obter_roteiro_celula(key: str):
-    """Retorna só o roteiro de uma célula específica."""
-    data = scriptwriter.carregar_temas()
-    if isinstance(data, list):
-        return {"roteiro": ""}
-    cel = data.get("celulas", {}).get(key, {})
-    return {"roteiro": cel.get("roteiro", ""), "chars": len(cel.get("roteiro", ""))}
+    """Retorna so o roteiro de uma celula. Cache em memoria com check de mtime."""
+    temas_file = Path(__file__).parent / "temas.json"
+    if not temas_file.exists():
+        return {"roteiro": "", "chars": 0}
+    try:
+        mtime = temas_file.stat().st_mtime
+        if _temas_cache["data"] is None or mtime != _temas_cache["mtime"]:
+            with open(temas_file, "r", encoding="utf-8") as f:
+                _temas_cache["data"] = json.load(f)
+            _temas_cache["mtime"] = mtime
+        cel = _temas_cache["data"].get("celulas", {}).get(key, {})
+        roteiro = cel.get("roteiro", "")
+        return {"roteiro": roteiro, "chars": len(roteiro)}
+    except Exception:
+        return {"roteiro": "", "chars": 0}
 
 
 @app.post("/api/temas")
@@ -1297,16 +1309,24 @@ def cancelar_producao_completa():
 
 @app.post("/api/producao-completa/reset")
 def resetar_producao():
-    """Reset total: mata processos, limpa estados."""
+    """Reset total: mata processos, limpa todos os estados."""
     orchestrator.cancelar()
     orchestrator.estado["ativo"] = False
+    orchestrator.estado["cancelado"] = False
     narrator.estado_narracao["ativo"] = False
+    narrator.estado_narracao["status"] = "idle"
     scriptwriter.estado_execucao["ativo"] = False
     estado_batch["ativo"] = False
     estado_batch["jobs"] = []
     _salvar_estado_batch()
-    production_log.finalizar(True)
-    # Limpar state file
+    # Limpar production_state.json completamente
+    production_log._state = {
+        "ativo": False, "data_ref": "", "data_idx": None, "ordem_colunas": None,
+        "inicio": None, "total_canais": 0, "canal_atual": 0,
+        "canais": [], "log": [], "concluidos": 0, "erros": 0, "pulados": 0, "cancelado": False,
+    }
+    production_log._salvar()
+    # Matar FFmpeg
     import subprocess as sp
     sp.run(["taskkill", "/F", "/IM", "ffmpeg.exe"], capture_output=True, timeout=5)
     return {"ok": True}
@@ -1336,75 +1356,100 @@ async def salvar_instrucoes_chat(request: Request):
     return {"ok": True}
 
 
-CHAT_HISTORICO_FILE = AGENTS_DIR / "temas" / "historico.json"
+def _chat_historico_file(agent: str = "temas") -> Path:
+    return AGENTS_DIR / agent / "historico.json"
 
 
-def _carregar_chat_historico() -> list:
-    if CHAT_HISTORICO_FILE.exists():
-        with open(CHAT_HISTORICO_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+def _carregar_chat_historico(agent: str = "temas") -> list:
+    f = _chat_historico_file(agent)
+    if f.exists():
+        try:
+            with open(f, "r", encoding="utf-8") as fh:
+                return json.load(fh)
+        except Exception:
+            return []
     return []
 
 
-def _salvar_chat_historico(historico: list):
-    CHAT_HISTORICO_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(CHAT_HISTORICO_FILE, "w", encoding="utf-8") as f:
-        json.dump(historico[-100:], f, ensure_ascii=False, indent=2)  # max 100 msgs
+def _salvar_chat_historico(historico: list, agent: str = "temas"):
+    f = _chat_historico_file(agent)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    with open(f, "w", encoding="utf-8") as fh:
+        json.dump(historico[-100:], fh, ensure_ascii=False, indent=2)
 
 
 @app.get("/api/chat/history")
-def obter_chat_historico():
-    return _carregar_chat_historico()
+def obter_chat_historico(agent: str = "temas"):
+    return _carregar_chat_historico(agent)
 
 
 @app.delete("/api/chat/history")
-def limpar_chat_historico():
-    _salvar_chat_historico([])
+def limpar_chat_historico(agent: str = "temas"):
+    _salvar_chat_historico([], agent)
     return {"ok": True}
 
 
 @app.post("/api/chat")
-async def chat_claude_cli(request: Request):
+async def chat_api(request: Request):
+    """Chat via API direta do Anthropic (sem Claude CLI)."""
     dados = await request.json()
     prompt = dados.get("prompt", "")
     agent = dados.get("agent", "temas")
     if not prompt:
-        raise HTTPException(400, "Prompt é obrigatório")
+        raise HTTPException(400, "Prompt obrigatorio")
 
-    # Salvar mensagem do usuário no histórico
-    historico = _carregar_chat_historico()
-    historico.append({"role": "user", "text": prompt, "ts": datetime.now().isoformat(), "agent": agent})
+    # Carregar instrucoes do agente
+    claude_md = AGENTS_DIR / agent / "CLAUDE.md"
+    system_msg = claude_md.read_text(encoding="utf-8") if claude_md.exists() else ""
 
-    agent_dir = str(AGENTS_DIR / agent)
-    Path(agent_dir).mkdir(parents=True, exist_ok=True)
-    claude_cmd = os.path.join(os.environ.get("APPDATA", ""), "npm", "claude.cmd")
-    if not os.path.exists(claude_cmd):
-        claude_cmd = "claude"
+    # Carregar historico e montar mensagens para contexto
+    historico = _carregar_chat_historico(agent)
+    historico.append({"role": "user", "text": prompt, "ts": datetime.now().isoformat()})
 
-    # Usar --continue para manter a sessão (Claude CLI lembra o contexto)
-    # Na primeira mensagem não tem sessão, então --continue falha silenciosamente e cria nova
-    cmd = [claude_cmd, "-p", "--continue", "--output-format", "text", prompt]
+    # Montar messages para a API (ultimas 20 msgs para contexto)
+    messages = []
+    for m in historico[-20:]:
+        role = "user" if m.get("role") == "user" else "assistant"
+        messages.append({"role": role, "content": m.get("text", "")})
+
+    # Buscar credencial Claude
+    creds = scriptwriter.carregar_credenciais()
+    api_key = ""
+    for c in creds:
+        if c.get("provedor") == "claude" and c.get("status") == "ok":
+            api_key = c.get("api_key", "")
+            break
+
+    if not api_key:
+        return {"resposta": "Erro: sem credencial Claude configurada"}
 
     try:
-        import subprocess as sp
-        env = dict(os.environ)
-        for key in list(env.keys()):
-            if "CLAUDE" in key.upper():
-                del env[key]
-        proc = sp.run(
-            cmd, capture_output=True, text=True, timeout=120,
-            encoding="utf-8", errors="replace",
-            cwd=agent_dir, shell=True, env=env,
+        import httpx
+        resp = httpx.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": "claude-sonnet-4-6",
+                "max_tokens": 8000,
+                "system": system_msg,
+                "messages": messages,
+            },
+            timeout=120.0,
         )
-        resposta = proc.stdout.strip() if proc.returncode == 0 else f"Erro: {proc.stderr.strip()}"
-
-        # Salvar resposta no histórico
-        historico.append({"role": "assistant", "text": resposta, "ts": datetime.now().isoformat()})
-        _salvar_chat_historico(historico)
-
-        return {"resposta": resposta}
+        resp.raise_for_status()
+        data = resp.json()
+        resposta = data["content"][0]["text"]
     except Exception as e:
-        return {"resposta": f"Erro: {e}"}
+        resposta = f"Erro: {e}"
+
+    historico.append({"role": "assistant", "text": resposta, "ts": datetime.now().isoformat()})
+    _salvar_chat_historico(historico, agent)
+
+    return {"resposta": resposta}
 
 
 # === API: CONFIG ===
@@ -1670,6 +1715,9 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
       Config
     </a>
+  </div>
+  <div style="padding:8px 16px;border-top:1px solid var(--border);font-size:10px;color:var(--text-sec)">
+    PID: <span id="server-pid">...</span>
   </div>
 </nav>
 
@@ -5798,23 +5846,24 @@ function editarCelula(ri, ci) {
   document.getElementById('cel-tema').value = cel.tema || '';
   document.getElementById('cel-titulo').value = cel.titulo || '';
   document.getElementById('cel-thumb').value = cel.thumb || '';
-  // Carregar roteiro completo da API (não vem no light mode)
-  // Sempre tentar carregar roteiro do backend (fonte da verdade)
-  document.getElementById('cel-roteiro').value = cel.roteiro || 'Carregando...';
-  document.getElementById('cel-roteiro-chars').textContent = (cel.roteiro ? cel.roteiro.length : (cel.tem_roteiro || 0)) + ' chars';
+  // Carregar roteiro do backend (fonte da verdade, nao usa cache local)
+  document.getElementById('cel-roteiro').value = cel.tem_roteiro ? 'Carregando...' : '';
+  document.getElementById('cel-roteiro-chars').textContent = (cel.tem_roteiro || 0) + ' chars';
+  var _fetchKey = key;
   fetch('/api/temas/roteiro/' + key).then(function(r){ return r.json(); }).then(function(d){
+    // So atualizar se ainda estamos editando a mesma celula
+    if (!_celulaEditando || (_celulaEditando.row + '_' + _celulaEditando.col) !== _fetchKey) return;
     if (d.roteiro) {
       document.getElementById('cel-roteiro').value = d.roteiro;
       document.getElementById('cel-roteiro-chars').textContent = d.chars + ' chars';
-      if (!temasData.celulas[key]) temasData.celulas[key] = {};
-      temasData.celulas[key].roteiro = d.roteiro;
-      temasData.celulas[key].tem_roteiro = d.chars;
-    } else if (!cel.roteiro) {
+    } else {
       document.getElementById('cel-roteiro').value = '';
       document.getElementById('cel-roteiro-chars').textContent = '0 chars';
     }
   }).catch(function(e){
-    if (!cel.roteiro) document.getElementById('cel-roteiro').value = '';
+    if (_celulaEditando && (_celulaEditando.row + '_' + _celulaEditando.col) === _fetchKey) {
+      document.getElementById('cel-roteiro').value = '';
+    }
   });
   document.getElementById('cel-roteiro').oninput = function() {
     document.getElementById('cel-roteiro-chars').textContent = this.value.length + ' chars';
@@ -6453,14 +6502,18 @@ var _currentAgent = 'temas';
 function trocarAgente() {
   var sel = document.getElementById('chat-agent-select');
   _currentAgent = sel.value;
-  // Recarregar instruções do novo agente
   _instrCarregadas = false;
   fetch('/api/chat/instructions?agent=' + _currentAgent).then(function(r){ return r.json(); }).then(function(d){
     document.getElementById('chat-instrucoes').value = d.instrucoes || '';
     _instrCarregadas = true;
   });
-  // Limpar mensagens visuais (histórico é compartilhado)
+  // Carregar historico do agente selecionado
   document.getElementById('chat-messages').innerHTML = '';
+  fetch('/api/chat/history?agent=' + _currentAgent).then(function(r){ return r.json(); }).then(function(msgs){
+    if (msgs && msgs.length) {
+      msgs.forEach(function(m){ _addChatMsg(m.role, m.text); });
+    }
+  });
   toast('Agente: ' + _currentAgent, 'success');
 }
 
@@ -6472,8 +6525,8 @@ function toggleChat() {
       document.getElementById('chat-instrucoes').value = d.instrucoes || '';
       _instrCarregadas = true;
     });
-    // Carregar histórico
-    fetch('/api/chat/history').then(function(r){ return r.json(); }).then(function(msgs){
+    // Carregar historico do agente atual
+    fetch('/api/chat/history?agent=' + _currentAgent).then(function(r){ return r.json(); }).then(function(msgs){
       if (msgs && msgs.length) {
         msgs.forEach(function(m){ _addChatMsg(m.role, m.text); });
       }
@@ -6483,7 +6536,7 @@ function toggleChat() {
 
 async function limparChatHistorico() {
   if (!confirm('Limpar todo o histórico do chat?')) return;
-  await fetch('/api/chat/history', { method: 'DELETE' });
+  await fetch('/api/chat/history?agent=' + _currentAgent, { method: 'DELETE' });
   document.getElementById('chat-messages').innerHTML = '';
   toast('Histórico limpo', 'success');
 }
@@ -6955,6 +7008,11 @@ window.addEventListener('unhandledrejection', function(event) {
 carregarTemas().then(function(){ atualizarLoteDataSelect(); });
 document.getElementById('chat-toggle-btn').style.display = 'block';
 
+// Carregar PID do servidor
+fetch('/api/health').then(function(r){ return r.json(); }).then(function(d){
+  if (d.pid) document.getElementById('server-pid').textContent = d.pid;
+});
+
 // Sempre iniciar polling do Monitor em background
 startMonitorPolling();
 
@@ -7189,6 +7247,63 @@ async function refreshMonitor() {
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard():
     return DASHBOARD_HTML
+
+
+# === HEALTH ENDPOINT ===
+
+@app.get("/api/health")
+def health_check():
+    """Health endpoint para watchdog externo."""
+    log_state = production_log.obter_estado()
+    thread_alive = (
+        orchestrator._thread_producao is not None and
+        orchestrator._thread_producao.is_alive()
+    )
+    return {
+        "ok": True,
+        "pid": os.getpid(),
+        "producao_ativa": log_state.get("ativo", False),
+        "thread_alive": thread_alive,
+        "canais_concluidos": sum(1 for c in log_state.get("canais", []) if c.get("etapa") == "concluido"),
+        "canais_erro": sum(1 for c in log_state.get("canais", []) if c.get("etapa") == "erro"),
+        "canais_pendentes": sum(1 for c in log_state.get("canais", []) if c.get("etapa") in ("aguardando", "roteiro", "narracao", "video", "iniciando")),
+        "render_queue": render_queue.obter_estado(),
+    }
+
+
+# === RENDER QUEUE WORKER (startup) ===
+render_queue.iniciar_worker()
+
+# === HEALTH MONITOR (thread em background) ===
+
+def _health_monitor():
+    """Verifica a cada 60s se a producao deveria estar rodando mas a thread morreu."""
+    while True:
+        time.sleep(60)
+        try:
+            log_state = production_log.obter_estado()
+            if log_state.get("ativo") and not orchestrator.estado.get("ativo"):
+                # State no disco diz ativo mas em memoria nao = thread morreu
+                production_log.adicionar_log("HEALTH MONITOR: thread morta detectada, retomando...")
+                orchestrator.tentar_retomar()
+        except Exception as e:
+            print(f"[HEALTH MONITOR] Erro: {e}")
+
+threading.Thread(target=_health_monitor, daemon=True).start()
+
+
+# === AUTO-RESUME NO STARTUP ===
+
+## AUTO-RESUME DESABILITADO — usuario prefere controle manual
+## O health monitor (a cada 60s) ainda detecta thread morta durante producao ativa
+## mas NAO inicia producao sozinho no startup
+# def _auto_resume_delayed():
+#     time.sleep(12)
+#     try:
+#         orchestrator.tentar_retomar()
+#     except Exception:
+#         pass
+# threading.Thread(target=_auto_resume_delayed, daemon=True).start()
 
 
 if __name__ == "__main__":

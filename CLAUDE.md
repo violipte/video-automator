@@ -6,14 +6,17 @@ Local automation tool that replaces Adobe Premiere Pro for YouTube video product
 
 ## Architecture
 
-**Single-file SPA**: FastAPI backend (`app.py`, ~5800 lines) serves an inline HTML/JS dashboard via a `DASHBOARD_HTML` string. No separate frontend build. All JavaScript lives inside Python string literals in `app.py`. Server runs on port 8500.
+**Single-file SPA**: FastAPI backend (`app.py`, ~7400 lines) serves an inline HTML/JS dashboard via a `DASHBOARD_HTML` string. No separate frontend build. All JavaScript lives inside Python string literals in `app.py`. Server runs on port 8500.
 
 **Backend modules**:
-- `engine.py` (~780 lines) - Video assembly engine (OpenCV + FFmpeg)
+- `engine.py` (~850 lines) - Video assembly engine (OpenCV + FFmpeg)
 - `transcriber.py` - Whisper audio-to-SRT transcription
 - `subtitle_fixer.py` - SRT correction rules engine
-- `scriptwriter.py` (~420 lines) - Multi-step LLM pipeline executor + credential system + Supabase/Sheets sync
-- `narrator.py` (~340 lines) - TTS via ai33.pro API (ElevenLabs + Minimax)
+- `scriptwriter.py` (~550 lines) - Multi-step LLM pipeline executor + credential system + isolated execution
+- `narrator.py` (~400 lines) - TTS via ai33.pro API (ElevenLabs + Minimax), chunking sequencial
+- `orchestrator.py` (~600 lines) - Production orchestrator (3-phase pipeline: parallel roteiros + narration→render pipeline)
+- `production_log.py` (~140 lines) - Persistent production state (thread-safe with RLock)
+- `render_queue.py` (~100 lines) - Shared render queue (auto + manual modes, 1 worker)
 
 **Data files** (all JSON, no database):
 - `templates.json` - Template configurations (includes narracao_voz, moldura, etc.)
@@ -38,6 +41,11 @@ video-automator/
   pipelines.json      # LLM pipeline definitions
   temas.json          # Temas grid state
   historico.json      # Production history
+  orchestrator.py     # Production orchestrator (3-phase pipeline)
+  production_log.py   # Persistent production state (thread-safe)
+  render_queue.py     # Shared render queue (auto + manual)
+  link_tracker.py     # Link tracker integration
+  watchdog.bat        # Auto-restart server on crash
   BACKLOG.txt         # Full backlog with done/pending items
   rules/              # Subtitle correction rules per language
     en.json, de.json, pt.json, es.json
@@ -250,7 +258,7 @@ After each pipeline execution, a log file is saved to `logs/pipeline_{id}_{times
   - `normalize=0` preserves narration volume (prevents amix from normalizing down)
   - `weights=1 0.5` gives narration full volume, background music half
 - Write filter graph to `temp/filter_complex.txt` (avoids cmd line length limits)
-- Output: H.264 NVENC, CQ 20, AAC 192k, faststart
+- Output: H.264 NVENC p1, CQ 24, AAC 192k, faststart
 - **Metadata stripping**: After successful render, runs `ffmpeg -map_metadata -1 -fflags +bitexact` to strip encoder/software/timestamps from final MP4. Prevents YouTube automation detection.
 
 ### FFmpeg Resilience
@@ -644,37 +652,155 @@ When a credential is tested/refreshed, the system queries the provider's API for
 
 ---
 
+## Render Performance (engine.py)
+
+### Ken Burns clips
+- Generated via OpenCV `warpAffine` (subpixel interpolation, zero jitter)
+- Encoded with **libx264 ultrafast CRF 23** (CPU, no NVENC session limit)
+- **4 parallel workers** via ThreadPoolExecutor
+- Pre-concatenated into single `bg_clips_concat.mp4` before render final
+- This makes image-based templates render as fast as video-based ones
+
+### Clip duration scaling
+Clips use escalated durations to reduce count without losing visual variety:
+- 0:00-2:00 = 10s per image (fast rhythm for hook)
+- 2:00-15:00 = 15s per image (medium)
+- 15:00+ = 20s per image (relaxed)
+- Result: ~139 clips for 40min video (vs ~241 with fixed 10s)
+
+### Render final
+- NVENC p1, CQ 24 (reserved for final assembly only)
+- 16 FFmpeg threads for CPU-bound filters
+- NVENC limit: RTX 3060 = 2 concurrent sessions (do NOT exceed)
+
+### Metadata stripping
+- `ffmpeg -map_metadata -1 -fflags +bitexact` after render
+- Removes encoder/software/timestamps from final MP4
+
+---
+
+## Production Modes (Separated)
+
+### Auto Mode (orchestrator.py → "Produzir Tudo")
+- 3-phase pipeline: roteiros parallel (3 workers) → narration+render pipeline
+- Narration uses `estado_narracao_auto` (independent from manual)
+- Renders enqueued via `render_queue.enfileirar(fonte="auto")`
+- Canals with existing MP3 go directly to render queue (don't wait for narration)
+
+### Manual Mode (app.py batch → aba Produção)
+- Individual channel control
+- Narration uses `estado_narracao` (independent from auto)
+- Renders also use render_queue (shared, 1 worker)
+- Both modes can coexist without blocking each other
+
+### Render Queue (render_queue.py)
+- Single worker thread consuming jobs FIFO
+- Both auto and manual modes enqueue here
+- Guarantees only 1 render at a time (GPU/NVENC protection)
+- Callbacks: `on_done`, `on_error` per job
+
+---
+
+## LLM Provider System (scriptwriter.py)
+
+### Providers
+- `claude` — Anthropic API (paid, $3-15/1M tokens)
+- `claude_cli` — Claude CLI `-p` mode (Max plan, $0 extra, ~1000 Sonnet/5h)
+- `gpt` — OpenAI API (paid)
+- `gemini` — Google AI Studio API (free tier: 500 RPD for Flash)
+
+### Current Pipeline Config (all channels)
+- **Hooker + Developer**: `claude_cli` (Sonnet 4.6, Max plan, $0)
+- **Amplifier**: `gemini` (Flash 2.5, free tier, $0)
+- **Translator DE**: `gemini` (Flash 2.5, free tier, $0)
+
+### Fallback Chain
+When a provider fails (429, timeout, error), tries next in order:
+1. `claude_cli` (Claude Sonnet via CLI)
+2. `claude` (Claude API)
+3. `gemini` (Gemini Flash)
+4. `gpt` (GPT 5.2)
+Skips the provider that already failed.
+
+### Pipeline abort on LLM failure
+If an LLM step fails (even with fallback), the pipeline **aborts** instead of continuing with bad data. Prevents short/garbage scripts.
+
+### Variable cleanup
+`_substituir_variaveis` automatically removes unsubstituted `{{vars}}` from output, preventing literal variable names from being narrated.
+
+---
+
+## Narration Chunking (narrator.py)
+
+### Sequential chunking (Minimax texts >8000 chars)
+- Sends 1 chunk → polls until done → downloads → next chunk
+- NOT all-at-once (avoids overloading ai33.pro API)
+- Each chunk has 10min timeout
+- Download: 300s timeout + 3 retries
+- Task polling: 5 retries on 502/503/429
+
+### Separate states
+- `estado_narracao` — manual mode (aba Narração/Produção)
+- `estado_narracao_auto` — auto mode (orchestrator)
+- Both can operate independently
+
+---
+
+## Chat System (app.py)
+
+### Direct API (not Claude CLI)
+- Uses Anthropic API directly via httpx (not subprocess)
+- Model: claude-sonnet-4-6, max_tokens: 8000
+- System message loaded from `agents/{agent}/CLAUDE.md`
+- Last 20 messages sent as context
+
+### Per-agent history
+- Each agent has separate `agents/{agent}/historico.json`
+- Temas and Títulos histories don't mix
+- Survives page refresh (F5)
+
+---
+
+## Resilience
+
+### Production
+- Auto-resume disabled on startup (manual control)
+- Health monitor thread (60s) detects dead threads during active production
+- Timeouts: roteiro 10min, narração 40min, vídeo 90min
+- Narration state always reset on error/timeout (prevents blocking)
+- FFmpeg orphan cleanup: 3x taskkill on timeout
+
+### Render Queue
+- Single worker prevents GPU contention
+- Both auto and manual modes share the queue safely
+
+### Server
+- PID displayed in sidebar footer
+- `/api/health` endpoint with production status + render queue status
+- `watchdog.bat` auto-restarts on crash
+
+---
+
 ## Backlog / Pending Items
 
 See `BACKLOG.txt` for the full list. Key pending items by priority:
 
 ### HIGH PRIORITY
-- **Full production resilience**: Retry per step (3x with exponential delay), timeout per step (roteiro 5min, narracao 10min, video 30min)
-- **Emergency buttons**: Cancel/skip individual + cancel batch on all batch operations (roteiro, narracao, video, produzir tudo)
-- **Watchdog**: Auto-restart server if uvicorn dies (nssm Windows Service or .bat loop)
-- **Production state persistence**: Save state to `producao_estado.json`, resume after restart
-- **monitor.py**: Independent Python script that runs in loop - health check, stuck detection, auto-start production at scheduled time, webhook notifications
+- Thumbnail system (per-template config, AI generation, reference modeling)
+- Upload system (YouTube API, OAuth per channel, proxy, pinned comments)
+- Produzir Tudo em Loop (auto-advance to next date)
+- Separate auto/manual modes further (render_queue already done)
+- Monitor: detailed render progress (clips count, ETA)
 
 ### MEDIUM PRIORITY
 - Cloudflare Tunnel / Tailscale for remote access
-- Git repository initialization
-- Supabase/Sheets sync testing
-- Google Sheets read/write
-- Thumbnail text generation
-- Completion/error webhooks (Telegram, Discord)
+- Notification webhooks (Telegram/Discord)
+- Sticky grid headers (freeze date column + channel row)
+- Chat panel not blocking grid
+- Refresh button per tab
 
 ### LOW / FUTURE
-- YouTube upload via Data API v3
-- Upload scheduling
-- Link Tracker integration
-- Sound effects / music generation via ai33.pro
-- Voice cloning from the app
-- Dubbing (translate narrations)
+- DaVinci Resolve scripting API for render
 - Mobile-responsive UI
 - Dashboard with production stats
-
-### Autonomous Agent Options (Future)
-1. **Claude Code Scheduled Agent**: Cron-based, checks health every 30min
-2. **Agent SDK**: Continuous monitoring, intelligent decisions, quality validation
-3. **monitor.py** (preferred first step): Simple Python loop, health checks, auto-restart, scheduled production, webhook alerts
-4. **Combination**: monitor.py for stability + Claude agent for intelligence
+- Autonomous agent (monitor.py + Claude scheduled)
