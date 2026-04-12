@@ -1292,10 +1292,11 @@ async def iniciar_producao_completa(request: Request):
     """Inicia produção completa no backend (thread)."""
     dados = await request.json()
     data_idx = dados.get("data_idx", -1)
-    ordem = dados.get("ordem", None)  # lista de índices de coluna na ordem desejada
+    ordem = dados.get("ordem", None)
+    loop = dados.get("loop", False)
     if data_idx < 0:
         raise HTTPException(400, "data_idx é obrigatório")
-    result = orchestrator.iniciar_producao(data_idx, ordem_colunas=ordem)
+    result = orchestrator.iniciar_producao(data_idx, ordem_colunas=ordem, loop=loop)
     if not result.get("ok"):
         raise HTTPException(409, result.get("erro", "Erro"))
     return result
@@ -1406,9 +1407,9 @@ async def chat_api(request: Request):
     historico = _carregar_chat_historico(agent)
     historico.append({"role": "user", "text": prompt, "ts": datetime.now().isoformat()})
 
-    # Montar messages para a API (ultimas 20 msgs para contexto)
+    # Montar messages para a API (so a msg atual — sem historico, sem contaminacao)
     messages = []
-    for m in historico[-20:]:
+    for m in historico[-1:]:
         role = "user" if m.get("role") == "user" else "assistant"
         messages.append({"role": role, "content": m.get("text", "")})
 
@@ -1514,6 +1515,8 @@ body { font-family: -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; back
 .page.active { display:block; }
 .page-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:24px; }
 .page-header h2 { font-size:22px; font-weight:600; }
+.btn-refresh-page { position:fixed; bottom:16px; right:16px; z-index:800; width:40px; height:40px; border-radius:50%; background:var(--panel); border:1px solid var(--border); color:var(--accent); cursor:pointer; display:flex; align-items:center; justify-content:center; font-size:18px; box-shadow:0 2px 8px rgba(0,0,0,0.3); transition:all .15s; }
+.btn-refresh-page:hover { background:var(--accent); color:#000; }
 
 /* BUTTONS */
 .btn { padding:8px 16px; border:none; border-radius:6px; font-size:13px; font-weight:500; cursor:pointer; transition:all .15s; display:inline-flex; align-items:center; gap:6px; }
@@ -1703,10 +1706,6 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5,3 19,12 5,21"/></svg>
       Produção
     </a>
-    <a data-page="historico" onclick="showPage('historico')">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12,6 12,12 16,14"/></svg>
-      Histórico
-    </a>
     <a data-page="monitor" onclick="showPage('monitor')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
       Monitor
@@ -1808,7 +1807,7 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
         <span id="mon-data-ref" style="font-size:13px;font-weight:600;color:var(--accent)"></span>
         <span id="mon-timer-global" style="font-size:14px;font-family:monospace;color:var(--text)">00:00:00</span>
         <span id="mon-uptime" style="font-size:11px;color:var(--text-sec)">Uptime: --:--:--</span>
-        <button class="btn btn-danger btn-sm" onclick="resetarProducao()" style="font-size:10px">Reset Total</button>
+        <button class="btn btn-danger btn-sm" onclick="cancelarEResetar()" style="font-size:10px">Cancelar + Reset</button>
         <span style="font-size:10px;color:var(--text-sec)">Auto-refresh: 3s</span>
       </div>
     </div>
@@ -2136,24 +2135,24 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
         <div class="modal-body">
           <div class="form-group">
             <label>Tema do Vídeo</label>
-            <textarea id="cel-tema" rows="2" placeholder="Ex: Someone from the past is returning with a request..." style="font-size:12px;color:var(--accent)"></textarea>
+            <textarea id="cel-tema" rows="2" placeholder="Ex: Someone from the past is returning with a request..." style="font-size:12px;color:var(--accent)" oninput="document.getElementById('cel-tema-chars').textContent=this.value.length+' chars'"></textarea>
             <div style="display:flex;justify-content:space-between;align-items:center;margin-top:2px">
-              <span style="font-size:10px;color:var(--text-sec)">Gancho central</span>
+              <span style="font-size:10px;color:var(--text-sec)">Gancho central &nbsp; <span id="cel-tema-chars" style="color:var(--accent)">0 chars</span></span>
               <div style="display:flex;gap:4px;align-items:center"><span class="case-btns" data-target="cel-tema"></span>
               <button type="button" class="btn btn-secondary btn-sm" style="font-size:9px;padding:1px 6px" onclick="abrirReplicar('tema')">Replicar &rarr;</button></div>
             </div>
           </div>
           <div class="form-group">
             <label>Título do Vídeo</label>
-            <textarea id="cel-titulo" rows="2" placeholder="Título completo para o YouTube..."></textarea>
-            <div style="display:flex;justify-content:flex-end;gap:4px;margin-top:2px"><span class="case-btns" data-target="cel-titulo"></span>
-            <button type="button" class="btn btn-secondary btn-sm" style="font-size:9px;padding:1px 6px" onclick="abrirReplicar('titulo')">Replicar &rarr;</button></div>
+            <textarea id="cel-titulo" rows="2" placeholder="Título completo para o YouTube..." oninput="document.getElementById('cel-titulo-chars').textContent=this.value.length+' chars'"></textarea>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-top:2px"><span id="cel-titulo-chars" style="font-size:10px;color:var(--text-sec)">0 chars</span><div style="display:flex;gap:4px;align-items:center"><span class="case-btns" data-target="cel-titulo"></span>
+            <button type="button" class="btn btn-secondary btn-sm" style="font-size:9px;padding:1px 6px" onclick="abrirReplicar('titulo')">Replicar &rarr;</button></div></div>
           </div>
           <div class="form-group">
             <label>Texto da Thumbnail</label>
-            <textarea id="cel-thumb" rows="1" placeholder="Texto curto da thumb..."></textarea>
-            <div style="display:flex;justify-content:flex-end;gap:4px;margin-top:2px"><span class="case-btns" data-target="cel-thumb"></span>
-            <button type="button" class="btn btn-secondary btn-sm" style="font-size:9px;padding:1px 6px" onclick="abrirReplicar('thumb')">Replicar &rarr;</button></div>
+            <textarea id="cel-thumb" rows="1" placeholder="Texto curto da thumb..." oninput="document.getElementById('cel-thumb-chars').textContent=this.value.length+' chars'"></textarea>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-top:2px"><span id="cel-thumb-chars" style="font-size:10px;color:var(--text-sec)">0 chars</span><div style="display:flex;gap:4px;align-items:center"><span class="case-btns" data-target="cel-thumb"></span>
+            <button type="button" class="btn btn-secondary btn-sm" style="font-size:9px;padding:1px 6px" onclick="abrirReplicar('thumb')">Replicar &rarr;</button></div></div>
           </div>
           <div class="form-group">
             <label>Pipeline (para geração)</label>
@@ -2241,26 +2240,36 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
           </div>
         </div>
         <div class="modal-footer">
-          <button class="btn btn-secondary btn-sm" onclick="replicarTodos()">Replicar para Todos</button>
+          <!-- Replicar para Todos removido (perigoso) -->
           <button class="btn btn-primary btn-sm" onclick="replicarSelecionados()">Replicar Selecionados</button>
         </div>
       </div>
     </div>
 
-    <!-- GERAÇÃO EM LOTE -->
-    <div style="margin-top:20px;background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:16px">
+    <!-- PRODUCAO AUTOMATICA -->
+    <div style="margin-top:20px;background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:16px;border-left:3px solid var(--warn)">
       <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap">
-        <h3 style="font-size:15px;margin:0">Geração de Roteiros em Lote</h3>
+        <h3 style="font-size:15px;margin:0;color:var(--warn)">Produzir Tudo</h3>
         <div style="display:flex;gap:6px;align-items:center">
           <label style="font-size:11px;color:var(--text-sec)">Data:</label>
           <select id="lote-data-select" style="font-size:11px;padding:3px 6px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text)">
             <option value="">Selecione a data</option>
           </select>
         </div>
-        <button class="btn btn-primary btn-sm" onclick="gerarLoteRoteiros()" id="btn-lote-roteiros" style="font-size:11px">Gerar Roteiros</button>
-        <button class="btn btn-danger btn-sm" onclick="cancelarLoteRoteiros()" id="btn-lote-roteiros-cancel" style="font-size:11px;display:none">Cancelar</button>
-        <button class="btn btn-primary btn-sm" onclick="abrirProduzirTudo()" id="btn-produzir-tudo" style="font-size:11px;background:var(--warn);color:#000">Produzir Tudo</button>
+        <button class="btn btn-primary btn-sm" onclick="abrirProduzirTudo()" id="btn-produzir-tudo" style="font-size:11px;background:var(--warn);color:#000">Iniciar</button>
+        <label style="font-size:11px;display:inline-flex;align-items:center;gap:4px;cursor:pointer;color:var(--text-sec)" title="Ao concluir, avanca para a proxima data automaticamente"><input type="checkbox" id="chk-loop"> Loop (multi-data)</label>
         <button class="btn btn-danger btn-sm" onclick="cancelarProduzirTudo()" id="btn-produzir-tudo-cancel" style="font-size:11px;display:none">Cancelar</button>
+      </div>
+      <div style="font-size:10px;color:var(--text-sec);margin-bottom:8px">Roteiro + Narracao + Video para todos os canais da data selecionada. Acompanhe no Monitor.</div>
+    </div>
+
+    <!-- GERACAO MANUAL DE ROTEIROS -->
+    <div style="margin-top:12px;background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:16px;border-left:3px solid var(--accent)">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap">
+        <h3 style="font-size:15px;margin:0;color:var(--accent)">Gerar Roteiros</h3>
+        <span style="font-size:10px;color:var(--text-sec)">(somente roteiros, sem narracao/video)</span>
+        <button class="btn btn-primary btn-sm" onclick="gerarLoteRoteiros()" id="btn-lote-roteiros" style="font-size:11px">Gerar</button>
+        <button class="btn btn-danger btn-sm" onclick="cancelarLoteRoteiros()" id="btn-lote-roteiros-cancel" style="font-size:11px;display:none">Cancelar</button>
       </div>
       <div id="lote-preview" style="font-size:11px;color:var(--text-sec);margin-bottom:8px"></div>
       <div id="lote-status" style="display:none">
@@ -3106,23 +3115,34 @@ let browserPath = '';
 let batchInterval = null;
 
 // === NAVIGATION ===
+var _currentPage = 'temas';
+
 function showPage(page) {
+  _currentPage = page;
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.sidebar-nav a').forEach(a => a.classList.remove('active'));
   document.getElementById('page-' + page).classList.add('active');
   document.querySelector('[data-page="' + page + '"]').classList.add('active');
+  _loadPageData(page);
+}
+
+function _loadPageData(page) {
   if (page === 'templates') carregarTemplates();
   if (page === 'batch') carregarBatch();
   if (page === 'rules') carregarRegras();
-  if (page === 'historico') carregarHistorico();
   if (page === 'narracao') { carregarNarracao().then(function(){ renderBatchCards(); }); }
-  if (page === 'temas') { carregarPipelines(); carregarTemas().then(function(){ atualizarLoteDataSelect(); }); document.getElementById('chat-toggle-btn').style.display = 'block'; }
-  else { document.getElementById('chat-toggle-btn').style.display = 'none'; document.getElementById('chat-panel').style.display = 'none'; }
+  if (page === 'temas') { carregarPipelines(); carregarTemas().then(function(){ atualizarLoteDataSelect(); }); document.getElementById('chat-toggle-btn').style.display = 'block'; document.getElementById('btn-refresh-page').style.bottom = '76px'; }
+  else { document.getElementById('chat-toggle-btn').style.display = 'none'; document.getElementById('chat-panel').style.display = 'none'; document.getElementById('btn-refresh-page').style.bottom = '20px'; }
   if (page === 'roteiros') carregarPipelines();
   if (page === 'config') carregarConfig();
   if (page === 'thumbnail') { carregarThumbPage(); }
   if (page === 'monitor') { refreshMonitor(); startMonitorPolling(); }
   else { stopMonitorPolling(); }
+}
+
+function refreshCurrentPage() {
+  _loadPageData(_currentPage);
+  toast('Aba atualizada', 'success');
 }
 
 // === TEMPLATES ===
@@ -5846,6 +5866,9 @@ function editarCelula(ri, ci) {
   document.getElementById('cel-tema').value = cel.tema || '';
   document.getElementById('cel-titulo').value = cel.titulo || '';
   document.getElementById('cel-thumb').value = cel.thumb || '';
+  document.getElementById('cel-tema-chars').textContent = (cel.tema || '').length + ' chars';
+  document.getElementById('cel-titulo-chars').textContent = (cel.titulo || '').length + ' chars';
+  document.getElementById('cel-thumb-chars').textContent = (cel.thumb || '').length + ' chars';
   // Carregar roteiro do backend (fonte da verdade, nao usa cache local)
   document.getElementById('cel-roteiro').value = cel.tem_roteiro ? 'Carregando...' : '';
   document.getElementById('cel-roteiro-chars').textContent = (cel.tem_roteiro || 0) + ' chars';
@@ -6472,9 +6495,10 @@ async function produzirDataCompleta() {
   document.getElementById('btn-produzir-tudo-cancel').style.display = 'inline-flex';
 
   try {
+    var isLoop = document.getElementById('chk-loop').checked;
     var res = await fetch('/api/producao-completa/iniciar', {
       method: 'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ data_idx: ri, ordem: _produzirOrdem.length ? _produzirOrdem : undefined })
+      body: JSON.stringify({ data_idx: ri, ordem: _produzirOrdem.length ? _produzirOrdem : undefined, loop: isLoop })
     });
     if (!res.ok) {
       var err = await res.json();
@@ -6483,7 +6507,7 @@ async function produzirDataCompleta() {
       document.getElementById('btn-produzir-tudo-cancel').style.display = 'none';
       return;
     }
-    toast('Produção iniciada! Acompanhe no Monitor.', 'success');
+    toast(isLoop ? 'Produção em LOOP iniciada! Acompanhe no Monitor.' : 'Produção iniciada! Acompanhe no Monitor.', 'success');
     // Ir para aba Monitor automaticamente
     showPage('monitor');
   } catch(e) {
@@ -7077,6 +7101,16 @@ async function resetarProducao() {
   refreshMonitor();
 }
 
+async function cancelarEResetar() {
+  if (!confirm('Cancelar producao e resetar tudo?')) return;
+  toast('Cancelando...', 'success');
+  await fetch('/api/producao-completa/cancelar', { method: 'POST' });
+  await new Promise(r => setTimeout(r, 2000));
+  await fetch('/api/producao-completa/reset', { method: 'POST' });
+  toast('Producao cancelada e resetada!', 'success');
+  refreshMonitor();
+}
+
 async function refreshMonitor() {
   try {
     var res = await fetch('/api/monitor');
@@ -7239,6 +7273,7 @@ async function refreshMonitor() {
 }
 
 </script>
+<button id="btn-refresh-page" onclick="refreshCurrentPage()" title="Atualizar aba atual" style="position:fixed;bottom:20px;right:16px;z-index:900;width:44px;height:44px;border-radius:50%;background:var(--panel);border:1px solid var(--border);color:var(--accent);cursor:pointer;font-size:20px;box-shadow:0 2px 8px rgba(0,0,0,0.3)">&#x21bb;</button>
 </body>
 </html>"""
 
@@ -7268,6 +7303,9 @@ def health_check():
         "canais_erro": sum(1 for c in log_state.get("canais", []) if c.get("etapa") == "erro"),
         "canais_pendentes": sum(1 for c in log_state.get("canais", []) if c.get("etapa") in ("aguardando", "roteiro", "narracao", "video", "iniciando")),
         "render_queue": render_queue.obter_estado(),
+        "loop": orchestrator.estado.get("loop", False),
+        "loop_data_atual": orchestrator.estado.get("loop_data_atual"),
+        "loop_total": orchestrator.estado.get("loop_total", 0),
     }
 
 

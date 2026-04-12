@@ -154,7 +154,7 @@ class VideoEngine:
                 efeito = efeitos_pool[i % len(efeitos_pool)] if zoom else "static"
                 clip_args.append((i, img, dur, w, h, fps, zoom_ratio, efeito))
 
-            # Paralelizar geração de clips (4 workers - equilibrio CPU pipe + encode)
+            # Sequencial (1 worker) - NVENC nao suporta paralelo na RTX 3060
             clips_done = [0]
             clips_ordered = [None] * total_clips
 
@@ -164,7 +164,7 @@ class VideoEngine:
                     return idx, None
                 return idx, self._gerar_clip_cached(img, dur, w, h, fps, zr, ef)
 
-            with ThreadPoolExecutor(max_workers=4) as pool:
+            with ThreadPoolExecutor(max_workers=1) as pool:
                 futures = {pool.submit(_gen_clip, a): a[0] for a in clip_args}
                 for future in as_completed(futures):
                     if self.cancelado:
@@ -278,9 +278,9 @@ class VideoEngine:
 
             boxes.append((cx, cy, cw, ch))
 
-        # Pipe frames pro FFmpeg (libx264 CPU = sem limite de sessoes, 8+ workers)
-        # NVENC reservado pro render final
+        # Pipe frames pro FFmpeg (NVENC p1 = rapido, 1 worker sequencial)
         for codec_args in [
+            ["-c:v", "h264_nvenc", "-preset", "p1", "-cq", "26"],
             ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "23"],
         ]:
             cmd = [

@@ -185,6 +185,11 @@
     roteiros individualmente ou usar endpoint dedicado.
     Prioridade: ALTA
 
+    IMPLEMENTADO: Pasta de data em F:/Canal Dark/Automator Exports/YYYY-MM-DD/
+    com subpastas Roteiros/, Narracoes/, Thumbnails/, Videos/.
+    Roteiros salvos como .txt, verificacao dupla (temas.json + .txt).
+    Compatibilidade com pastas antigas mantida.
+
 [ ] MONITOR: MOSTRADOR DETALHADO DO RENDER EM ANDAMENTO
     Mostrar no card do canal que esta renderizando:
     - Etapa atual: "Gerando clips (45/81)" ou "Renderizando final..."
@@ -193,6 +198,15 @@
     Semelhante ao que a aba Producao mostra no batch manual.
     Requer: engine.py enviar callbacks de progresso pro production_log.
     Prioridade: ALTA
+
+[ ] OTIMIZAR TEMPO DE CARREGAMENTO DA PAGINA (F5)
+    HTML inline tem 284KB (~7400 linhas JS). Browser demora pra parsear.
+    Opcoes:
+    [ ] Separar JS em arquivo externo (cache do browser, nao recarrega)
+    [ ] Carregar dados em paralelo (temas + templates + pipelines ao mesmo tempo)
+    [ ] Lazy load de abas (so carrega dados quando clica na aba)
+    [ ] Minificar JS inline (reduz parse time)
+    Prioridade: MEDIA
 
 [ ] CHAT NAO BLOQUEAR INTERFACE
     O painel do chat sobrepoem as colunas do grid e nao da pra interagir
@@ -291,64 +305,11 @@
     [ ] Verificacao do projeto GCP ANTES de implementar (audit process)
     [ ] 1 projeto GCP por canal (quota isolada, 6 uploads/dia cada)
 
-[ ] PIPELINE PARALELA: ROTEIRO + NARRACAO EM PARALELO, RENDER EM FILA
-    Hoje o fluxo e 100% sequencial:
-      Canal1: Roteiro -> Narracao -> Render -> Canal2: Roteiro -> Narracao -> Render
-    Enquanto espera API de roteiro/narracao (30-180s), CPU/GPU ficam ociosos.
-    Enquanto renderiza (15-30min), APIs ficam ociosas.
-
-    FLUXO PROPOSTO (3 fases):
-
-    FASE 1 - ROTEIROS (paralelo, max 3 simultaneos por rate limit)
-    [ ] Gerar todos os roteiros em paralelo (ThreadPool, 3 workers)
-    [ ] Cada worker roda a pipeline LLM do canal
-    [ ] Salvar roteiro no temas.json conforme vai terminando
-    [ ] Se falhar, retry 2x, se falhar marca erro e segue
-    [ ] Limitacao: Claude/GPT/Gemini tem rate limit, 3 simultaneos e seguro
-
-    FASE 2 - NARRACOES (paralelo, max 2-3 simultaneos)
-    [ ] Assim que roteiro de um canal fica pronto, ja inicia narracao
-    [ ] Pode rodar 2-3 narracoes simultaneas (ai33.pro suporta)
-    [ ] Precisa remover trava de "1 narracao por vez" do narrator.py
-    [ ] Cada narracao tem seu proprio estado (dict por canal, nao global)
-    [ ] Chunking e polling independentes por canal
-
-    FASE 3 - RENDER (fila sequencial, 1 por vez)
-    [ ] Render usa 100% GPU + CPU, nao da pra paralelizar
-    [ ] Fila FIFO: primeiro canal com narracao pronta entra primeiro
-    [ ] Enquanto renderiza Canal 1, narracoes dos Canais 2-12 continuam
-
-    GANHO ESTIMADO:
-    - Hoje (sequencial 12 canais): ~8-10 horas
-      Roteiro: 12 x 3min = 36min (sequencial)
-      Narracao: 12 x 3min = 36min (sequencial)
-      Render: 12 x 20min = 240min (sequencial)
-      Total: ~312min = 5.2h + overhead
-    - Proposto (paralelo + fila):
-      Roteiro: todos em ~10min (3 paralelos)
-      Narracao: todos em ~12min (3 paralelos, comecam durante roteiros)
-      Render: 12 x 20min = 240min (sequencial, mas comeca mais cedo)
-      Total: ~262min = 4.3h (ganho ~50min no inicio)
-    - Ganho principal: render comeca MUITO antes (nao espera 72min de APIs)
-
-    MUDANCAS NECESSARIAS:
-    [ ] orchestrator.py: reescrever produzir_data_completa em 3 fases
-    [ ] narrator.py: suportar multiplas narracoes simultaneas
-        (estado por canal em vez de estado global unico)
-    [ ] scriptwriter.py: suportar multiplas pipelines simultaneas
-        (estado por execucao em vez de global unico)
-    [ ] production_log.py: atualizar canais fora de ordem (nao mais sequencial)
-
-    EVOLUCAO: PIPELINE CONTINUA (render nao espera todos narrarem)
-    Em vez de 3 fases rigidas, usar fila de render que consome canais
-    conforme ficam prontos. Enquanto ENO narra, CO3/CO1/etc ja renderizam.
-    Implementar com threading.Queue ou similar:
-    - Thread de narracoes alimenta a fila de render
-    - Thread de render consome da fila (1 por vez)
-    - Canal entra na fila assim que tem roteiro + MP3 prontos
-    Ganho: render comeca IMEDIATAMENTE, nao espera ultimo canal narrar
-
-    Prioridade: ALTA (ganho significativo de tempo)
+    IMPLEMENTADO: Pipeline paralela com 3 fases + pipeline continua.
+    Fase 1: roteiros paralelos (3 workers). Fase 2+3: narracao sequencial
+    alimenta fila de render (render_queue.py). Canais com MP3 existente
+    vao direto pro render sem esperar narracoes pendentes.
+    Narracoes paralelas (Fase 2 paralela) pendente para futuro.
 
 [ ] PRODUZIR TUDO EM LOOP (MULTI-DATA SEQUENCIAL)
     Checkbox "Produzir em Loop" ao lado do botao "Produzir Tudo".
@@ -382,8 +343,7 @@
 [ ] CLOUDFLARE TUNNEL / TAILSCALE
     Acesso remoto ao servidor sem expor porta publica
 
-[ ] GIT REPOSITORY + GITHUB PUSH
-    Inicializar repositorio, .gitignore, primeiro commit
+    FEITO: Git repo + GitHub (github.com/violipte/video-automator, publico)
 
 [ ] SUPABASE/SHEETS SYNC TESTING
     Testar e refinar sincronizacao real
@@ -423,36 +383,11 @@
 
 --- ARQUITETURA ---
 
-[ ] SEPARAR PLATAFORMA EM 2 MODOS (AUTOMATICO + MANUAL)
-    O fluxo atual e engessado — mistura automacao completa com controle
-    manual na mesma interface, causando conflitos de estado e travamentos.
-
-    MODO 1: PRODUCAO AUTOMATICA (Produzir Tudo)
-    - Interface minima: seleciona data, clica play, acompanha no monitor
-    - Zero intervencao manual durante o processo
-    - Pipeline continua: roteiro paralelo -> narracao -> render
-    - Resiliencia total: auto-resume, retry, timeouts
-    - Foco: confiabilidade e velocidade
-
-    MODO 2: PRODUCAO MANUAL (aba Producao atual)
-    - Controle individual por canal/etapa
-    - Pode rodar roteiro isolado, narracao isolada, render isolado
-    - Pode substituir arquivos (trocar narracao, editar roteiro)
-    - Foco: flexibilidade e controle
-
-    DADOS COMPARTILHADOS:
-    - Ambos leem/escrevem no mesmo temas.json
-    - Ambos usam mesmas pastas de narracoes/ e saida de video
-    - Ambos usam mesmos templates e pipelines
-    - O modo manual pode complementar/corrigir o que o automatico fez
-
-    IMPLEMENTACAO:
-    [ ] Separar estados: orchestrator (automatico) vs batch (manual) independentes
-    [ ] Garantir que nao conflitam (locks, verificacao de processo ativo)
-    [ ] Modo automatico nao trava modo manual e vice-versa
-    [ ] Cada modo com seu proprio monitor/status
-
-    Prioridade: ALTA (resolve a raiz dos problemas de engessamento)
+    PARCIALMENTE IMPLEMENTADO: Separacao auto/manual.
+    - render_queue.py: fila compartilhada, 1 worker (ambos usam)
+    - narrator.py: estado_narracao (manual) + estado_narracao_auto (auto)
+    - orchestrator.py: usa modo="auto" nas narracoes
+    Pendente: separar monitor/status por modo na UI
 
 
 ========================== ANALISE DE VIABILIDADE ==============================

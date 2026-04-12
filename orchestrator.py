@@ -73,6 +73,9 @@ def _obter_config():
 estado = {
     "ativo": False,
     "cancelado": False,
+    "loop": False,
+    "loop_data_atual": None,
+    "loop_total": 0,
 }
 
 _thread_producao = None
@@ -108,7 +111,7 @@ def _render_com_timeout(engine, srt_path, timeout_s):
 
 # === FASE 1: GERAR ROTEIRO PARA 1 CANAL (thread-safe) ===
 
-def _gerar_roteiro_para_canal(job_index, job, cel, data_ref):
+def _gerar_roteiro_para_canal(job_index, job, cel, data_ref, pasta_roteiros=None):
     """Gera roteiro usando executar_pipeline_isolado. Thread-safe."""
     tag = job["tag"]
     key = job["key"]
@@ -166,6 +169,11 @@ def _gerar_roteiro_para_canal(job_index, job, cel, data_ref):
         temas_data["celulas"][key]["roteiro"] = resultado
         _salvar_temas(temas_data)
 
+        # Salvar .txt na pasta de data (fonte da verdade)
+        if pasta_roteiros:
+            txt_path = Path(pasta_roteiros) / f"{tag}.txt"
+            txt_path.write_text(resultado, encoding="utf-8")
+
         production_log.atualizar_canal(job_index, etapa_detalhe=f"OK ({len(resultado)} chars)", roteiro_chars=len(resultado))
         production_log.adicionar_log(f"{tag}: Roteiro OK ({len(resultado)} chars)")
         return (job_index, resultado, None)
@@ -185,14 +193,24 @@ def _renderizar_canal(i, job, narr_path, data_formatada, data_ymd, data_pasta):
         production_log.atualizar_canal(i, etapa="erro", erro="Sem template de video")
         return False
 
-    pasta_saida = tmpl.get("pasta_saida", str(TEMP_DIR))
-    video_pasta = Path(pasta_saida) / data_pasta
+    # Salvar em Automator Exports/YYYY-MM-DD/Videos/
+    EXPORT_BASE = Path("F:/Canal Dark/Automator Exports")
+    video_pasta = EXPORT_BASE / data_pasta / "Videos"
     video_pasta.mkdir(parents=True, exist_ok=True)
     video_nome = f"{tmpl.get('tag', tag)}_{data_ymd}_01.mp4"
     video_path = video_pasta / video_nome
 
+    # Verificar tambem na pasta antiga
+    pasta_saida_antiga = Path(tmpl.get("pasta_saida", str(TEMP_DIR))) / data_pasta
+    video_path_antigo = pasta_saida_antiga / video_nome
+
+    # Verificar video existente (pasta nova ou antiga)
     if video_path.exists() and video_path.stat().st_size > 1000:
         production_log.atualizar_canal(i, etapa="concluido", etapa_detalhe=f"Video existe ({video_nome})", video_path=str(video_path), fim=time.time())
+        production_log.adicionar_log(f"{tag}: Video existe ({video_nome})")
+        return True
+    elif video_path_antigo.exists() and video_path_antigo.stat().st_size > 1000:
+        production_log.atualizar_canal(i, etapa="concluido", etapa_detalhe=f"Video existe ({video_nome})", video_path=str(video_path_antigo), fim=time.time())
         production_log.adicionar_log(f"{tag}: Video existe ({video_nome})")
         return True
 
@@ -289,6 +307,16 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
     data_ymd = f"{yyyy}{mm}{dd}"
     data_pasta = f"{yyyy}-{mm}-{dd}"
 
+    # === PASTA DE DATA (fonte da verdade) ===
+    EXPORT_BASE = Path("F:/Canal Dark/Automator Exports")
+    pasta_data = EXPORT_BASE / data_pasta
+    pasta_roteiros = pasta_data / "Roteiros"
+    pasta_narracoes = pasta_data / "Narracoes"
+    pasta_thumbnails = pasta_data / "Thumbnails"
+    pasta_videos = pasta_data / "Videos"
+    for p in [pasta_roteiros, pasta_narracoes, pasta_thumbnails, pasta_videos]:
+        p.mkdir(parents=True, exist_ok=True)
+
     # Montar lista de jobs
     jobs = []
     col_indices = ordem_colunas if ordem_colunas else list(range(len(colunas)))
@@ -368,9 +396,21 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
             cel = temas_data.get("celulas", {}).get(key, {})
             job["cel"] = cel
 
-            if cel.get("roteiro") and len(cel["roteiro"]) > 100:
-                production_log.atualizar_canal(i, etapa="roteiro", etapa_detalhe=f"Existe ({len(cel['roteiro'])} chars)", roteiro_chars=len(cel["roteiro"]))
-                production_log.adicionar_log(f"{tag}: Roteiro existe ({len(cel['roteiro'])} chars)")
+            # Verificar roteiro: temas.json OU .txt na pasta de data
+            txt_path = pasta_roteiros / f"{tag}.txt"
+            has_roteiro = (cel.get("roteiro") and len(cel["roteiro"]) > 100) or txt_path.exists()
+
+            if has_roteiro:
+                chars = len(cel.get("roteiro", "")) or (txt_path.stat().st_size if txt_path.exists() else 0)
+                production_log.atualizar_canal(i, etapa="roteiro", etapa_detalhe=f"Existe ({chars} chars)", roteiro_chars=chars)
+                production_log.adicionar_log(f"{tag}: Roteiro existe ({chars} chars)")
+                # Se .txt existe mas temas.json nao tem, carregar
+                if txt_path.exists() and not (cel.get("roteiro") and len(cel["roteiro"]) > 100):
+                    cel["roteiro"] = txt_path.read_text(encoding="utf-8")
+                    job["cel"] = cel
+                # Se temas.json tem mas .txt nao existe, salvar
+                if cel.get("roteiro") and not txt_path.exists():
+                    txt_path.write_text(cel["roteiro"], encoding="utf-8")
                 roteiro_ok[i] = True
             else:
                 roteiro_para_gerar[i] = (job, cel)
@@ -379,7 +419,7 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
             with ThreadPoolExecutor(max_workers=3, thread_name_prefix="roteiro") as executor:
                 futures = {}
                 for i, (job, cel) in roteiro_para_gerar.items():
-                    f = executor.submit(_gerar_roteiro_para_canal, i, job, cel, data_ref)
+                    f = executor.submit(_gerar_roteiro_para_canal, i, job, cel, data_ref, pasta_roteiros)
                     futures[f] = i
 
                 for future in as_completed(futures):
@@ -401,7 +441,19 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
         production_log.adicionar_log("=== FASE 2+3: Narracao -> Render (pipeline) ===")
 
         render_queue.iniciar_worker()
-        _render_pendentes = []  # lista de Events pra esperar no final
+        _render_pendentes = []
+
+        def _encontrar_narracao(tag):
+            """Busca MP3 na pasta nova (Automator Exports) e na antiga (narracoes/)."""
+            # Pasta nova: Automator Exports/YYYY-MM-DD/Narracoes/TAG.mp3
+            novo = pasta_narracoes / f"{tag}.mp3"
+            if novo.exists():
+                return novo
+            # Pasta antiga: narracoes/YYYY-MM-DD/TAG DD-MM.mp3
+            antigo = NARRACOES_DIR / data_pasta / f"{tag} {data_formatada}.mp3"
+            if antigo.exists():
+                return antigo
+            return None
 
         def _enfileirar_render(i, job, narr_path_val):
             """Enfileira render na fila compartilhada."""
@@ -434,19 +486,15 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
                 if i < len(existing_canais):
                     existing_etapa = existing_canais[i].get("etapa", "")
                     if existing_etapa in ("concluido", "pulado"):
-                        narr_nome = f"{job['tag']} {data_formatada}"
-                        narr_subpasta = NARRACOES_DIR / data_pasta
-                        narr_path = narr_subpasta / f"{narr_nome}.mp3"
-                        if narr_path.exists():
+                        narr_path = _encontrar_narracao(job['tag'])
+                        if narr_path:
                             _enfileirar_render(i, job, narr_path)
                         continue
 
             tag = job["tag"]
-            narr_nome = f"{tag} {data_formatada}"
-            narr_subpasta = NARRACOES_DIR / data_pasta
-            narr_path = narr_subpasta / f"{narr_nome}.mp3"
+            narr_path = _encontrar_narracao(tag)
 
-            if narr_path.exists():
+            if narr_path:
                 production_log.atualizar_canal(i, etapa="narracao", etapa_detalhe=f"Existe ({narr_path.name})", narracao_path=str(narr_path))
                 production_log.adicionar_log(f"{tag}: Narracao existe ({narr_path.name})")
                 _enfileirar_render(i, job, narr_path)
@@ -466,9 +514,8 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
                 temas_data = _carregar_temas()
                 cel = temas_data.get("celulas", {}).get(job["key"], {})
 
-            narr_nome = f"{tag} {data_formatada}"
-            narr_subpasta = NARRACOES_DIR / data_pasta
-            narr_path = narr_subpasta / f"{narr_nome}.mp3"
+            narr_nome = f"{tag}"
+            narr_path = pasta_narracoes / f"{narr_nome}.mp3"
 
             voice_id = job["voice_id"]
             if not voice_id:
@@ -493,6 +540,7 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
                 result = narrator.iniciar_narracao(
                     api_key, job["voice_provider"], voice_id,
                     cel.get("roteiro", ""), narr_nome,
+                    pasta=str(pasta_narracoes),
                     speed=job["voice_speed"], pitch=job["voice_pitch"],
                     modo="auto",
                 )
@@ -595,16 +643,83 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
         estado["ativo"] = False
 
 
-def iniciar_producao(data_idx: int, temas_data: dict = None, ordem_colunas: list = None):
-    """Inicia producao em thread separada."""
+def _produzir_loop(data_idx_inicio: int, ordem_colunas: list = None):
+    """Produz em loop: completa uma data, avanca pra proxima ate acabar ou cancelar."""
+    global estado
+    temas_data = _carregar_temas()
+    linhas = temas_data.get("linhas", [])
+    colunas = temas_data.get("colunas", [])
+    celulas = temas_data.get("celulas", {})
+    total_datas = len(linhas)
+
+    estado["loop"] = True
+    estado["loop_data_atual"] = data_idx_inicio
+    estado["loop_total"] = total_datas - data_idx_inicio
+
+    for data_idx in range(data_idx_inicio, total_datas):
+        if estado["cancelado"]:
+            production_log.adicionar_log(f"LOOP: Cancelado pelo usuario na data {data_idx + 1}/{total_datas}")
+            break
+
+        # Verificar se essa data tem pelo menos 1 tema preenchido
+        tem_tema = False
+        col_indices = ordem_colunas if ordem_colunas else list(range(len(colunas)))
+        for ci in col_indices:
+            if ci >= len(colunas):
+                continue
+            key = f"{data_idx}_{ci}"
+            cel = celulas.get(key, {})
+            if cel.get("tema"):
+                tem_tema = True
+                break
+
+        if not tem_tema:
+            production_log.adicionar_log(f"LOOP: Data {linhas[data_idx].get('data','')} sem temas, parando loop")
+            break
+
+        estado["loop_data_atual"] = data_idx
+        production_log.adicionar_log(f"LOOP: Iniciando data {data_idx + 1}/{total_datas} ({linhas[data_idx].get('data','')})")
+
+        # Produzir essa data (bloqueia ate concluir)
+        produzir_data_completa(data_idx, ordem_colunas=ordem_colunas)
+
+        if estado["cancelado"]:
+            break
+
+        # Recarregar temas pra proxima data (pode ter mudado)
+        temas_data = _carregar_temas()
+        linhas = temas_data.get("linhas", [])
+        colunas = temas_data.get("colunas", [])
+        celulas = temas_data.get("celulas", {})
+
+    estado["loop"] = False
+    estado["ativo"] = False
+
+
+def iniciar_producao(data_idx: int, temas_data: dict = None, ordem_colunas: list = None, loop: bool = False):
+    """Inicia producao em thread separada. loop=True avanca pras proximas datas."""
     global _thread_producao
     if estado["ativo"]:
         return {"ok": False, "erro": "Producao ja em andamento"}
-    _thread_producao = threading.Thread(
-        target=produzir_data_completa, args=(data_idx, temas_data, ordem_colunas), daemon=True
-    )
+
+    # Limpar state anterior para forcar nova producao (nao resume)
+    production_log._state = {
+        "ativo": False, "data_ref": "", "data_idx": None, "ordem_colunas": None,
+        "inicio": None, "total_canais": 0, "canal_atual": 0,
+        "canais": [], "log": [], "concluidos": 0, "erros": 0, "pulados": 0, "cancelado": False,
+    }
+    production_log._salvar()
+
+    if loop:
+        _thread_producao = threading.Thread(
+            target=_produzir_loop, args=(data_idx, ordem_colunas), daemon=True
+        )
+    else:
+        _thread_producao = threading.Thread(
+            target=produzir_data_completa, args=(data_idx, temas_data, ordem_colunas), daemon=True
+        )
     _thread_producao.start()
-    return {"ok": True}
+    return {"ok": True, "loop": loop}
 
 
 def cancelar():

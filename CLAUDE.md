@@ -656,10 +656,11 @@ When a credential is tested/refreshed, the system queries the provider's API for
 
 ### Ken Burns clips
 - Generated via OpenCV `warpAffine` (subpixel interpolation, zero jitter)
-- Encoded with **libx264 ultrafast CRF 23** (CPU, no NVENC session limit)
-- **4 parallel workers** via ThreadPoolExecutor
+- Encoded with **NVENC p1 CQ 26** (GPU, 1 worker sequential — RTX 3060 limit)
+- Fallback to libx264 ultrafast if NVENC unavailable
 - Pre-concatenated into single `bg_clips_concat.mp4` before render final
 - This makes image-based templates render as fast as video-based ones
+- **IMPORTANT**: RTX 3060 supports max 2 concurrent NVENC sessions. Never use >1 worker for clip encoding.
 
 ### Clip duration scaling
 Clips use escalated durations to reduce count without losing visual variety:
@@ -752,11 +753,12 @@ If an LLM step fails (even with fallback), the pipeline **aborts** instead of co
 - Uses Anthropic API directly via httpx (not subprocess)
 - Model: claude-sonnet-4-6, max_tokens: 8000
 - System message loaded from `agents/{agent}/CLAUDE.md`
-- Last 20 messages sent as context
+- Only current message sent (no history in API context — prevents contamination)
 
 ### Per-agent history
 - Each agent has separate `agents/{agent}/historico.json`
 - Temas and Títulos histories don't mix
+- History saved for UI display only, not sent to API
 - Survives page refresh (F5)
 
 ---
@@ -788,16 +790,25 @@ See `BACKLOG.txt` for the full list. Key pending items by priority:
 ### HIGH PRIORITY
 - Thumbnail system (per-template config, AI generation, reference modeling)
 - Upload system (YouTube API, OAuth per channel, proxy, pinned comments)
-- Produzir Tudo em Loop (auto-advance to next date)
-- Separate auto/manual modes further (render_queue already done)
 - Monitor: detailed render progress (clips count, ETA)
+- Parallel narrations (Etapa B)
+
+### DONE (this session)
+- Produzir Tudo em Loop (checkbox, auto-advance to next date)
+- Separated auto/manual modes (render_queue, narrator states)
+- Automator Exports folder structure (Roteiros/, Narracoes/, Videos/)
+- Claude CLI as LLM provider ($0 cost with Max plan)
+- Gemini Flash free tier for Amplifiers
+- Per-tab refresh button
+- Char counters on cell editor fields
+- Cancelar + Reset button on Monitor
+- Historico tab removed from sidebar
 
 ### MEDIUM PRIORITY
 - Cloudflare Tunnel / Tailscale for remote access
 - Notification webhooks (Telegram/Discord)
 - Sticky grid headers (freeze date column + channel row)
 - Chat panel not blocking grid
-- Refresh button per tab
 
 ### LOW / FUTURE
 - DaVinci Resolve scripting API for render

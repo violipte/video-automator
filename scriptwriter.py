@@ -4,6 +4,7 @@ Suporta Claude, GPT e Gemini. Sistema de credenciais múltiplas com listagem aut
 """
 
 import json
+import os
 import time
 import traceback
 from pathlib import Path
@@ -237,21 +238,25 @@ def _chamar_gemini(system_msg: str, user_msg: str, api_key: str, model: str) -> 
 
 def _chamar_claude_cli(system_msg: str, user_msg: str, api_key: str, model: str) -> str:
     """Chama Claude via CLI (-p mode). Usa plano Max, sem custo de API.
-    api_key e ignorada (CLI usa autenticacao local)."""
+    System prompt enviado via arquivo temp pra evitar limite de cmd line."""
     import subprocess as sp
+    import tempfile
 
-    # Mapear modelo: "claude-sonnet-4-6" -> "sonnet", "claude-opus-4-6" -> "opus"
     cli_model = "sonnet"
     if "opus" in model.lower():
         cli_model = "opus"
     elif "haiku" in model.lower():
         cli_model = "haiku"
 
-    cmd = ["claude", "-p", "--model", cli_model, "--output-format", "text"]
+    cmd = ["claude", "-p", "--model", cli_model, "--output-format", "text", "--tools", ""]
+
+    # System prompt via arquivo temp (evita truncamento na cmd line do Windows)
+    sys_file = None
     if system_msg:
-        cmd.extend(["--system-prompt", system_msg])
-    # Desabilitar tools pra output puro de texto
-    cmd.extend(["--tools", ""])
+        sys_file = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8")
+        sys_file.write(system_msg)
+        sys_file.close()
+        cmd.extend(["--system-prompt", f"$(cat '{sys_file.name}')"])
 
     # Limpar env vars que causam "nested session" error
     env = dict(os.environ)
@@ -259,10 +264,17 @@ def _chamar_claude_cli(system_msg: str, user_msg: str, api_key: str, model: str)
         if "CLAUDE" in key.upper() or "ANTHROPIC" in key.upper():
             del env[key]
 
+    # Combinar system + user no input pra garantir que o CLI recebe tudo
+    combined_input = user_msg
+    if system_msg:
+        combined_input = f"[SYSTEM INSTRUCTIONS - Follow these exactly]\n{system_msg}\n[END SYSTEM INSTRUCTIONS]\n\n{user_msg}"
+        # Nao usar --system-prompt, passar tudo como input
+        cmd = ["claude", "-p", "--model", cli_model, "--output-format", "text", "--tools", ""]
+
     for attempt in range(2):
         try:
             proc = sp.run(
-                cmd, input=user_msg, capture_output=True, text=True,
+                cmd, input=combined_input, capture_output=True, text=True,
                 timeout=300, encoding="utf-8", errors="replace",
                 env=env, shell=True,
             )
