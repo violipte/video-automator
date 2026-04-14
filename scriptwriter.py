@@ -132,7 +132,6 @@ def testar_credencial(provedor: str, api_key: str) -> dict:
 # Fallback LLM padrão quando o modelo principal falha
 # Ordem de prioridade: Claude > Gemini > GPT (evitar fallback pro mesmo provider)
 FALLBACK_CHAIN = [
-    ("claude_cli", "claude-sonnet-4-6"),
     ("claude", "claude-sonnet-4-6"),
     ("gemini", "gemini-2.5-flash"),
     ("gpt", "gpt-5.2"),
@@ -221,7 +220,7 @@ def _chamar_gemini(system_msg: str, user_msg: str, api_key: str, model: str) -> 
             json={
                 "system_instruction": {"parts": [{"text": system_msg}]},
                 "contents": [{"parts": [{"text": user_msg}]}],
-                "generationConfig": {"maxOutputTokens": 32000},
+                "generationConfig": {"maxOutputTokens": 65536},
             },
             timeout=300.0,
         )
@@ -238,9 +237,8 @@ def _chamar_gemini(system_msg: str, user_msg: str, api_key: str, model: str) -> 
 
 def _chamar_claude_cli(system_msg: str, user_msg: str, api_key: str, model: str) -> str:
     """Chama Claude via CLI (-p mode). Usa plano Max, sem custo de API.
-    System prompt enviado via arquivo temp pra evitar limite de cmd line."""
+    System prompt passado via --system-prompt como lista de args (sem shell)."""
     import subprocess as sp
-    import tempfile
 
     cli_model = "sonnet"
     if "opus" in model.lower():
@@ -248,38 +246,41 @@ def _chamar_claude_cli(system_msg: str, user_msg: str, api_key: str, model: str)
     elif "haiku" in model.lower():
         cli_model = "haiku"
 
-    cmd = ["claude", "-p", "--model", cli_model, "--output-format", "text", "--tools", ""]
-
-    # System prompt via arquivo temp (evita truncamento na cmd line do Windows)
-    sys_file = None
-    if system_msg:
-        sys_file = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8")
-        sys_file.write(system_msg)
-        sys_file.close()
-        cmd.extend(["--system-prompt", f"$(cat '{sys_file.name}')"])
-
     # Limpar env vars que causam "nested session" error
     env = dict(os.environ)
     for key in list(env.keys()):
         if "CLAUDE" in key.upper() or "ANTHROPIC" in key.upper():
             del env[key]
 
-    # Combinar system + user no input pra garantir que o CLI recebe tudo
-    combined_input = user_msg
-    if system_msg:
-        combined_input = f"[SYSTEM INSTRUCTIONS - Follow these exactly]\n{system_msg}\n[END SYSTEM INSTRUCTIONS]\n\n{user_msg}"
-        # Nao usar --system-prompt, passar tudo como input
-        cmd = ["claude", "-p", "--model", cli_model, "--output-format", "text", "--tools", ""]
+    # Encontrar claude.cmd
+    claude_cmd = os.path.join(os.environ.get("APPDATA", ""), "npm", "claude.cmd")
+    if not os.path.exists(claude_cmd):
+        claude_cmd = "claude"
 
     for attempt in range(2):
+        # Montar como lista (nao shell=True) pra evitar limite de cmd line
+        cmd = [claude_cmd, "-p", "--model", cli_model, "--output-format", "text", "--tools", ""]
+        if system_msg:
+            # Adicionar instrucao pra nao narrar a propria acao
+            clean_system = system_msg + "\n\nCRITICAL OUTPUT RULES:\n- Output ONLY the raw script text, nothing else\n- Do NOT add timestamps (0:00, 1:20, etc)\n- Do NOT add section headers (## HOOK, ## BRIDGE, ## ACT, etc)\n- Do NOT add markdown formatting (no #, ##, **, etc)\n- Do NOT add preamble or commentary (no 'I'll create...', 'Here is...', 'Sure...')\n- Start directly with the first spoken word of the script"
+            cmd.extend(["--system-prompt", clean_system])
+
         try:
             proc = sp.run(
-                cmd, input=combined_input, capture_output=True, text=True,
+                cmd, input=user_msg, capture_output=True, text=True,
                 timeout=300, encoding="utf-8", errors="replace",
-                env=env, shell=True,
+                env=env,
             )
             if proc.returncode == 0 and proc.stdout.strip():
-                return proc.stdout.strip()
+                output = proc.stdout.strip()
+                import re
+                # Limpar preambles (ex: "I'll create...", "Here is...")
+                output = re.sub(r'^(?:(?:Okay|Sure|Here|I\'ll|Let me|Certainly)[^\n]*\n)+', '', output, flags=re.IGNORECASE).strip()
+                # Limpar timestamps (ex: "## HOOK (0:00 - 0:35)")
+                output = re.sub(r'^#+\s+.*?\(\d+:\d+.*?\)\s*\n', '', output, flags=re.MULTILINE).strip()
+                # Limpar section headers markdown (ex: "## BRIDGE", "# TITLE")
+                output = re.sub(r'^#+\s+(HOOK|BRIDGE|ACT|SECTION|THE LOVE|CLOSING|OUTRO|INTRO|PART)\b[^\n]*\n', '', output, flags=re.MULTILINE | re.IGNORECASE).strip()
+                return output
             elif "rate limit" in proc.stderr.lower() or "too many" in proc.stderr.lower():
                 import time as _time
                 _time.sleep((attempt + 1) * 30)

@@ -1159,6 +1159,163 @@ async def extrair_thumb_youtube_endpoint(request: Request):
     return result
 
 
+# === API: THUMBNAIL AI (ai33.pro image generation) ===
+
+@app.get("/api/thumbnail/ai/models")
+def listar_modelos_imagem():
+    """Lista modelos de geração de imagem disponíveis."""
+    config = scriptwriter.carregar_config()
+    api_key = config.get("ai33_api_key", "")
+    if not api_key:
+        return {"success": False, "models": []}
+    try:
+        import httpx
+        r = httpx.get("https://api.ai33.pro/v1i/models", headers={"xi-api-key": api_key}, timeout=15)
+        return r.json()
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/api/thumbnail/ai/price")
+async def preco_thumb_ai(request: Request):
+    """Consulta preco de geracao de imagem."""
+    dados = await request.json()
+    config = scriptwriter.carregar_config()
+    api_key = config.get("ai33_api_key", "")
+    try:
+        import httpx
+        r = httpx.post("https://api.ai33.pro/v1i/task/price",
+            headers={"xi-api-key": api_key, "Content-Type": "application/json"},
+            json={
+                "model_id": dados.get("model_id", ""),
+                "generations_count": 1,
+                "model_parameters": dados.get("model_parameters", {}),
+            },
+            timeout=10)
+        return r.json()
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/api/thumbnail/ai/generate-from-template")
+async def gerar_thumb_template(request: Request):
+    """Gera thumb usando thumb_config do template. Sorteia pools automaticamente."""
+    import random
+    dados = await request.json()
+    template_id = dados.get("template_id", "")
+    texto_cima = dados.get("texto_cima", "")
+    texto_baixo = dados.get("texto_baixo", "")
+
+    templates_data = json.load(open(Path(__file__).parent / "templates.json", "r", encoding="utf-8"))
+    tmpl = templates_data.get(template_id, {})
+    tc = tmpl.get("thumb_config")
+    if not tc or not tc.get("prompt_base"):
+        raise HTTPException(400, "Template sem thumb_config")
+
+    # Montar prompt substituindo pools
+    prompt = tc["prompt_base"]
+    for pool_name, pool_items in tc.get("pools", {}).items():
+        if pool_items:
+            escolha = random.choice(pool_items)
+            prompt = prompt.replace(f"[{pool_name}]", escolha)
+
+    # Substituir textos
+    prompt = prompt.replace("[TEXTO DE CIMA]", texto_cima)
+    prompt = prompt.replace("[TEXTO DE BAIXO]", texto_baixo)
+
+    config = scriptwriter.carregar_config()
+    api_key = config.get("ai33_api_key", "")
+    if not api_key:
+        raise HTTPException(400, "Sem API key ai33.pro")
+
+    model_id = tc.get("model_id", "gpt-image-1.5")
+    params = {"aspect_ratio": tc.get("aspect_ratio", "16:9")}
+    res = tc.get("resolution", "2K")
+    if model_id.startswith("gpt-"):
+        params["quality"] = res
+    elif res:
+        params["resolution"] = res
+
+    try:
+        import httpx
+        r = httpx.post(
+            "https://api.ai33.pro/v1i/task/generate-image",
+            headers={"xi-api-key": api_key},
+            data={
+                "prompt": prompt,
+                "model_id": model_id,
+                "generations_count": "1",
+                "model_parameters": json.dumps(params),
+            },
+            timeout=30,
+        )
+        data = r.json()
+        data["prompt_usado"] = prompt
+        return data
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/api/thumbnail/ai/generate")
+async def gerar_thumb_ai(request: Request):
+    """Gera imagem via ai33.pro. Retorna task_id pra polling."""
+    dados = await request.json()
+    prompt = dados.get("prompt", "")
+    model_id = dados.get("model_id", "bytedance-seedream-5-lite")
+    aspect_ratio = dados.get("aspect_ratio", "16:9")
+    resolution = dados.get("resolution", "2K")
+
+    if not prompt:
+        raise HTTPException(400, "Prompt obrigatorio")
+
+    config = scriptwriter.carregar_config()
+    api_key = config.get("ai33_api_key", "")
+    if not api_key:
+        raise HTTPException(400, "Sem API key ai33.pro")
+
+    try:
+        import httpx
+        params = {"aspect_ratio": aspect_ratio}
+        # Modelos GPT usam quality, outros usam resolution
+        if model_id.startswith("gpt-"):
+            params["quality"] = resolution
+        elif resolution:
+            params["resolution"] = resolution
+
+        r = httpx.post(
+            "https://api.ai33.pro/v1i/task/generate-image",
+            headers={"xi-api-key": api_key},
+            data={
+                "prompt": prompt,
+                "model_id": model_id,
+                "generations_count": "1",
+                "model_parameters": json.dumps(params),
+            },
+            timeout=30,
+        )
+        data = r.json()
+        return data
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/api/thumbnail/ai/status/{task_id}")
+def status_thumb_ai(task_id: str):
+    """Poll status de geração de imagem."""
+    config = scriptwriter.carregar_config()
+    api_key = config.get("ai33_api_key", "")
+    try:
+        import httpx
+        r = httpx.get(
+            f"https://api.ai33.pro/v1/task/{task_id}",
+            headers={"xi-api-key": api_key, "Content-Type": "application/json"},
+            timeout=15,
+        )
+        return r.json()
+    except Exception as e:
+        return {"status": "error", "error_message": str(e)}
+
+
 # === API: MONITOR ===
 
 @app.get("/api/monitor")
@@ -1313,9 +1470,12 @@ def resetar_producao():
     """Reset total: mata processos, limpa todos os estados."""
     orchestrator.cancelar()
     orchestrator.estado["ativo"] = False
-    orchestrator.estado["cancelado"] = False
+    orchestrator.estado["cancelado"] = True  # Sinalizar pra thread parar
+    orchestrator.estado["loop"] = False
     narrator.estado_narracao["ativo"] = False
     narrator.estado_narracao["status"] = "idle"
+    narrator.estado_narracao_auto["ativo"] = False
+    narrator.estado_narracao_auto["status"] = "idle"
     scriptwriter.estado_execucao["ativo"] = False
     estado_batch["ativo"] = False
     estado_batch["jobs"] = []
@@ -2001,15 +2161,43 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
     <div class="page-header">
       <h2>Thumbnail</h2>
       <div style="display:flex;align-items:center;gap:12px">
-        <div style="display:flex;gap:6px;align-items:center">
-          <label style="font-size:11px;color:var(--text-sec)">Data:</label>
-          <input type="date" id="thumb-batch-data" style="font-size:11px;padding:3px 6px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text)">
-        </div>
-        <button class="btn btn-secondary btn-sm" onclick="puxarTextosThumb()" style="font-size:11px">Puxar Textos</button>
-        <button class="btn btn-primary btn-sm" onclick="gerarTodasThumbs()" id="btn-thumb-gerar-todas" style="font-size:11px">Gerar Todas</button>
       </div>
     </div>
 
+    <!-- GERACAO AI -->
+    <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:16px;border-left:3px solid var(--accent)">
+      <h3 style="font-size:14px;margin:0 0 12px 0;color:var(--accent)">Gerar Imagem via IA</h3>
+      <div style="display:grid;grid-template-columns:1fr 200px;gap:12px">
+        <div>
+          <textarea id="thumb-ai-prompt" rows="3" placeholder="Descreva a imagem da thumbnail..." style="font-size:12px;width:100%;resize:vertical"></textarea>
+          <div style="display:flex;gap:8px;margin-top:8px;align-items:center;flex-wrap:wrap">
+            <select id="thumb-ai-model" style="font-size:11px;padding:4px 8px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text)">
+              <option value="">Carregando modelos...</option>
+            </select>
+            <select id="thumb-ai-ratio" style="font-size:11px;padding:4px 8px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text)">
+              <option value="16:9">16:9 (YouTube)</option>
+              <option value="1:1">1:1 (Quadrado)</option>
+              <option value="4:3">4:3</option>
+              <option value="9:16">9:16 (Stories)</option>
+            </select>
+            <select id="thumb-ai-res" style="font-size:11px;padding:4px 8px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text)">
+              <option value="2K">2K</option>
+              <option value="4K">4K</option>
+              <option value="1080p">1080p</option>
+            </select>
+            <button class="btn btn-primary btn-sm" onclick="gerarThumbAI()" id="btn-thumb-ai-gerar" style="font-size:11px">Gerar</button>
+            <span id="thumb-ai-credits" style="font-size:10px;color:var(--warn);font-weight:600"></span>
+            <span id="thumb-ai-status" style="font-size:10px;color:var(--text-sec)"></span>
+          </div>
+        </div>
+        <div id="thumb-ai-preview" style="background:var(--bg);border:1px solid var(--border);border-radius:8px;min-height:120px;display:flex;align-items:center;justify-content:center;overflow:hidden">
+          <span style="font-size:10px;color:var(--text-sec)">Preview aparece aqui</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- SECAO LEGACY (oculta - reexibir se necessario) -->
+    <div id="thumb-legacy-section" style="display:none">
     <!-- CONFIG DE TEXTO (shared) -->
     <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:12px 16px;margin-bottom:16px">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;cursor:pointer" onclick="this.parentElement.querySelector('.thumb-cfg-body').style.display=this.parentElement.querySelector('.thumb-cfg-body').style.display==='none'?'block':'none'; this.querySelector('.cfg-arrow').textContent=this.parentElement.querySelector('.thumb-cfg-body').style.display==='none'?'\\u25B6':'\\u25BC'">
@@ -2099,6 +2287,7 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
         </div>
       </div>
     </div>
+    </div><!-- fim thumb-legacy-section -->
   </div>
 
   <!-- PAGE: TEMAS -->
@@ -2428,6 +2617,7 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
         <button class="tab" onclick="showEditorTab('legenda',this)">Legenda</button>
         <button class="tab" onclick="showEditorTab('regras',this)">Regras</button>
         <button class="tab" onclick="showEditorTab('saida',this)">Saída</button>
+        <button class="tab" onclick="showEditorTab('thumb',this)" style="color:var(--accent)">Thumbnail</button>
       </div>
 
       <!-- TAB: GERAL -->
@@ -2947,6 +3137,53 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
           <div style="font-size:10px;color:var(--text-sec);margin-top:2px">URL para onde o link rastreável redireciona (bio link, Hotmart, etc)</div>
         </div>
       </div>
+
+      <!-- TAB: THUMBNAIL -->
+      <div class="tab-content" id="tab-thumb">
+        <div class="form-group">
+          <label>Prompt Base</label>
+          <textarea id="ed-thumb-prompt" rows="6" placeholder="YouTube thumbnail, 1280x720, **[CENA]**... [TEXTO DE CIMA]... [TEXTO DE BAIXO]..." style="font-size:11px"></textarea>
+          <div style="font-size:10px;color:var(--text-sec);margin-top:2px">Use [NOME] para placeholders. [TEXTO DE CIMA] e [TEXTO DE BAIXO] vem da celula do Temas.</div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Modelo AI</label>
+            <select id="ed-thumb-model" style="font-size:11px">
+              <option value="gpt-image-1.5">GPT Image 1.5</option>
+              <option value="bytedance-seedream-5-lite">Seedream 5 Lite</option>
+              <option value="bytedance-seedream-4.5">Seedream 4.5</option>
+              <option value="gemini-3-pro-image-preview">Gemini 3 Pro</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Aspect Ratio</label>
+            <select id="ed-thumb-ratio" style="font-size:11px">
+              <option value="16:9">16:9 (YouTube)</option>
+              <option value="1:1">1:1</option>
+              <option value="4:3">4:3</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Resolucao</label>
+            <select id="ed-thumb-res" style="font-size:11px">
+              <option value="2K">2K</option>
+              <option value="4K">4K</option>
+              <option value="1080p">1080p</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+            </select>
+          </div>
+        </div>
+        <div style="margin-top:12px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+            <label style="font-weight:600">Pools de Variaveis</label>
+            <button class="btn btn-secondary btn-sm" onclick="adicionarPoolThumb()" style="font-size:10px">+ Novo Pool</button>
+          </div>
+          <div id="ed-thumb-pools"></div>
+        </div>
+      </div>
+
     </div>
     <div class="modal-footer">
       <button class="btn btn-secondary" onclick="fecharEditor()">Cancelar</button>
@@ -3141,8 +3378,13 @@ function _loadPageData(page) {
 }
 
 function refreshCurrentPage() {
-  _loadPageData(_currentPage);
-  toast('Aba atualizada', 'success');
+  try {
+    _loadPageData(_currentPage);
+    toast('Aba ' + _currentPage + ' atualizada', 'success');
+  } catch(e) {
+    toast('Erro ao atualizar: ' + e.message, 'error');
+    console.error('refreshCurrentPage erro:', e);
+  }
 }
 
 // === TEMPLATES ===
@@ -3267,6 +3509,9 @@ async function abrirEditor(id) {
     document.getElementById('ed-regras-hesitacoes').checked = regras.remover_hesitacoes !== false;
     document.getElementById('ed-regras-capitalizar').checked = regras.capitalizar_inicio !== false;
     document.getElementById('ed-regras-remover').value = (regras.palavras_remover || []).join('\\n');
+
+    // Thumbnail config
+    _carregarThumbConfig(t.thumb_config);
 
     // Overlays
     renderOverlays(t.overlays || []);
@@ -3441,6 +3686,64 @@ function _coletarRegras() {
   };
 }
 
+// === THUMBNAIL POOLS ===
+function renderThumbPools(pools) {
+  var container = document.getElementById('ed-thumb-pools');
+  container.innerHTML = '';
+  if (!pools) return;
+  Object.keys(pools).forEach(function(name) {
+    _addPoolUI(container, name, pools[name]);
+  });
+}
+
+function _addPoolUI(container, name, items) {
+  var div = document.createElement('div');
+  div.style.cssText = 'background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px;margin-bottom:8px';
+  div.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">'
+    + '<input type="text" class="pool-name" value="' + (name || '') + '" placeholder="Nome (ex: CENA)" style="font-size:12px;font-weight:600;background:transparent;border:none;color:var(--accent);width:200px">'
+    + '<div style="display:flex;gap:4px;align-items:center"><span class="pool-count" style="font-size:10px;color:var(--text-sec)">0 opcoes</span>'
+    + '<button class="btn btn-danger btn-sm" style="font-size:9px;padding:1px 6px" onclick="this.closest(&quot;[data-pool]&quot;).remove()">X</button></div></div>'
+    + '<textarea class="pool-items" rows="4" placeholder="Uma opcao por linha..." style="font-size:10px;width:100%"></textarea>';
+  div.dataset.pool = '1';
+  var ta = div.querySelector('.pool-items');
+  ta.value = (items || []).join('\\n');
+  var countEl = div.querySelector('.pool-count');
+  countEl.textContent = (items || []).length + ' opcoes';
+  ta.oninput = function() { countEl.textContent = ta.value.split('\\n').filter(Boolean).length + ' opcoes'; };
+  container.appendChild(div);
+}
+
+function adicionarPoolThumb() {
+  var container = document.getElementById('ed-thumb-pools');
+  _addPoolUI(container, '', []);
+}
+
+function _coletarThumbConfig() {
+  var prompt = document.getElementById('ed-thumb-prompt').value;
+  if (!prompt) return undefined;
+  var pools = {};
+  document.querySelectorAll('#ed-thumb-pools [data-pool]').forEach(function(div) {
+    var name = div.querySelector('.pool-name').value.trim();
+    var items = div.querySelector('.pool-items').value.split('\\n').filter(Boolean);
+    if (name && items.length) pools[name] = items;
+  });
+  return {
+    prompt_base: prompt,
+    pools: pools,
+    model_id: document.getElementById('ed-thumb-model').value,
+    aspect_ratio: document.getElementById('ed-thumb-ratio').value,
+    resolution: document.getElementById('ed-thumb-res').value,
+  };
+}
+
+function _carregarThumbConfig(tc) {
+  document.getElementById('ed-thumb-prompt').value = (tc && tc.prompt_base) || '';
+  document.getElementById('ed-thumb-model').value = (tc && tc.model_id) || 'gpt-image-1.5';
+  document.getElementById('ed-thumb-ratio').value = (tc && tc.aspect_ratio) || '16:9';
+  document.getElementById('ed-thumb-res').value = (tc && tc.resolution) || '2K';
+  renderThumbPools(tc ? tc.pools : null);
+}
+
 async function salvarTemplate() {
   const res_str = document.getElementById('ed-resolucao').value;
   const res_parts = res_str.split('x').map(Number);
@@ -3519,6 +3822,7 @@ async function salvarTemplate() {
       posicao: document.getElementById('ed-cta-posicao').value,
     },
     regras: _coletarRegras(),
+    thumb_config: _coletarThumbConfig(),
   };
 
   const url = editandoId ? `/api/templates/${editandoId}` : '/api/templates';
@@ -6680,7 +6984,146 @@ function thumbCfgChanged() {
   document.getElementById('thumb-cfg-color-hex').textContent = hex;
 }
 
+async function gerarThumbAI() {
+  var prompt = document.getElementById('thumb-ai-prompt').value.trim();
+  if (!prompt) { toast('Digite um prompt', 'error'); return; }
+
+  var model = document.getElementById('thumb-ai-model').value;
+  var ratio = document.getElementById('thumb-ai-ratio').value;
+  var res = document.getElementById('thumb-ai-res').value;
+  var statusEl = document.getElementById('thumb-ai-status');
+  var btn = document.getElementById('btn-thumb-ai-gerar');
+  var preview = document.getElementById('thumb-ai-preview');
+
+  btn.disabled = true;
+  btn.textContent = '...';
+  statusEl.textContent = 'Enviando...';
+  statusEl.style.color = 'var(--warn)';
+
+  try {
+    var r = await fetch('/api/thumbnail/ai/generate', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ prompt: prompt, model_id: model, aspect_ratio: ratio, resolution: res })
+    });
+    var data = await r.json();
+
+    if (!data.success && !data.task_id) {
+      throw new Error(data.error || data.message || 'Erro ao gerar');
+    }
+
+    var taskId = data.task_id;
+    statusEl.textContent = 'Gerando... (task: ' + taskId.substring(0,8) + ')';
+
+    // Poll
+    var maxPolls = 120;
+    for (var p = 0; p < maxPolls; p++) {
+      await new Promise(function(resolve) { setTimeout(resolve, 3000); });
+      var sr = await fetch('/api/thumbnail/ai/status/' + taskId);
+      var st = await sr.json();
+
+      if (st.status === 'done') {
+        var imgs = (st.metadata || {}).result_images || [];
+        if (imgs.length > 0) {
+          var imgUrl = imgs[0].imageUrl || imgs[0].previewUrl;
+          preview.innerHTML = '<img src="' + imgUrl + '" style="max-width:100%;max-height:300px;border-radius:4px">';
+          statusEl.textContent = 'Concluido!';
+          statusEl.style.color = 'var(--accent)';
+          // Guardar URL pra download
+          preview.dataset.imageUrl = imgUrl;
+        }
+        break;
+      } else if (st.status === 'error') {
+        throw new Error(st.error_message || 'Erro na geracao');
+      } else {
+        statusEl.textContent = 'Gerando... ' + (st.progress || 0) + '%';
+      }
+    }
+  } catch(e) {
+    statusEl.textContent = 'Erro: ' + e.message;
+    statusEl.style.color = 'var(--danger)';
+    toast('Erro: ' + e.message, 'error');
+  }
+
+  btn.disabled = false;
+  btn.textContent = 'Gerar';
+}
+
 async function carregarThumbPage() {
+  // Carregar modelos de imagem AI
+  try {
+    var mr = await fetch('/api/thumbnail/ai/models');
+    var md = await mr.json();
+    if (md.success && md.models) {
+      window._thumbModels = md.models;
+      var sel = document.getElementById('thumb-ai-model');
+      // Nomes amigaveis
+      var names = {
+        'bytedance-seedream-5-lite': 'Seedream 5 Lite',
+        'bytedance-seedream-4.5': 'Seedream 4.5',
+        'bytedance-seedream-4': 'Seedream 4',
+        'gpt-image-1.5': 'GPT Image 1.5',
+        'gpt-image-1': 'GPT Image 1',
+        'gemini-3-pro-image-preview': 'Gemini 3 Pro',
+        'gemini-2.5-flash-image': 'Gemini 2.5 Flash',
+        'gemini-3.1-flash-image-preview': 'Gemini 3.1 Flash',
+        'flux-2-pro': 'Flux 2 Pro',
+        'flux-1-kontext': 'Flux Kontext',
+        'kling-omni-image': 'Kling Omni',
+        'runway-gen4-image': 'Runway Gen4',
+        'runway-gen4-image-turbo': 'Runway Gen4 Turbo',
+        'wan-2.5-preview-image': 'Wan 2.5',
+      };
+      sel.innerHTML = md.models.map(function(m) {
+        var name = names[m.model_id] || m.model_id;
+        return '<option value="' + m.model_id + '">' + name + '</option>';
+      }).join('');
+      function _updateThumbModelUI() {
+        var m = window._thumbModels.find(function(x) { return x.model_id === sel.value; });
+        if (m) {
+          var ratioSel = document.getElementById('thumb-ai-ratio');
+          ratioSel.innerHTML = (m.aspect_ratios || []).map(function(r) {
+            return '<option value="' + r + '"' + (r === '16:9' ? ' selected' : '') + '>' + r + '</option>';
+          }).join('');
+          var resSel = document.getElementById('thumb-ai-res');
+          if (m.resolutions) {
+            resSel.innerHTML = m.resolutions.map(function(r) {
+              return '<option value="' + r + '">' + r + '</option>';
+            }).join('');
+            resSel.style.display = '';
+          } else if (m.qualities) {
+            resSel.innerHTML = m.qualities.map(function(q) {
+              return '<option value="' + q + '">' + q + '</option>';
+            }).join('');
+            resSel.style.display = '';
+          } else {
+            resSel.style.display = 'none';
+          }
+          _checkThumbPrice();
+        }
+      }
+      async function _checkThumbPrice() {
+        try {
+          var ratio = document.getElementById('thumb-ai-ratio').value;
+          var res = document.getElementById('thumb-ai-res').value;
+          var params = {aspect_ratio: ratio};
+          if (res) params.resolution = res;
+          var r = await fetch('/api/thumbnail/ai/price', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({model_id: sel.value, model_parameters: params})
+          });
+          var d = await r.json();
+          if (d.success) {
+            document.getElementById('thumb-ai-credits').textContent = d.credits + ' creditos';
+          }
+        } catch(e) {}
+      }
+      sel.onchange = _updateThumbModelUI;
+      document.getElementById('thumb-ai-ratio').onchange = _checkThumbPrice;
+      document.getElementById('thumb-ai-res').onchange = _checkThumbPrice;
+      _updateThumbModelUI();
+    }
+  } catch(e) {}
+
   if (!templates.length) {
     var r = await fetch('/api/templates');
     templates = await r.json();

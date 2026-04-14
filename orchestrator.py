@@ -396,21 +396,16 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
             cel = temas_data.get("celulas", {}).get(key, {})
             job["cel"] = cel
 
-            # Verificar roteiro: temas.json OU .txt na pasta de data
+            # Verificar roteiro: .txt na pasta de data e a UNICA fonte da verdade
             txt_path = pasta_roteiros / f"{tag}.txt"
-            has_roteiro = (cel.get("roteiro") and len(cel["roteiro"]) > 100) or txt_path.exists()
 
-            if has_roteiro:
-                chars = len(cel.get("roteiro", "")) or (txt_path.stat().st_size if txt_path.exists() else 0)
+            if txt_path.exists():
+                # .txt existe = roteiro aprovado
+                chars = txt_path.stat().st_size
                 production_log.atualizar_canal(i, etapa="roteiro", etapa_detalhe=f"Existe ({chars} chars)", roteiro_chars=chars)
                 production_log.adicionar_log(f"{tag}: Roteiro existe ({chars} chars)")
-                # Se .txt existe mas temas.json nao tem, carregar
-                if txt_path.exists() and not (cel.get("roteiro") and len(cel["roteiro"]) > 100):
-                    cel["roteiro"] = txt_path.read_text(encoding="utf-8")
-                    job["cel"] = cel
-                # Se temas.json tem mas .txt nao existe, salvar
-                if cel.get("roteiro") and not txt_path.exists():
-                    txt_path.write_text(cel["roteiro"], encoding="utf-8")
+                cel["roteiro"] = txt_path.read_text(encoding="utf-8")
+                job["cel"] = cel
                 roteiro_ok[i] = True
             else:
                 roteiro_para_gerar[i] = (job, cel)

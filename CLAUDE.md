@@ -6,13 +6,13 @@ Local automation tool that replaces Adobe Premiere Pro for YouTube video product
 
 ## Architecture
 
-**Single-file SPA**: FastAPI backend (`app.py`, ~7400 lines) serves an inline HTML/JS dashboard via a `DASHBOARD_HTML` string. No separate frontend build. All JavaScript lives inside Python string literals in `app.py`. Server runs on port 8500.
+**Single-file SPA**: FastAPI backend (`app.py`, ~7800 lines) serves an inline HTML/JS dashboard via a `DASHBOARD_HTML` string. No separate frontend build. All JavaScript lives inside Python string literals in `app.py`. Server runs on port 8500.
 
 **Backend modules**:
 - `engine.py` (~850 lines) - Video assembly engine (OpenCV + FFmpeg)
 - `transcriber.py` - Whisper audio-to-SRT transcription
 - `subtitle_fixer.py` - SRT correction rules engine
-- `scriptwriter.py` (~550 lines) - Multi-step LLM pipeline executor + credential system + isolated execution
+- `scriptwriter.py` (~680 lines) - Multi-step LLM pipeline executor + credential system + isolated execution
 - `narrator.py` (~400 lines) - TTS via ai33.pro API (ElevenLabs + Minimax), chunking sequencial
 - `orchestrator.py` (~600 lines) - Production orchestrator (3-phase pipeline: parallel roteiros + narration→render pipeline)
 - `production_log.py` (~140 lines) - Persistent production state (thread-safe with RLock)
@@ -215,7 +215,7 @@ After each pipeline execution, a log file is saved to `logs/pipeline_{id}_{times
 ### LLM API calls:
 - **Claude**: `POST api.anthropic.com/v1/messages` (max_tokens=32000, timeout=300s)
 - **GPT**: `POST api.openai.com/v1/chat/completions` (max_tokens=32000, timeout=300s)
-- **Gemini**: `POST generativelanguage.googleapis.com/v1beta/models/{model}:generateContent` (maxOutputTokens=32000, timeout=300s)
+- **Gemini**: `POST generativelanguage.googleapis.com/v1beta/models/{model}:generateContent` (maxOutputTokens=65536, timeout=300s)
 
 ---
 
@@ -618,6 +618,13 @@ When a credential is tested/refreshed, the system queries the provider's API for
 - `DELETE /api/chat/history` - Clear conversation history
 - `POST /api/chat` - Send message to Claude CLI
 
+### Thumbnail AI (ai33.pro image generation)
+- `GET  /api/thumbnail/ai/models` - List available image generation models
+- `POST /api/thumbnail/ai/price` - Calculate credits cost before generating
+- `POST /api/thumbnail/ai/generate` - Generate image from prompt (returns task_id)
+- `POST /api/thumbnail/ai/generate-from-template` - Generate using template's thumb_config (auto-picks pools)
+- `GET  /api/thumbnail/ai/status/{task_id}` - Poll image generation status
+
 ### Config
 - `GET  /api/config` - Get app config (keys masked)
 - `PUT  /api/config` - Update app config (masked values skipped)
@@ -717,10 +724,9 @@ Clips use escalated durations to reduce count without losing visual variety:
 
 ### Fallback Chain
 When a provider fails (429, timeout, error), tries next in order:
-1. `claude_cli` (Claude Sonnet via CLI)
-2. `claude` (Claude API)
-3. `gemini` (Gemini Flash)
-4. `gpt` (GPT 5.2)
+1. `claude` (Claude API)
+2. `gemini` (Gemini Flash)
+3. `gpt` (GPT 5.2)
 Skips the provider that already failed.
 
 ### Pipeline abort on LLM failure
@@ -783,17 +789,59 @@ If an LLM step fails (even with fallback), the pipeline **aborts** instead of co
 
 ---
 
+## Thumbnail AI System (app.py)
+
+### ai33.pro Image Generation (/v1i endpoints)
+- Uses `api.ai33.pro/v1i/` prefix for image endpoints
+- Auth: same `xi-api-key` header as TTS
+- Model: `bytedance-seedream-4.5` (supports reference images, up to 10 assets)
+- Aspect ratios: 16:9, 4:3, 1:1, 3:4, 9:16
+- Resolutions: 2K, 4K
+- GPT models use `quality` param instead of `resolution`
+- Task polling: reuses common `GET /v1/task/{task_id}` endpoint (type: `imagen2`)
+
+### Per-template thumb_config
+Templates can store `thumb_config` for AI thumbnail generation:
+```json
+{
+  "prompt_base": "A cosmic scene with [CENA] and [TEXTO DE CIMA]...",
+  "pools": {
+    "CENA": ["nebula", "galaxy", "aurora"],
+    "ESTILO": ["watercolor", "photorealistic"]
+  },
+  "model_id": "gpt-image-1.5",
+  "aspect_ratio": "16:9",
+  "resolution": "2K"
+}
+```
+- Pool items are randomly selected and substituted into `prompt_base` as `[POOL_NAME]`
+- `[TEXTO DE CIMA]` and `[TEXTO DE BAIXO]` are replaced with user-provided text
+- `generate-from-template` endpoint handles pool randomization automatically
+
+### Orchestrator roteiro source of truth
+- `.txt` file in `Roteiros/` folder is the **sole source of truth** for whether a roteiro exists
+- `temas.json` cell `roteiro` field is no longer checked as fallback
+- If `.txt` exists, its content is loaded into the cell for downstream use
+
+---
+
 ## Backlog / Pending Items
 
 See `BACKLOG.txt` for the full list. Key pending items by priority:
 
 ### HIGH PRIORITY
-- Thumbnail system (per-template config, AI generation, reference modeling)
 - Upload system (YouTube API, OAuth per channel, proxy, pinned comments)
 - Monitor: detailed render progress (clips count, ETA)
 - Parallel narrations (Etapa B)
 
 ### DONE (this session)
+- Thumbnail AI generation (ai33.pro /v1i endpoints, per-template thumb_config with prompt pools)
+- Claude CLI --system-prompt as list args (no shell=True, no temp files)
+- Claude CLI output cleanup (regex strips preambles, timestamps, section headers)
+- Gemini maxOutputTokens increased to 65536
+- Orchestrator: .txt file is sole source of truth for roteiro (no temas.json fallback)
+- Reset producao: also resets auto narration state and loop flag
+- JS syntax fix: pool remove button onclick quote escaping
 - Produzir Tudo em Loop (checkbox, auto-advance to next date)
 - Separated auto/manual modes (render_queue, narrator states)
 - Automator Exports folder structure (Roteiros/, Narracoes/, Videos/)

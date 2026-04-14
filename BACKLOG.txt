@@ -232,30 +232,53 @@
 
 --- PRIORIDADE ALTA ---
 
-[ ] ABA THUMBNAIL (REFATORACAO COMPLETA)
-    Mover configs de thumb para dentro do Template (nova aba "Thumbnail"):
+[ ] ABA THUMBNAIL NO TEMPLATE (config por canal)
+    Nova aba "Thumbnail" dentro do editor de Template. Cada canal define:
 
-    IMAGEM DE FUNDO (switch 2 lados):
-    [ ] Lado 1: Pasta de imagens prontas + checkbox "Randomizar"
-    [ ] Lado 2: Gerar via IA (ai33.pro Nano Banana)
-        - Checkboxes: usar thumbnail/titulo/tema como input pro prompt
-        - Escolher LLM (credencial + modelo) para gerar prompt
-        - Gerar imagem via Nano Banana
+    PROMPT BASE:
+    [ ] Campo de texto com o prompt fixo do canal
+    [ ] Placeholders: [CENA], [FIGURA], [TEXTO DE CIMA], [TEXTO DE BAIXO]
+    [ ] Qualquer placeholder customizavel (nao limitado a esses 4)
 
-    TEXTO (1 a 3 frases):
-    [ ] Seletor de quantidade de frases
-    [ ] Cada frase com config independente: fonte, tamanho, cor, outline, sombra, bg_box
+    POOLS DE VARIAVEIS:
+    [ ] Para cada placeholder, um pool de opcoes (textarea, 1 por linha)
+    [ ] Ex: [CENA] tem N opcoes, [ARCTURIANO] tem N opcoes (sem limite)
+    [ ] Na geracao: seleciona aleatoriamente 1 de cada pool
+    [ ] Botao "+" pra adicionar novo pool, campo nome + opcoes
+    [ ] Interface: accordion/lista editavel por pool
 
-    POSICAO:
-    [ ] Posicao padrao fixa ou randomizada (pool de checkboxes)
+    TEXTOS DA THUMB (vem do Temas):
+    [ ] Campo "Texto da Thumbnail" na celula do Temas
+    [ ] Linha 1 = [TEXTO DE CIMA], Linha 2 = [TEXTO DE BAIXO]
+    [ ] Split por \\n (quebra de linha)
 
-    THUMB DA REFERENCIA (checkbox opcional):
-    [ ] URL do video YouTube -> extrai thumb -> LLM gera prompt -> Nano Banana
+    MODELO DE GERACAO:
+    [ ] Seletor de modelo ai33.pro (mesma lista da aba Thumbnail)
+    [ ] Aspect ratio (default 16:9 pra YouTube)
+    [ ] Resolucao/qualidade
 
-    PREVIEW: com textos pre-definidos para visualizar estilo
+    EXEMPLO (template NARC - Arcturian Violet Codex):
+    Prompt: "YouTube thumbnail, 1280x720, **[CENA]**. A cinematic
+    Centered composition featuring a medium close-up from the chest
+    up of an **[ARCTURIANO]**, dramatic violet-cyan rim lighting...
+    exactly reading: [TEXTO DE CIMA]... exactly reading: [TEXTO DE BAIXO]..."
+    Pool [CENA]: 10 cenarios cosmicos
+    Pool [ARCTURIANO]: 10 descricoes de seres arcturianos
 
-    [ ] Geracao em lote por data
-    [ ] Exportar como JPG/PNG (1280x720)
+    FLUXO DE GERACAO:
+    1. Pegar texto da thumb da celula (split em 2 linhas)
+    2. Sortear 1 opcao de cada pool
+    3. Montar prompt substituindo placeholders
+    4. Enviar pra ai33.pro /v1i/task/generate-image
+    5. Poll ate done, baixar imagem
+    6. Salvar em Automator Exports/YYYY-MM-DD/Thumbnails/TAG.png
+
+    GERACAO EM LOTE:
+    [ ] Botao "Gerar Todas" na aba Thumbnail (igual Produzir Tudo)
+    [ ] Gera thumb de todos os canais da data selecionada
+    [ ] Pula se ja existe em Thumbnails/
+
+    Prioridade: ALTA
 
 [ ] ABA UPLOAD (NOVA)
     Upload direto para YouTube via YouTube Data API v3:
@@ -339,6 +362,16 @@
     - Narracao em lote (ja implementado)
 
 --- PRIORIDADE MEDIA ---
+
+[ ] MOVER TEMPLATE DE COMENTARIO PARA DENTRO DO TEMPLATE DE CANAL
+    Hoje o template de comentario do Link Tracker esta na aba Config (global).
+    Cada canal tem texto diferente no comentario (link, CTA, descricao).
+    Mover para dentro do Template de video (aba Templates):
+    - Campo "Template de Comentario" por template
+    - Variaveis: {{link}}, {{titulo}}, {{canal}}, {{data}}
+    - URL do tracker e credenciais continuam global (Config)
+    - Cada template define SEU texto de comentario
+    Prioridade: MEDIA
 
 [ ] CLOUDFLARE TUNNEL / TAILSCALE
     Acesso remoto ao servidor sem expor porta publica
