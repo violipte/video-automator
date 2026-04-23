@@ -26,6 +26,7 @@ import production_log
 import scriptwriter
 import narrator
 import render_queue
+import video_log_db
 
 # Imports GPU — so necessarios em modo local (render_queue.REMOTE_MODE=False)
 if not render_queue.REMOTE_MODE:
@@ -153,11 +154,13 @@ def _gerar_roteiro_para_canal(job_index, job, cel, data_ref, pasta_roteiros=None
     }
 
     resultado = ""
+    last_res = None
     for attempt in range(max_retries + 1):
         if estado["cancelado"]:
             return (job_index, None, "Cancelado")
 
         res = scriptwriter.executar_pipeline_isolado(pipeline_id, cel.get("tema", ""), contexto_extra=contexto)
+        last_res = res
 
         if res["ok"] and res["resultado"]:
             resultado = res["resultado"]
@@ -171,11 +174,36 @@ def _gerar_roteiro_para_canal(job_index, job, cel, data_ref, pasta_roteiros=None
             if attempt >= max_retries:
                 production_log.atualizar_canal(job_index, etapa="erro", erro=f"Roteiro falhou: {erros}")
                 production_log.adicionar_log(f"{tag}: ERRO roteiro - {erros}")
+                try:
+                    video_log_db.registrar_roteiro(
+                        data_ref, tag, "erro", erro=erros,
+                        template=tmpl.get("nome", ""), template_id=job.get("template_id", ""),
+                    )
+                except Exception:
+                    pass
                 return (job_index, None, erros)
+
+    # Extrai provider + fallback do ultimo res
+    def _extrai_provider(r):
+        if not r: return ("", False)
+        for etapa in reversed(r.get("etapas", [])):
+            p = etapa.get("provider_usado") or etapa.get("credencial", {}).get("provedor") or ""
+            if p:
+                return (p, bool(etapa.get("fallback_used")))
+        return ("", False)
+    provider, fallback_used = _extrai_provider(last_res)
 
     if resultado and len(resultado) < min_chars:
         production_log.atualizar_canal(job_index, etapa="erro", erro=f"Roteiro muito curto apos {max_retries} tentativas ({len(resultado)} chars)")
         production_log.adicionar_log(f"{tag}: ERRO - roteiro curto apos {max_retries} tentativas ({len(resultado)} chars)")
+        try:
+            video_log_db.registrar_roteiro(
+                data_ref, tag, "erro", provider=provider, fallback=fallback_used,
+                chars=len(resultado), erro=f"Roteiro curto ({len(resultado)} chars)",
+                template=tmpl.get("nome", ""), template_id=job.get("template_id", ""),
+            )
+        except Exception:
+            pass
         return (job_index, None, "Roteiro curto")
 
     if resultado and len(resultado) > 100:
@@ -192,6 +220,14 @@ def _gerar_roteiro_para_canal(job_index, job, cel, data_ref, pasta_roteiros=None
 
         production_log.atualizar_canal(job_index, etapa_detalhe=f"OK ({len(resultado)} chars)", roteiro_chars=len(resultado))
         production_log.adicionar_log(f"{tag}: Roteiro OK ({len(resultado)} chars)")
+        try:
+            video_log_db.registrar_roteiro(
+                data_ref, tag, "ok", provider=provider, fallback=fallback_used,
+                chars=len(resultado),
+                template=tmpl.get("nome", ""), template_id=job.get("template_id", ""),
+            )
+        except Exception:
+            pass
         return (job_index, resultado, None)
 
     return (job_index, None, "Roteiro vazio")
@@ -472,7 +508,7 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
             evt = threading.Event()
             _render_pendentes.append(evt)
 
-            def _on_done(video_path=""):
+            def _on_done(video_path="", local_storage="local", tamanho_mb=0):
                 # Em modo remoto, o worker reporta conclusao via API
                 if render_queue.REMOTE_MODE:
                     production_log.atualizar_canal(i, etapa="concluido", etapa_detalhe=f"OK ({video_path.split('/')[-1] if video_path else 'render remoto'})", video_path=video_path, progresso=100, fim=time.time())
@@ -482,12 +518,32 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
                         temas_data_local["celulas"][job["key"]]["done"] = True
                         temas_data_local["celulas"][job["key"]]["done_type"] = "auto"
                         _salvar_temas(temas_data_local)
+                try:
+                    video_log_db.registrar_render(
+                        data_ref, job["tag"], "ok",
+                        local_storage=local_storage,
+                        path=video_path or "",
+                        tamanho_mb=tamanho_mb,
+                        template=job.get("template", {}).get("nome", ""),
+                        template_id=job.get("template_id", ""),
+                    )
+                except Exception:
+                    pass
                 evt.set()
 
             def _on_error(erro):
                 if render_queue.REMOTE_MODE:
                     production_log.atualizar_canal(i, etapa="erro", erro=str(erro))
                     production_log.adicionar_log(f"{job['tag']}: ERRO render remoto - {erro}")
+                try:
+                    video_log_db.registrar_render(
+                        data_ref, job["tag"], "erro",
+                        erro=str(erro),
+                        template=job.get("template", {}).get("nome", ""),
+                        template_id=job.get("template_id", ""),
+                    )
+                except Exception:
+                    pass
                 evt.set()
 
             if render_queue.REMOTE_MODE:
@@ -617,6 +673,19 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
                         if narr_result_path.exists():
                             production_log.atualizar_canal(i, etapa_detalhe=f"OK ({narr_result_path.name})", narracao_path=str(narr_result_path))
                             production_log.adicionar_log(f"{tag}: Narracao OK -> {narr_result_path.name}")
+                            try:
+                                video_log_db.registrar_narracao(
+                                    data_ref, tag, "ok",
+                                    provider=job.get("voice_provider", ""),
+                                    voice_id=voice_id,
+                                    fallback=False,
+                                    chunks=result.get("chunks", 0),
+                                    path=str(narr_result_path),
+                                    template=job.get("template", {}).get("nome", ""),
+                                    template_id=job.get("template_id", ""),
+                                )
+                            except Exception:
+                                pass
                             _enfileirar_render(i, job, narr_result_path)
                             narr_succeeded = True
                             break
@@ -680,6 +749,18 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
                         break
 
                     if narr_ok:
+                        try:
+                            video_log_db.registrar_narracao(
+                                data_ref, tag, "ok",
+                                provider=job.get("voice_provider", ""),
+                                voice_id=voice_id,
+                                fallback=False,
+                                path=str(narr_path),
+                                template=job.get("template", {}).get("nome", ""),
+                                template_id=job.get("template_id", ""),
+                            )
+                        except Exception:
+                            pass
                         _enfileirar_render(i, job, narr_path)
                         narr_succeeded = True
                         break
@@ -726,10 +807,35 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
                             fb_path = Path(fb_result["audio_local"])
                             production_log.atualizar_canal(i, etapa_detalhe=f"OK fallback ({fb_path.name})", narracao_path=str(fb_path), erro="")
                             production_log.adicionar_log(f"{tag}: Fallback Inworld OK -> {fb_path.name}")
+                            try:
+                                video_log_db.registrar_narracao(
+                                    data_ref, tag, "ok",
+                                    provider="inworld",
+                                    voice_id=fb_voice,
+                                    fallback=True,
+                                    chunks=fb_result.get("chunks", 0),
+                                    path=str(fb_path),
+                                    template=job.get("template", {}).get("nome", ""),
+                                    template_id=job.get("template_id", ""),
+                                )
+                            except Exception:
+                                pass
                             _enfileirar_render(i, job, fb_path)
                             continue
                         else:
                             production_log.adicionar_log(f"{tag}: Fallback Inworld falhou - {fb_result.get('erro', '')}")
+                            try:
+                                video_log_db.registrar_narracao(
+                                    data_ref, tag, "erro",
+                                    provider="inworld",
+                                    voice_id=fb_voice,
+                                    fallback=True,
+                                    erro=fb_result.get("erro", ""),
+                                    template=job.get("template", {}).get("nome", ""),
+                                    template_id=job.get("template_id", ""),
+                                )
+                            except Exception:
+                                pass
                     except Exception as e:
                         production_log.adicionar_log(f"{tag}: Fallback Inworld exception - {e}")
 

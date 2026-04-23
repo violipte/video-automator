@@ -41,5 +41,7 @@ _inworld_voices.json
 _test_inworld_clones.py
 _patch_orch.py
 _elara_15s.mp3
+_retrofit_video_log.py
 deploy.sh
 worker_config.json
+video_log_db.json

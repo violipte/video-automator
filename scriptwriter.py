@@ -580,6 +580,8 @@ def executar_pipeline_isolado(pipeline_id: str, entrada: str, contexto_extra: di
 
                     try:
                         resultado = fn(system_msg, user_msg, api_key, modelo)
+                        etapa_info["provider_usado"] = provedor
+                        etapa_info["fallback_used"] = False
                     except Exception as llm_err:
                         fallback_cred = _obter_fallback_credencial(provedor)
                         if fallback_cred:
@@ -587,6 +589,8 @@ def executar_pipeline_isolado(pipeline_id: str, entrada: str, contexto_extra: di
                             fb_fn = CHAMADAS.get(fallback_cred["provedor"])
                             if fb_fn:
                                 resultado = fb_fn(system_msg, user_msg, fallback_cred["api_key"], fallback_cred["modelo"])
+                                etapa_info["provider_usado"] = fallback_cred["provedor"]
+                                etapa_info["fallback_used"] = True
                             else:
                                 raise llm_err
                         else:

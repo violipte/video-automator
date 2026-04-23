@@ -185,7 +185,8 @@ def proximo_job_remoto() -> dict | None:
     return None
 
 
-def completar_job_remoto(job_id: str, sucesso: bool, erro: str = "", video_path: str = ""):
+def completar_job_remoto(job_id: str, sucesso: bool, erro: str = "", video_path: str = "",
+                          local_storage: str = "local", tamanho_mb: float = 0):
     """Chamado pelo render worker quando termina um job."""
     global _remote_current
     with _remote_jobs_lock:
@@ -203,7 +204,12 @@ def completar_job_remoto(job_id: str, sucesso: bool, erro: str = "", video_path:
         cb = _callbacks.pop(job_id, {})
     if sucesso:
         if cb.get("on_done"):
-            cb["on_done"](video_path)
+            # on_done aceita video_path + kwargs opcionais para metadados de storage
+            try:
+                cb["on_done"](video_path, local_storage=local_storage, tamanho_mb=tamanho_mb)
+            except TypeError:
+                # Fallback pra assinatura antiga
+                cb["on_done"](video_path)
     else:
         if cb.get("on_error"):
             cb["on_error"](erro)

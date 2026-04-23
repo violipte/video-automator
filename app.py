@@ -402,6 +402,34 @@ def limpar_historico():
     return {"ok": True}
 
 
+# === API: VIDEO LOG DB ===
+
+import video_log_db  # noqa: E402
+
+
+@app.get("/api/video-log")
+def video_log_listar(data: str = "", canal: str = "", erros_only: bool = False):
+    """Lista registros do banco de videos. Filtros opcionais: data (YYYY-MM-DD), canal, erros_only."""
+    return {
+        "videos": video_log_db.listar_videos(data=data, canal=canal, apenas_erros=erros_only),
+        "resumo": video_log_db.resumo(),
+    }
+
+
+@app.get("/api/video-log/{data}/{canal}")
+def video_log_obter(data: str, canal: str):
+    v = video_log_db.obter_video(data, canal)
+    if not v:
+        raise HTTPException(404, "Registro nao encontrado")
+    return v
+
+
+@app.delete("/api/video-log")
+def video_log_limpar():
+    video_log_db.limpar()
+    return {"ok": True}
+
+
 # === API: BATCH ===
 
 def _executar_batch():
@@ -1519,11 +1547,13 @@ async def render_worker_complete(request: Request):
     sucesso = dados.get("sucesso", False)
     erro = dados.get("erro", "")
     video_path = dados.get("video_path", "")
+    local_storage = dados.get("local_storage", "local")
+    tamanho_mb = dados.get("tamanho_mb", 0)
 
     if not job_id:
         raise HTTPException(400, "job_id obrigatorio")
 
-    render_queue.completar_job_remoto(job_id, sucesso, erro, video_path)
+    render_queue.completar_job_remoto(job_id, sucesso, erro, video_path, local_storage=local_storage, tamanho_mb=tamanho_mb)
     return {"ok": True}
 
 
@@ -2099,6 +2129,10 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
       Monitor
     </a>
+    <a data-page="log" onclick="showPage('log')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 3v18"/></svg>
+      Log
+    </a>
     <a data-page="config" onclick="showPage('config')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
       Config
@@ -2531,7 +2565,19 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
         <button class="btn btn-secondary btn-sm" onclick="syncTemasSupabase()">Sync Supabase</button>
       </div>
     </div>
-    <div style="overflow:auto;max-height:calc(100vh - 200px)">
+    <div id="temas-filter-bar" style="display:flex;gap:6px;align-items:center;padding:6px 12px;background:var(--bg-2);border-radius:6px;margin-bottom:8px;font-size:11px">
+      <span style="color:var(--text-sec)">Filtrar:</span>
+      <button class="btn btn-sm" data-preset="hoje" onclick="temasFiltroPreset('hoje')">Hoje</button>
+      <button class="btn btn-sm" data-preset="7d" onclick="temasFiltroPreset('7d')">7 dias</button>
+      <button class="btn btn-sm btn-primary" data-preset="mes" onclick="temasFiltroPreset('mes')">Mês atual</button>
+      <button class="btn btn-sm" data-preset="tudo" onclick="temasFiltroPreset('tudo')">Tudo</button>
+      <span style="color:var(--text-sec);margin-left:10px">Range:</span>
+      <input id="temas-filter-start" type="date" style="padding:3px 6px;font-size:10px" onchange="temasFiltroRange()">
+      <span style="color:var(--text-sec)">até</span>
+      <input id="temas-filter-end" type="date" style="padding:3px 6px;font-size:10px" onchange="temasFiltroRange()">
+      <span id="temas-filter-info" style="color:var(--text-sec);margin-left:auto;font-size:10px"></span>
+    </div>
+    <div style="overflow:auto;max-height:calc(100vh - 240px)">
       <table class="temas-grid" id="temas-grid">
         <thead id="temas-thead"></thead>
         <tbody id="temas-tbody"></tbody>
@@ -2752,6 +2798,41 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
           <textarea id="exec-resultado-text" readonly style="width:100%;height:200px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:12px;font-size:13px;font-family:inherit;resize:vertical"></textarea>
         </div>
       </div>
+    </div>
+  </div>
+
+  <!-- PAGE: LOG (video_log_db) -->
+  <div id="page-log" class="page">
+    <div class="page-header">
+      <h2>Log de Execução</h2>
+      <div style="display:flex;gap:8px;align-items:center">
+        <input id="log-filter-data" type="text" placeholder="YYYY-MM-DD" style="width:120px;padding:6px 8px;font-size:11px">
+        <input id="log-filter-canal" type="text" placeholder="Canal (EN, DE...)" style="width:130px;padding:6px 8px;font-size:11px">
+        <label style="font-size:11px;display:flex;align-items:center;gap:4px">
+          <input id="log-filter-erros" type="checkbox"> Só erros
+        </label>
+        <button class="btn btn-sm" onclick="logRefresh()">Atualizar</button>
+      </div>
+    </div>
+
+    <div id="log-resumo" style="margin-bottom:12px;font-size:11px;color:var(--text-sec)"></div>
+
+    <div style="overflow-x:auto;background:var(--bg-2);border-radius:6px">
+      <table id="log-table" style="width:100%;border-collapse:collapse;font-size:11px">
+        <thead style="background:var(--bg-3);position:sticky;top:0">
+          <tr>
+            <th style="padding:8px;text-align:left">Data</th>
+            <th style="padding:8px;text-align:left">Canal</th>
+            <th style="padding:8px;text-align:left">Template</th>
+            <th style="padding:8px;text-align:center">Roteiro</th>
+            <th style="padding:8px;text-align:center">Narração</th>
+            <th style="padding:8px;text-align:center">Render</th>
+          </tr>
+        </thead>
+        <tbody id="log-tbody">
+          <tr><td colspan="6" style="padding:20px;text-align:center;color:var(--text-sec)">Carregando...</td></tr>
+        </tbody>
+      </table>
     </div>
   </div>
 
@@ -3751,6 +3832,7 @@ function _loadPageData(page) {
   if (page === 'thumbnail') { carregarThumbPage(); }
   if (page === 'monitor') { refreshMonitor(); startMonitorPolling(); }
   else { stopMonitorPolling(); }
+  if (page === 'log') logRefresh();
 }
 
 function refreshCurrentPage() {
@@ -6462,6 +6544,97 @@ function renderTemasGrid() {
       + '</td></tr>';
   });
   tbody.innerHTML = html;
+  temasAplicarFiltro();
+}
+
+// === FILTRO DE LINHAS NO GRID TEMAS ===
+// Persiste em localStorage. Default: mes atual.
+function _temasParseData(dataStr) {
+  // DD/MM/YYYY -> Date
+  var p = (dataStr || '').split('/');
+  if (p.length !== 3) return null;
+  return new Date(parseInt(p[2]), parseInt(p[1]) - 1, parseInt(p[0]));
+}
+
+function _temasDateISO(d) {
+  var m = String(d.getMonth() + 1).padStart(2, '0');
+  var dd = String(d.getDate()).padStart(2, '0');
+  return d.getFullYear() + '-' + m + '-' + dd;
+}
+
+function temasFiltroPreset(preset) {
+  var hoje = new Date();
+  hoje.setHours(0,0,0,0);
+  var start = null, end = null;
+  if (preset === 'hoje') {
+    start = end = _temasDateISO(hoje);
+  } else if (preset === '7d') {
+    var d7 = new Date(hoje); d7.setDate(d7.getDate() - 6);
+    start = _temasDateISO(d7); end = _temasDateISO(hoje);
+  } else if (preset === 'mes') {
+    var m0 = new Date(hoje.getFullYear(), hoje.getMonth(), 1);
+    var m1 = new Date(hoje.getFullYear(), hoje.getMonth() + 1, 0);
+    start = _temasDateISO(m0); end = _temasDateISO(m1);
+  } else if (preset === 'tudo') {
+    start = ''; end = '';
+  }
+  localStorage.setItem('temasFiltro', JSON.stringify({preset: preset, start: start, end: end}));
+  document.getElementById('temas-filter-start').value = start || '';
+  document.getElementById('temas-filter-end').value = end || '';
+  temasAplicarFiltro();
+}
+
+function temasFiltroRange() {
+  var s = document.getElementById('temas-filter-start').value;
+  var e = document.getElementById('temas-filter-end').value;
+  localStorage.setItem('temasFiltro', JSON.stringify({preset: 'custom', start: s, end: e}));
+  temasAplicarFiltro();
+}
+
+function temasAplicarFiltro() {
+  var raw = localStorage.getItem('temasFiltro');
+  var cfg = {preset: 'mes', start: '', end: ''};
+  if (raw) { try { cfg = JSON.parse(raw); } catch(e){} }
+  // Se preset=mes mas sem datas salvas, recalcula (p.ex. virada de mes)
+  if (cfg.preset === 'mes' && (!cfg.start || !cfg.end)) {
+    var hoje = new Date(); hoje.setHours(0,0,0,0);
+    var m0 = new Date(hoje.getFullYear(), hoje.getMonth(), 1);
+    var m1 = new Date(hoje.getFullYear(), hoje.getMonth() + 1, 0);
+    cfg.start = _temasDateISO(m0); cfg.end = _temasDateISO(m1);
+  }
+  // Atualiza inputs + highlight preset
+  var s = document.getElementById('temas-filter-start');
+  var e = document.getElementById('temas-filter-end');
+  if (s) s.value = cfg.start || '';
+  if (e) e.value = cfg.end || '';
+  document.querySelectorAll('[data-preset]').forEach(function(b) {
+    b.classList.toggle('btn-primary', b.dataset.preset === cfg.preset);
+  });
+
+  var tbody = document.getElementById('temas-tbody');
+  if (!tbody) return;
+  var rows = temasData.linhas || [];
+  var startD = cfg.start ? new Date(cfg.start) : null;
+  var endD = cfg.end ? new Date(cfg.end) : null;
+  var visiveis = 0, total = 0;
+  Array.from(tbody.children).forEach(function(tr) {
+    var ri = parseInt(tr.dataset.row);
+    if (isNaN(ri) || !rows[ri]) return;
+    total++;
+    var dataStr = rows[ri].data;
+    var d = _temasParseData(dataStr);
+    var ok = true;
+    if (!d) {
+      ok = !cfg.start && !cfg.end; // se tem filtro, esconde linhas sem data valida
+    } else {
+      if (startD && d < startD) ok = false;
+      if (endD && d > endD) ok = false;
+    }
+    tr.style.display = ok ? '' : 'none';
+    if (ok) visiveis++;
+  });
+  var info = document.getElementById('temas-filter-info');
+  if (info) info.textContent = visiveis + '/' + total + ' linhas';
 }
 
 function adicionarColunaTemas() {
@@ -8239,6 +8412,102 @@ async function refreshMonitor() {
     // Silently ignore fetch errors during polling
   }
 }
+
+// === VIDEO LOG DB ===
+
+async function logRefresh() {
+  var data = (document.getElementById('log-filter-data') || {}).value || '';
+  var canal = (document.getElementById('log-filter-canal') || {}).value || '';
+  var eo = (document.getElementById('log-filter-erros') || {}).checked || false;
+  var qs = new URLSearchParams();
+  if (data) qs.set('data', data);
+  if (canal) qs.set('canal', canal);
+  if (eo) qs.set('erros_only', 'true');
+
+  try {
+    var res = await fetch('/api/video-log?' + qs.toString());
+    var d = await res.json();
+    logRenderResumo(d.resumo || {});
+    logRenderTabela(d.videos || []);
+  } catch (e) {
+    document.getElementById('log-tbody').innerHTML = '<tr><td colspan="6" style="padding:20px;text-align:center;color:var(--warn)">Erro: ' + e.message + '</td></tr>';
+  }
+}
+
+function logRenderResumo(r) {
+  var el = document.getElementById('log-resumo');
+  if (!el) return;
+  var total = r.total_videos || 0;
+  var porData = r.por_data || {};
+  var datas = Object.keys(porData).sort().reverse().slice(0, 5);
+  var parts = ['<b>Total no banco:</b> ' + total + ' videos'];
+  datas.forEach(function(d) {
+    var s = porData[d];
+    parts.push(d + ': ' + s.render_ok + '/' + s.total + ' OK' +
+      (s.render_erro ? ', ' + s.render_erro + ' erros' : '') +
+      (s.narr_fallback ? ', ' + s.narr_fallback + ' narr fallback' : '') +
+      (s.storage_drive ? ', ' + s.storage_drive + ' em Drive' : '')
+    );
+  });
+  el.innerHTML = parts.join(' &nbsp;&nbsp;|&nbsp;&nbsp; ');
+}
+
+function logRenderTabela(videos) {
+  var tb = document.getElementById('log-tbody');
+  if (!videos.length) {
+    tb.innerHTML = '<tr><td colspan="6" style="padding:20px;text-align:center;color:var(--text-sec)">Nenhum registro</td></tr>';
+    return;
+  }
+  var rows = videos.map(function(v) {
+    return '<tr style="border-top:1px solid var(--border)">' +
+      '<td style="padding:6px 8px">' + (v.data || '') + '</td>' +
+      '<td style="padding:6px 8px"><b>' + (v.canal || '') + '</b></td>' +
+      '<td style="padding:6px 8px;color:var(--text-sec)">' + (v.template || '') + '</td>' +
+      '<td style="padding:6px 8px;text-align:center">' + logEtapa(v.roteiro, 'roteiro') + '</td>' +
+      '<td style="padding:6px 8px;text-align:center">' + logEtapa(v.narracao, 'narracao') + '</td>' +
+      '<td style="padding:6px 8px;text-align:center">' + logEtapa(v.render, 'render') + '</td>' +
+    '</tr>';
+  });
+  tb.innerHTML = rows.join('');
+}
+
+function logEtapa(et, tipo) {
+  if (!et || et.status === 'pendente') {
+    return '<span style="color:var(--text-sec)">—</span>';
+  }
+  var st = et.status;
+  var cor = st === 'ok' ? '#2ecc71' : (st === 'erro' ? '#e74c3c' : '#f39c12');
+  var icon = st === 'ok' ? '&#10003;' : (st === 'erro' ? '&#10007;' : '...');
+
+  var detail = '';
+  if (tipo === 'roteiro') {
+    detail = (et.provider || '') + (et.fallback ? ' (fallback)' : '');
+    if (et.chars) detail += ' ' + et.chars + 'ch';
+  } else if (tipo === 'narracao') {
+    detail = (et.provider || '') + (et.fallback ? ' (Inworld fallback)' : '');
+    if (et.chunks) detail += ' ' + et.chunks + ' chunks';
+  } else if (tipo === 'render') {
+    detail = et.local_storage === 'google_drive' ? 'Drive' : 'Local';
+    if (et.tamanho_mb) detail += ' · ' + et.tamanho_mb.toFixed(0) + 'MB';
+  }
+  if (et.erro) detail = et.erro.substring(0, 40);
+
+  var tooltip = JSON.stringify(et).replace(/"/g, '&quot;');
+  return '<span title="' + tooltip + '" style="color:' + cor + ';font-weight:bold">' + icon + '</span>' +
+    '<div style="font-size:10px;color:var(--text-sec);margin-top:2px">' + detail + '</div>';
+}
+
+// Enter nos filtros dispara refresh
+document.addEventListener('keypress', function(e) {
+  if (e.key === 'Enter' && _currentPage === 'log') {
+    if (e.target.id === 'log-filter-data' || e.target.id === 'log-filter-canal') {
+      logRefresh();
+    }
+  }
+});
+document.addEventListener('change', function(e) {
+  if (e.target.id === 'log-filter-erros' && _currentPage === 'log') logRefresh();
+});
 
 </script>
 <button id="btn-refresh-page" onclick="refreshCurrentPage()" title="Atualizar aba atual" style="position:fixed;bottom:20px;right:16px;z-index:900;width:44px;height:44px;border-radius:50%;background:var(--panel);border:1px solid var(--border);color:var(--accent);cursor:pointer;font-size:20px;box-shadow:0 2px 8px rgba(0,0,0,0.3)">&#x21bb;</button>
