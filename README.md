@@ -9,7 +9,7 @@ Automated YouTube video production pipeline. Replaces Adobe Premiere Pro with Py
 Complete pipeline from theme to published video:
 
 1. **Script Generation** - Multi-step LLM pipelines (Claude, GPT, Gemini) generate long-form scripts
-2. **Narration** - TTS via ai33.pro (ElevenLabs + Minimax) with automatic chunking for long texts
+2. **Narration** - TTS via ai33.pro (ElevenLabs + Minimax) with automatic chunking for long texts, and Inworld TTS as fallback provider
 3. **Video Assembly** - Ken Burns effects on images, subtitle burning, overlays, audio mixing
 4. **Production** - "Produzir Tudo" runs the entire pipeline for all channels of a date
 
@@ -19,7 +19,7 @@ Complete pipeline from theme to published video:
 - **LLM Pipelines** - Multi-step script generation with 3 step types (LLM, Text, Code)
 - **Multiple LLM Providers** - Claude API, Claude CLI (Max plan, $0), GPT, Gemini (free tier)
 - **Fallback Chain** - If one provider fails, automatically tries the next
-- **TTS Narration** - ElevenLabs + Minimax with voice cloning support
+- **TTS Narration** - ElevenLabs + Minimax (primary) with Inworld TTS fallback (automatic on primary failure), voice cloning on both platforms
 - **Ken Burns Effects** - Smooth zoom/pan on images (OpenCV warpAffine, zero jitter)
 - **Subtitle System** - Whisper transcription → SRT correction → ASS with custom styling
 - **Visual Adjustments** - Exposure, contrast, saturation, color balance, vignette
@@ -27,6 +27,9 @@ Complete pipeline from theme to published video:
 - **Metadata Stripping** - Removes encoder fingerprints from final MP4
 - **Parallel Processing** - Roteiros generated in parallel, render queue with pipeline
 - **Auto/Manual Modes** - Separated states, shared render queue, no conflicts
+- **Remote Render Worker** - VPS coordinates jobs, local GPU worker (RTX 3060) renders, stale-job recovery on worker crash
+- **Whisper Crash Isolation** - Transcription in subprocess, auto-fallback to CPU on native cuDNN crash
+- **Loop Repass** - End-of-loop reprocessing of dates with errors (max 2 retries per date)
 - **Resilience** - Auto-resume, health monitor, timeouts, retry on failures
 - **Chat Assistant** - Integrated Claude chat for theme/title generation
 
@@ -70,7 +73,8 @@ python app.py
 ## Configuration
 
 ### API Keys Required
-- **ai33.pro** - TTS narration (ElevenLabs + Minimax proxy)
+- **ai33.pro** - Primary TTS (ElevenLabs + Minimax proxy)
+- **Inworld TTS** - Secondary TTS fallback (optional, triggers automatically on primary failure)
 - **Claude/GPT/Gemini** - Script generation (at least one)
 - **Claude CLI** - Free with Max plan (optional, recommended)
 
@@ -85,12 +89,15 @@ Multi-step LLM chains for script generation. Each step can be LLM (API call), Te
 Single-file SPA: FastAPI backend serves an inline HTML/JS dashboard. All UI lives inside `app.py` as a Python string.
 
 Key modules:
-- `app.py` - Server + UI (~7400 lines)
+- `app.py` - Server + UI (~8000 lines)
 - `engine.py` - Video assembly engine
-- `orchestrator.py` - Production orchestrator (3-phase pipeline)
+- `orchestrator.py` - Production orchestrator (3-phase pipeline + end-of-loop repass)
 - `scriptwriter.py` - LLM pipeline executor
-- `narrator.py` - TTS narration with chunking
-- `render_queue.py` - Shared render queue
+- `narrator.py` - Primary TTS narration (ai33.pro) with chunking
+- `narrator_inworld.py` - Fallback TTS narration (Inworld)
+- `render_queue.py` - Shared render queue with stale-job recovery
+- `render_worker.py` - Remote GPU worker (runs on operator's PC)
+- `_whisper_subprocess.py` - Isolated Whisper transcription (crash protection)
 - `production_log.py` - Persistent production state
 
 See `CLAUDE.md` for full technical documentation.

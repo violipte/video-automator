@@ -13,6 +13,7 @@ RESILIENCIA:
 """
 
 import json
+import sys
 import time
 import threading
 import traceback
@@ -25,9 +26,12 @@ import production_log
 import scriptwriter
 import narrator
 import render_queue
-import transcriber
-import subtitle_fixer
-from engine import VideoEngine
+
+# Imports GPU — so necessarios em modo local (render_queue.REMOTE_MODE=False)
+if not render_queue.REMOTE_MODE:
+    import transcriber
+    import subtitle_fixer
+    from engine import VideoEngine
 
 BASE_DIR = Path(__file__).parent
 TEMAS_FILE = BASE_DIR / "temas.json"
@@ -69,6 +73,17 @@ def _obter_config():
     return scriptwriter.carregar_config()
 
 
+def _export_base():
+    """Retorna o diretorio base de exports. Configuravel via config.json."""
+    config = _obter_config()
+    base = config.get("export_base", "")
+    if base:
+        return Path(base)
+    if sys.platform == "win32":
+        return Path("F:/Canal Dark/Automator Exports")
+    return BASE_DIR / "exports"
+
+
 # === ESTADO GLOBAL ===
 estado = {
     "ativo": False,
@@ -97,12 +112,13 @@ def _render_com_timeout(engine, srt_path, timeout_s):
     t.join(timeout=timeout_s)
 
     if t.is_alive():
-        for _ in range(3):
-            try:
-                sp.run(["taskkill", "/F", "/IM", "ffmpeg.exe"], capture_output=True, timeout=10)
-            except Exception:
-                pass
-            time.sleep(1)
+        if sys.platform == "win32":
+            for _ in range(3):
+                try:
+                    sp.run(["taskkill", "/F", "/IM", "ffmpeg.exe"], capture_output=True, timeout=10)
+                except Exception:
+                    pass
+                time.sleep(1)
         result["ok"] = False
         result["erro"] = f"Video render timeout ({timeout_s // 60}min)"
 
@@ -194,7 +210,7 @@ def _renderizar_canal(i, job, narr_path, data_formatada, data_ymd, data_pasta):
         return False
 
     # Salvar em Automator Exports/YYYY-MM-DD/Videos/
-    EXPORT_BASE = Path("F:/Canal Dark/Automator Exports")
+    EXPORT_BASE = _export_base()
     video_pasta = EXPORT_BASE / data_pasta / "Videos"
     video_pasta.mkdir(parents=True, exist_ok=True)
     video_nome = f"{tmpl.get('tag', tag)}_{data_ymd}_01.mp4"
@@ -308,7 +324,7 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
     data_pasta = f"{yyyy}-{mm}-{dd}"
 
     # === PASTA DE DATA (fonte da verdade) ===
-    EXPORT_BASE = Path("F:/Canal Dark/Automator Exports")
+    EXPORT_BASE = _export_base()
     pasta_data = EXPORT_BASE / data_pasta
     pasta_roteiros = pasta_data / "Roteiros"
     pasta_narracoes = pasta_data / "Narracoes"
@@ -456,16 +472,52 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
             evt = threading.Event()
             _render_pendentes.append(evt)
 
-            def _do_render():
-                _renderizar_canal(i, job, narr_path_val, data_formatada, data_ymd, data_pasta)
-
-            def _on_done():
+            def _on_done(video_path=""):
+                # Em modo remoto, o worker reporta conclusao via API
+                if render_queue.REMOTE_MODE:
+                    production_log.atualizar_canal(i, etapa="concluido", etapa_detalhe=f"OK ({video_path.split('/')[-1] if video_path else 'render remoto'})", video_path=video_path, progresso=100, fim=time.time())
+                    production_log.adicionar_log(f"{job['tag']}: Video OK -> {video_path or '(render remoto)'}")
+                    temas_data_local = _carregar_temas()
+                    if job["key"] in temas_data_local.get("celulas", {}):
+                        temas_data_local["celulas"][job["key"]]["done"] = True
+                        temas_data_local["celulas"][job["key"]]["done_type"] = "auto"
+                        _salvar_temas(temas_data_local)
                 evt.set()
 
             def _on_error(erro):
+                if render_queue.REMOTE_MODE:
+                    production_log.atualizar_canal(i, etapa="erro", erro=str(erro))
+                    production_log.adicionar_log(f"{job['tag']}: ERRO render remoto - {erro}")
                 evt.set()
 
-            render_queue.enfileirar(job_id, _do_render, fonte="auto", on_done=_on_done, on_error=_on_error)
+            if render_queue.REMOTE_MODE:
+                # Modo remoto: enviar dados serializaveis pro worker externo
+                EXPORT_BASE = _export_base()
+                video_pasta = EXPORT_BASE / data_pasta / "Videos"
+                video_nome = f"{job['template'].get('tag', job['tag'])}_{data_ymd}_01.mp4"
+
+                job_data = {
+                    "canal_idx": i,
+                    "tag": job["tag"],
+                    "key": job["key"],
+                    "template_id": job.get("template_id", ""),
+                    "template": job["template"],
+                    "narr_filename": Path(str(narr_path_val)).name,
+                    "narr_path_vps": str(narr_path_val),
+                    "idioma": job["template"].get("idioma", "en"),
+                    "data_formatada": data_formatada,
+                    "data_ymd": data_ymd,
+                    "data_pasta": data_pasta,
+                    "video_pasta": str(video_pasta),
+                    "video_nome": video_nome,
+                }
+                production_log.atualizar_canal(i, etapa="video", etapa_detalhe="Aguardando render worker...", inicio=time.time())
+                render_queue.enfileirar(job_id, fonte="auto", on_done=_on_done, on_error=_on_error, job_data=job_data)
+            else:
+                # Modo local: callable direto
+                def _do_render():
+                    _renderizar_canal(i, job, narr_path_val, data_formatada, data_ymd, data_pasta)
+                render_queue.enfileirar(job_id, _do_render, fonte="auto", on_done=_on_done, on_error=_on_error)
 
         # --- PRIMEIRO: enfileirar render dos que JA TEM MP3 ---
         canais_sem_narracao = []
@@ -522,104 +574,164 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
                 production_log.atualizar_canal(i, etapa="erro", erro="Sem API key ai33.pro")
                 continue
 
-            production_log.atualizar_canal(i, etapa="narracao", etapa_detalhe="Gerando...", inicio=time.time())
-            production_log.adicionar_log(f"{tag}: Gerando narracao ({len(cel.get('roteiro', ''))} chars)...")
+            MAX_NARR_RETRIES = 2
 
-            # Esperar narracao anterior terminar
-            for _ in range(60):
-                if not narrator.estado_narracao_auto.get("ativo"):
-                    break
-                time.sleep(2)
-
-            try:
-                result = narrator.iniciar_narracao(
-                    api_key, job["voice_provider"], voice_id,
-                    cel.get("roteiro", ""), narr_nome,
-                    pasta=str(pasta_narracoes),
-                    speed=job["voice_speed"], pitch=job["voice_pitch"],
-                    modo="auto",
-                )
-
-                if not result.get("ok"):
-                    production_log.atualizar_canal(i, etapa="erro", erro=result.get("erro", ""))
-                    production_log.adicionar_log(f"{tag}: ERRO narracao - {result.get('erro', '')}")
-                    continue
-
-                # Chunking sequencial retorna audio_local direto (sem poll)
-                if result.get("audio_local"):
-                    narr_result_path = Path(result["audio_local"])
-                    if narr_result_path.exists():
-                        production_log.atualizar_canal(i, etapa_detalhe=f"OK ({narr_result_path.name})", narracao_path=str(narr_result_path))
-                        production_log.adicionar_log(f"{tag}: Narracao OK -> {narr_result_path.name}")
-                        _enfileirar_render(i, job, narr_result_path)
-                        continue
-                    else:
-                        production_log.atualizar_canal(i, etapa="erro", erro="Audio chunked nao encontrado")
-                        production_log.adicionar_log(f"{tag}: ERRO - audio chunked nao encontrado")
-                        continue
-
-                # Modo single (sem chunking): poll normal
-                narr_ok = False
-                poll_sem_progresso = 0
-                narr_deadline = time.time() + TIMEOUT_NARRACAO
-
-                while time.time() < narr_deadline:
-                    st = narrator.poll_narracao(modo="auto")
-                    if st.get("status") == "idle" and not st.get("ativo"):
-                        poll_sem_progresso += 1
-                        if poll_sem_progresso > 5:
-                            expected = narr_subpasta / f"{narr_nome}.mp3"
-                            if expected.exists():
-                                narr_path = expected
-                                narr_ok = True
-                                production_log.adicionar_log(f"{tag}: Narracao recuperada de {expected.name}")
-                                break
-                            else:
-                                production_log.atualizar_canal(i, etapa="erro", erro="Narracao perdida (estado idle)")
-                                production_log.adicionar_log(f"{tag}: ERRO - narracao perdida")
-                                break
-                    if st.get("status") == "done":
-                        narr_path_result = st.get("audio_local") or ""
-                        if narr_path_result and Path(narr_path_result).exists():
-                            production_log.atualizar_canal(i, etapa_detalhe=f"OK ({Path(narr_path_result).name})", narracao_path=narr_path_result)
-                            production_log.adicionar_log(f"{tag}: Narracao OK -> {Path(narr_path_result).name}")
-                            narr_path = Path(narr_path_result)
-                            narr_ok = True
-                        else:
-                            expected = narr_subpasta / f"{narr_nome}.mp3"
-                            if expected.exists():
-                                narr_path = expected
-                                narr_ok = True
-                                production_log.adicionar_log(f"{tag}: Narracao encontrada em {expected.name}")
-                            else:
-                                production_log.atualizar_canal(i, etapa="erro", erro="Narracao done mas arquivo nao encontrado")
-                                production_log.adicionar_log(f"{tag}: ERRO - arquivo nao encontrado apos narracao")
-                        break
-                    elif st.get("status") == "error":
-                        production_log.atualizar_canal(i, etapa="erro", erro=st.get("erro", ""))
-                        production_log.adicionar_log(f"{tag}: ERRO narracao - {st.get('erro', '')}")
-                        break
-                    time.sleep(3)
+            for narr_attempt in range(MAX_NARR_RETRIES):
+                production_log.atualizar_canal(i, etapa="narracao", etapa_detalhe=f"Gerando...{' (retry ' + str(narr_attempt) + ')' if narr_attempt > 0 else ''}", inicio=time.time())
+                if narr_attempt == 0:
+                    production_log.adicionar_log(f"{tag}: Gerando narracao ({len(cel.get('roteiro', ''))} chars)...")
                 else:
-                    narrator.estado_narracao_auto["ativo"] = False
-                    narrator.estado_narracao_auto["status"] = "idle"
-                    production_log.atualizar_canal(i, etapa="erro", erro=f"Narracao timeout ({TIMEOUT_NARRACAO // 60}min)")
-                    production_log.adicionar_log(f"{tag}: ERRO narracao - timeout")
-                    continue
+                    production_log.adicionar_log(f"{tag}: Retentando narracao (tentativa {narr_attempt + 1}/{MAX_NARR_RETRIES})...")
 
-                if narr_ok:
-                    _enfileirar_render(i, job, narr_path)
-                else:
-                    if not any(c.get("etapa") == "erro" for idx, c in enumerate(production_log.obter_estado().get("canais", [])) if idx == i):
-                        production_log.atualizar_canal(i, etapa="erro", erro="MP3 nao encontrado apos geracao")
-                    continue
-
-            except Exception as e:
+                # Esperar narracao anterior terminar
+                for _ in range(60):
+                    if not narrator.estado_narracao_auto.get("ativo"):
+                        break
+                    time.sleep(2)
+                # Garantir estado limpo antes de nova tentativa
                 narrator.estado_narracao_auto["ativo"] = False
                 narrator.estado_narracao_auto["status"] = "idle"
-                production_log.atualizar_canal(i, etapa="erro", erro=str(e))
-                production_log.adicionar_log(f"{tag}: ERRO narracao - {e}")
+
+                narr_succeeded = False
+                try:
+                    result = narrator.iniciar_narracao(
+                        api_key, job["voice_provider"], voice_id,
+                        cel.get("roteiro", ""), narr_nome,
+                        pasta=str(pasta_narracoes),
+                        speed=job["voice_speed"], pitch=job["voice_pitch"],
+                        modo="auto",
+                    )
+
+                    if not result.get("ok"):
+                        production_log.adicionar_log(f"{tag}: ERRO narracao - {result.get('erro', '')}")
+                        if narr_attempt < MAX_NARR_RETRIES - 1:
+                            production_log.adicionar_log(f"{tag}: Aguardando 15s antes de retry...")
+                            time.sleep(15)
+                            continue
+                        production_log.atualizar_canal(i, etapa="erro", erro=result.get("erro", ""))
+                        break
+
+                    # Chunking sequencial retorna audio_local direto (sem poll)
+                    if result.get("audio_local"):
+                        narr_result_path = Path(result["audio_local"])
+                        if narr_result_path.exists():
+                            production_log.atualizar_canal(i, etapa_detalhe=f"OK ({narr_result_path.name})", narracao_path=str(narr_result_path))
+                            production_log.adicionar_log(f"{tag}: Narracao OK -> {narr_result_path.name}")
+                            _enfileirar_render(i, job, narr_result_path)
+                            narr_succeeded = True
+                            break
+                        else:
+                            production_log.adicionar_log(f"{tag}: ERRO - audio chunked nao encontrado")
+                            if narr_attempt < MAX_NARR_RETRIES - 1:
+                                time.sleep(15)
+                                continue
+                            production_log.atualizar_canal(i, etapa="erro", erro="Audio chunked nao encontrado")
+                            break
+
+                    # Modo single (sem chunking): poll normal
+                    narr_ok = False
+                    poll_sem_progresso = 0
+                    narr_deadline = time.time() + TIMEOUT_NARRACAO
+
+                    while time.time() < narr_deadline:
+                        st = narrator.poll_narracao(modo="auto")
+                        if st.get("status") == "idle" and not st.get("ativo"):
+                            poll_sem_progresso += 1
+                            if poll_sem_progresso > 5:
+                                expected = pasta_narracoes / f"{narr_nome}.mp3"
+                                if expected.exists():
+                                    narr_path = expected
+                                    narr_ok = True
+                                    production_log.adicionar_log(f"{tag}: Narracao recuperada de {expected.name}")
+                                    break
+                                else:
+                                    production_log.adicionar_log(f"{tag}: ERRO - narracao perdida (idle)")
+                                    break
+                        if st.get("status") == "done":
+                            narr_path_result = st.get("audio_local") or ""
+                            if narr_path_result and Path(narr_path_result).exists():
+                                production_log.atualizar_canal(i, etapa_detalhe=f"OK ({Path(narr_path_result).name})", narracao_path=narr_path_result)
+                                production_log.adicionar_log(f"{tag}: Narracao OK -> {Path(narr_path_result).name}")
+                                narr_path = Path(narr_path_result)
+                                narr_ok = True
+                            else:
+                                expected = pasta_narracoes / f"{narr_nome}.mp3"
+                                if expected.exists():
+                                    narr_path = expected
+                                    narr_ok = True
+                                    production_log.adicionar_log(f"{tag}: Narracao encontrada em {expected.name}")
+                                else:
+                                    production_log.adicionar_log(f"{tag}: ERRO - arquivo nao encontrado apos narracao")
+                            break
+                        elif st.get("status") == "error":
+                            production_log.adicionar_log(f"{tag}: ERRO narracao - {st.get('erro', '')}")
+                            break
+                        time.sleep(3)
+                    else:
+                        # Timeout
+                        narrator.estado_narracao_auto["ativo"] = False
+                        narrator.estado_narracao_auto["status"] = "idle"
+                        production_log.adicionar_log(f"{tag}: Narracao timeout ({TIMEOUT_NARRACAO // 60}min)")
+                        if narr_attempt < MAX_NARR_RETRIES - 1:
+                            production_log.adicionar_log(f"{tag}: Retentando apos timeout...")
+                            time.sleep(10)
+                            continue
+                        production_log.atualizar_canal(i, etapa="erro", erro=f"Narracao timeout apos {MAX_NARR_RETRIES} tentativas")
+                        break
+
+                    if narr_ok:
+                        _enfileirar_render(i, job, narr_path)
+                        narr_succeeded = True
+                        break
+                    else:
+                        # Narration failed, retry
+                        if narr_attempt < MAX_NARR_RETRIES - 1:
+                            time.sleep(15)
+                            continue
+                        production_log.atualizar_canal(i, etapa="erro", erro="MP3 nao encontrado apos geracao")
+                        break
+
+                except Exception as e:
+                    production_log.adicionar_log(f"{tag}: ERRO narracao exception - {e}")
+                    if narr_attempt < MAX_NARR_RETRIES - 1:
+                        time.sleep(15)
+                        continue
+                    production_log.atualizar_canal(i, etapa="erro", erro=str(e))
+                    break
+
+            if narr_succeeded:
                 continue
+
+            # === FALLBACK INWORLD ===
+            # Todos os retries do provedor primario falharam. Tenta Inworld se configurado.
+            fallback_cfg = (job.get("template") or {}).get("narracao_voz", {}).get("fallback")
+            inworld_key = config.get("inworld_api_key", "")
+            if fallback_cfg and fallback_cfg.get("provider") == "inworld" and inworld_key:
+                fb_voice = fallback_cfg.get("voice_id", "")
+                fb_model = fallback_cfg.get("model", "inworld-tts-1.5-max")
+                if fb_voice:
+                    production_log.atualizar_canal(i, etapa="narracao", etapa_detalhe="Fallback Inworld...", inicio=time.time())
+                    production_log.adicionar_log(f"{tag}: Fallback Inworld ({fb_voice}) apos {MAX_NARR_RETRIES} falhas no primario")
+                    try:
+                        import narrator_inworld
+                        fb_result = narrator_inworld.narrar_inworld_chunked(
+                            api_key=inworld_key,
+                            voice_id=fb_voice,
+                            texto=cel.get("roteiro", ""),
+                            nome_saida=narr_nome,
+                            pasta=str(pasta_narracoes),
+                            model=fb_model,
+                        )
+                        if fb_result.get("ok"):
+                            fb_path = Path(fb_result["audio_local"])
+                            production_log.atualizar_canal(i, etapa_detalhe=f"OK fallback ({fb_path.name})", narracao_path=str(fb_path), erro="")
+                            production_log.adicionar_log(f"{tag}: Fallback Inworld OK -> {fb_path.name}")
+                            _enfileirar_render(i, job, fb_path)
+                            continue
+                        else:
+                            production_log.adicionar_log(f"{tag}: Fallback Inworld falhou - {fb_result.get('erro', '')}")
+                    except Exception as e:
+                        production_log.adicionar_log(f"{tag}: Fallback Inworld exception - {e}")
 
         # Garantir narracao nao ficou travada
         narrator.estado_narracao_auto["ativo"] = False
@@ -638,8 +750,22 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
         estado["ativo"] = False
 
 
+REPASS_MAX = 2  # Passagens de reprocessamento no final do loop (alem da primeira)
+
+
+def _data_teve_erro() -> bool:
+    """Verifica se a data acabada de processar deixou algum canal em 'erro'."""
+    try:
+        canais = production_log.obter_estado().get("canais", [])
+        return any(c.get("etapa") == "erro" for c in canais)
+    except Exception:
+        return False
+
+
 def _produzir_loop(data_idx_inicio: int, ordem_colunas: list = None):
-    """Produz em loop: completa uma data, avanca pra proxima ate acabar ou cancelar."""
+    """Produz em loop: completa uma data, avanca pra proxima ate acabar ou cancelar.
+    No fim do loop, reprocessa datas que terminaram com canais em erro (max REPASS_MAX vezes por data).
+    """
     global estado
     temas_data = _carregar_temas()
     linhas = temas_data.get("linhas", [])
@@ -650,6 +776,9 @@ def _produzir_loop(data_idx_inicio: int, ordem_colunas: list = None):
     estado["loop"] = True
     estado["loop_data_atual"] = data_idx_inicio
     estado["loop_total"] = total_datas - data_idx_inicio
+
+    # Datas que terminaram com erro na primeira passada (sao reprocessadas no final)
+    datas_com_erro: list[int] = []
 
     for data_idx in range(data_idx_inicio, total_datas):
         if estado["cancelado"]:
@@ -681,11 +810,43 @@ def _produzir_loop(data_idx_inicio: int, ordem_colunas: list = None):
         if estado["cancelado"]:
             break
 
+        # Marcar pra reprocessar se deixou canais em erro
+        if _data_teve_erro():
+            data_ref = linhas[data_idx].get("data", "")
+            production_log.adicionar_log(f"LOOP: Data {data_ref} terminou com erros, marcada para repass")
+            datas_com_erro.append(data_idx)
+
         # Recarregar temas pra proxima data (pode ter mudado)
         temas_data = _carregar_temas()
         linhas = temas_data.get("linhas", [])
         colunas = temas_data.get("colunas", [])
         celulas = temas_data.get("celulas", {})
+
+    # === REPASS: re-processa datas com erro ===
+    if datas_com_erro and not estado["cancelado"]:
+        production_log.adicionar_log(f"LOOP: Iniciando repass de {len(datas_com_erro)} datas com erros")
+
+        for pass_num in range(1, REPASS_MAX + 1):
+            restantes: list[int] = []
+            for data_idx in datas_com_erro:
+                if estado["cancelado"]:
+                    break
+                data_ref = linhas[data_idx].get("data", "") if data_idx < len(linhas) else f"idx={data_idx}"
+                production_log.adicionar_log(f"LOOP: Repass {pass_num}/{REPASS_MAX} da data {data_ref}")
+                estado["loop_data_atual"] = data_idx
+                produzir_data_completa(data_idx, ordem_colunas=ordem_colunas)
+                if _data_teve_erro():
+                    restantes.append(data_idx)
+                    production_log.adicionar_log(f"LOOP: Data {data_ref} ainda com erros apos repass {pass_num}")
+                else:
+                    production_log.adicionar_log(f"LOOP: Data {data_ref} OK apos repass {pass_num}")
+
+            if estado["cancelado"] or not restantes:
+                break
+            datas_com_erro = restantes
+
+        if datas_com_erro:
+            production_log.adicionar_log(f"LOOP: {len(datas_com_erro)} datas encerraram com erros apos {REPASS_MAX} repasses")
 
     estado["loop"] = False
     estado["ativo"] = False

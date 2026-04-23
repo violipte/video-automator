@@ -1,25 +1,33 @@
 @echo off
-title Instalar Video Automator
+title Instalar Video Automator - Render Worker
 echo ============================================
-echo  Video Automator - Instalacao Automatica
+echo  Video Automator - Render Worker (Local GPU)
 echo ============================================
 echo.
+echo  O servidor principal roda no VPS.
+echo  Este PC roda apenas o render worker (GPU).
+echo.
 
-:: Usa %~dp0 para pegar o caminho real da pasta (evita problemas com acentos)
 set "PASTA=%~dp0"
 
-:: Criar tarefa agendada que inicia com o Windows usando .pyw (sem janela)
-schtasks /create /tn "VideoAutomator" /tr "pythonw.exe \"%PASTA%starter.pyw\"" /sc onlogon /rl highest /f
+:: Remover tarefa antiga se existir
+schtasks /delete /tn "VideoAutomatorRenderWorker" /f >nul 2>&1
+schtasks /delete /tn "VideoAutomator" /f >nul 2>&1
+
+:: Criar tarefa agendada para o Render Worker
+schtasks /create /tn "VideoAutomatorRenderWorker" /tr "pythonw.exe \"%PASTA%render_worker_starter.pyw\"" /sc onlogon /rl highest /f
 
 if %errorlevel% equ 0 (
     echo.
-    echo [OK] Servico instalado com sucesso!
-    echo [OK] O Video Automator vai iniciar automaticamente com o Windows.
+    echo [OK] Render Worker instalado com sucesso!
+    echo [OK] Inicia automaticamente com o Windows.
+    echo [OK] Busca jobs de render do VPS e renderiza com GPU local.
     echo.
     echo Iniciando agora...
-    start "" pythonw.exe "%PASTA%starter.pyw"
-    timeout /t 4 >nul
-    echo Acesse: http://127.0.0.1:8500
+    start "" pythonw.exe "%PASTA%render_worker_starter.pyw"
+    timeout /t 5 >nul
+    echo Render Worker rodando em background.
+    echo Log: %PASTA%logs\render_worker.log
     echo.
 ) else (
     echo.

@@ -753,6 +753,116 @@ If an LLM step fails (even with fallback), the pipeline **aborts** instead of co
 
 ---
 
+## Inworld TTS Fallback (narrator_inworld.py)
+
+Secondary TTS provider (Inworld) activated automatically when the primary (ai33.pro/Minimax) exhausts retries. Prevents "stuck chunks" failures when ai33.pro is congested.
+
+### Architecture
+- Independent platform (not a proxy) — eliminates single point of failure
+- API: `https://api.inworld.ai/tts/v1/voice` (Basic Auth)
+- Model: `inworld-tts-1.5-max` ($10/1M chars) or `inworld-tts-1.5-mini` ($5/1M chars)
+- Synchronous request: returns MP3 base64 in `audioContent` field (no task_id, no polling)
+- Char limit per request: 1900 (vs 8000 Minimax) → more chunks but no queue waiting
+
+### Chunking and resume
+- `narrar_inworld_chunked(api_key, voice_id, texto, nome_saida, pasta, model)` generates full narration
+- Splits text by paragraphs, then sentences, max 1900 chars per chunk
+- Each chunk: 2 retries with exponential backoff (5s, 10s, 15s)
+- Chunks saved to disk as `_inworld_chunk_{nome}_{i}.mp3` — resume on restart
+- Final concat via FFmpeg `concat demuxer` (re-encode to 128kbps MP3)
+
+### Voice cloning
+- Endpoint: `POST /voices/v1/voices:clone`
+- Body: `{displayName, langCode=EN_US, voiceSamples:[{audioData: base64}]}`
+- Requirements: MP3/WAV 5-15s, max 4MB
+- Rate limit: 5 clones/minute
+- Returns `voiceId` like `default-{workspace}__{name}` directly (sync, no polling)
+- Voices appear in `GET /voices/v1/voices` with `source=IVC` (Instant Voice Clone)
+
+### Fallback trigger in orchestrator
+After `MAX_NARR_RETRIES=2` exhaust on primary (Minimax), orchestrator checks `template.narracao_voz.fallback`:
+```json
+"narracao_voz": {
+  "voice_id": "2592194",
+  "provider": "minimax_clone",
+  "speed": 0.95,
+  "pitch": 0,
+  "fallback": {
+    "voice_id": "default-xxx__bill",
+    "provider": "inworld",
+    "model": "inworld-tts-1.5-max"
+  }
+}
+```
+If fallback is configured and `config.inworld_api_key` exists, calls `narrator_inworld.narrar_inworld_chunked` before marking channel as error.
+
+### API key storage
+- `config.json` → `inworld_api_key` (Basic Auth token, already base64-encoded)
+
+---
+
+## Loop Repass (Blindagem extra)
+
+Feature that reprocesses dates that finished with channel errors at the end of a production loop. Acts as a safety net in case Inworld fallback also fails or ai33.pro had temporary outage.
+
+### Flow in `_produzir_loop` (orchestrator.py)
+1. Normal pass: iterates through dates from `data_idx_inicio`.
+2. After each `produzir_data_completa(data_idx)`, checks `production_log` for channels with `etapa=erro`.
+3. Dates with errors are added to `datas_com_erro[]`.
+4. After all dates processed, runs **repass** (max `REPASS_MAX=2`):
+   - Re-invokes `produzir_data_completa` for each flagged date.
+   - Since orchestrator already skips channels with existing MP4/MP3, only errored ones are retried.
+   - A date drops from the list if repass clears all its errors.
+5. Final log entry if any dates still have errors after max repasses.
+
+### Why this matters
+- ai33.pro and Inworld can both fail transiently. A single retry pass often resolves issues.
+- Dates without errors are never re-processed — zero overhead on healthy runs.
+- Cancellation via UI respected at every iteration (`estado["cancelado"]`).
+
+---
+
+## Render Worker (remote GPU mode)
+
+Local render worker runs on operator's PC (RTX 3060) while the VPS coordinates. Decouples heavy FFmpeg/Whisper workload from the public-facing server.
+
+### Architecture
+- `render_queue.REMOTE_MODE = True` on VPS → jobs accumulate in `_remote_jobs` list, waiting for worker pull
+- `render_worker.py` (local) polls `GET /api/render-worker/next-job` every 5s, processes, reports back
+- Auth: `Authorization: Bearer {worker_token}` from `config.render_worker_token`
+
+### Worker job lifecycle
+1. Worker polls → VPS marks job `processing`, records `started_at`
+2. Worker downloads MP3 from VPS (`GET /api/render-worker/download?path=...`), but prefers local copy when exists
+3. Transcribes (faster-whisper via `_whisper_subprocess.py` for crash isolation)
+4. Fixes subtitles (subtitle_fixer)
+5. Renders (VideoEngine → FFmpeg NVENC)
+6. Reports completion: `POST /api/render-worker/complete` with `{job_id, sucesso, video_path}`
+
+### Stale job recovery
+- `WORKER_JOB_TIMEOUT=300s` (5min): if worker dies mid-job, VPS re-queues as `pending` on next poll
+- Logic in `render_queue._recuperar_jobs_travados()`, triggered at start of `proximo_job_remoto()`
+
+### Whisper crash isolation (_whisper_subprocess.py)
+- Problem: `faster-whisper`/CTranslate2 occasionally segfaults on cuDNN load (native crash, kills parent Python)
+- Solution: Whisper runs in subprocess; stdout emits JSON events per segment, final segments assembled in parent
+- If subprocess exits non-zero (segfault), parent falls back to CPU (`compute_type=int8`) automatically
+- No more silent worker deaths mid-transcription
+
+### worker_config.json
+```json
+{
+  "vps_url": "http://85.239.243.215:8500",
+  "worker_token": "...",
+  "poll_interval": 5,
+  "temp_dir": ".../temp",
+  "cache_dir": ".../cache",
+  "export_base": "F:/Canal Dark/Automator Exports"
+}
+```
+
+---
+
 ## Chat System (app.py)
 
 ### Direct API (not Claude CLI)
@@ -834,7 +944,13 @@ See `BACKLOG.txt` for the full list. Key pending items by priority:
 - Monitor: detailed render progress (clips count, ETA)
 - Parallel narrations (Etapa B)
 
-### DONE (this session)
+### DONE (recent sessions)
+- **Inworld TTS fallback**: `narrator_inworld.py` + automatic trigger after Minimax MAX_NARR_RETRIES exhaust
+- **Template schema**: `narracao_voz.fallback` field with Inworld provider/voice_id/model
+- **Voice cloning Inworld**: 8 clones (Arabella, Bill, Brian, Elara, Joanne, Knightley, Scarlet, Valentino) via `/voices/v1/voices:clone`
+- **Loop repass**: `REPASS_MAX=2` re-processes dates that finished with errors at end of loop
+- **Whisper crash isolation**: `_whisper_subprocess.py` runs faster-whisper in subprocess with auto-fallback CPU on native crash
+- **Stale render job recovery**: `WORKER_JOB_TIMEOUT=300s` (was 7200s) reduces recovery time for dead workers
 - Thumbnail AI generation (ai33.pro /v1i endpoints, per-template thumb_config with prompt pools)
 - Claude CLI --system-prompt as list args (no shell=True, no temp files)
 - Claude CLI output cleanup (regex strips preambles, timestamps, section headers)

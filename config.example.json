@@ -1,5 +1,7 @@
 {
   "ai33_api_key": "your-ai33-pro-api-key",
+  "inworld_api_key": "your-inworld-basic-auth-key",
+  "render_worker_token": "long-random-token-for-remote-render-worker",
   "supabase_url": "",
   "supabase_key": "",
   "sheets_id": "",

@@ -12,6 +12,12 @@ from datetime import datetime
 
 import httpx
 
+# Cliente httpx compartilhado com connection pooling (evita esgotamento de portas)
+_http_client = httpx.Client(
+    timeout=httpx.Timeout(300.0, connect=15.0),
+    limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+)
+
 BASE_DIR = Path(__file__).parent
 PIPELINES_FILE = BASE_DIR / "pipelines.json"
 CONFIG_FILE = BASE_DIR / "config.json"
@@ -74,7 +80,7 @@ def listar_modelos(provedor: str, api_key: str) -> list:
     """Consulta a API do provedor e retorna lista de modelos disponíveis."""
     try:
         if provedor == "claude":
-            resp = httpx.get(
+            resp = _http_client.get(
                 "https://api.anthropic.com/v1/models",
                 headers={
                     "x-api-key": api_key,
@@ -87,7 +93,7 @@ def listar_modelos(provedor: str, api_key: str) -> list:
             return sorted([m["id"] for m in data.get("data", [])], reverse=True)
 
         elif provedor == "gpt":
-            resp = httpx.get(
+            resp = _http_client.get(
                 "https://api.openai.com/v1/models",
                 headers={"Authorization": f"Bearer {api_key}"},
                 timeout=15.0,
@@ -101,7 +107,7 @@ def listar_modelos(provedor: str, api_key: str) -> list:
             return sorted(filtrados, reverse=True) if filtrados else sorted(modelos[:30], reverse=True)
 
         elif provedor == "gemini":
-            resp = httpx.get(
+            resp = _http_client.get(
                 f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}",
                 timeout=15.0,
             )
@@ -158,7 +164,7 @@ def _obter_fallback_credencial(provedor_atual: str = "") -> dict:
 
 def _chamar_claude(system_msg: str, user_msg: str, api_key: str, model: str) -> str:
     for attempt in range(3):
-        resp = httpx.post(
+        resp = _http_client.post(
             "https://api.anthropic.com/v1/messages",
             headers={
                 "x-api-key": api_key,
@@ -186,7 +192,7 @@ def _chamar_gpt(system_msg: str, user_msg: str, api_key: str, model: str) -> str
     for attempt in range(3):
         # GPT 5.x usa max_completion_tokens, modelos antigos usam max_tokens
         token_param = "max_completion_tokens" if model.startswith("gpt-5") or model.startswith("o") else "max_tokens"
-        resp = httpx.post(
+        resp = _http_client.post(
             "https://api.openai.com/v1/chat/completions",
             headers={
                 "Authorization": f"Bearer {api_key}",
@@ -214,7 +220,7 @@ def _chamar_gpt(system_msg: str, user_msg: str, api_key: str, model: str) -> str
 def _chamar_gemini(system_msg: str, user_msg: str, api_key: str, model: str) -> str:
     # Retry com backoff para rate limiting (429)
     for attempt in range(3):
-        resp = httpx.post(
+        resp = _http_client.post(
             f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}",
             headers={"Content-Type": "application/json"},
             json={
@@ -645,7 +651,7 @@ def sync_supabase(tabela: str, dados: dict, config: dict) -> bool:
     if not url or not key:
         return False
     try:
-        resp = httpx.post(
+        resp = _http_client.post(
             f"{url}/rest/v1/{tabela}",
             headers={
                 "apikey": key,
@@ -669,7 +675,7 @@ def sync_sheets(dados: list, config: dict) -> bool:
     if not sheet_id or not api_key:
         return False
     try:
-        resp = httpx.post(
+        resp = _http_client.post(
             f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values/{sheet_name}!A:Z:append"
             f"?valueInputOption=USER_ENTERED&key={api_key}",
             json={"values": dados},

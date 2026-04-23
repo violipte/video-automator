@@ -13,32 +13,48 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
-# Adicionar DLLs NVIDIA ao PATH para CUDA funcionar
-import ctypes
-_nvidia_path = Path(sys.executable).parent / "Lib" / "site-packages" / "nvidia"
-if _nvidia_path.exists():
-    for dll_dir in _nvidia_path.glob("*/bin"):
-        os.add_dll_directory(str(dll_dir))
-        os.environ["PATH"] = str(dll_dir) + os.pathsep + os.environ.get("PATH", "")
-    # Forçar carregamento das DLLs críticas
-    _cublas = _nvidia_path / "cublas" / "bin" / "cublas64_12.dll"
-    if _cublas.exists():
-        ctypes.CDLL(str(_cublas))
+# Adicionar DLLs NVIDIA ao PATH para CUDA funcionar (so no Windows)
+if sys.platform == "win32":
+    import ctypes
+    _nvidia_path = Path(sys.executable).parent / "Lib" / "site-packages" / "nvidia"
+    if _nvidia_path.exists():
+        for dll_dir in _nvidia_path.glob("*/bin"):
+            os.add_dll_directory(str(dll_dir))
+            os.environ["PATH"] = str(dll_dir) + os.pathsep + os.environ.get("PATH", "")
+        _cublas = _nvidia_path / "cublas" / "bin" / "cublas64_12.dll"
+        if _cublas.exists():
+            ctypes.CDLL(str(_cublas))
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-import transcriber
-import subtitle_fixer
 import scriptwriter
 import narrator
-import thumbnail
 import production_log
 import orchestrator
 import render_queue
-from engine import VideoEngine
+
+# Imports GPU — so necessarios em modo local (render_queue.REMOTE_MODE=False)
+if not render_queue.REMOTE_MODE:
+    import transcriber
+    import subtitle_fixer
+    import thumbnail
+    from engine import VideoEngine
+else:
+    transcriber = None
+    subtitle_fixer = None
+    thumbnail = None
+    VideoEngine = None
+
+import httpx
+
+# Cliente httpx compartilhado com connection pooling (evita esgotamento de portas)
+_http_client = httpx.Client(
+    timeout=httpx.Timeout(300.0, connect=15.0),
+    limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+)
 
 # === CONFIG ===
 BASE_DIR = Path(__file__).parent
@@ -49,6 +65,11 @@ TEMP_DIR.mkdir(exist_ok=True)
 
 app = FastAPI(title="Video Automator")
 app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+# Servir arquivos estáticos (uploads de imagens, etc)
+_static_dir = BASE_DIR / "static"
+_static_dir.mkdir(exist_ok=True)
+app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")
 
 SERVER_START_TIME = time.time()
 
@@ -253,17 +274,28 @@ def listar_fontes():
         return _fontes_cache
     import subprocess as sp
     try:
-        r = sp.run(
-            ['powershell', '-Command',
-             '[System.Reflection.Assembly]::LoadWithPartialName("System.Drawing") | Out-Null; '
-             '(New-Object System.Drawing.Text.InstalledFontCollection).Families | ForEach-Object { $_.Name }'],
-            capture_output=True, text=True, timeout=10
-        )
-        fontes = sorted(set(f.strip() for f in r.stdout.strip().split('\n') if f.strip()))
+        if sys.platform == "win32":
+            r = sp.run(
+                ['powershell', '-Command',
+                 '[System.Reflection.Assembly]::LoadWithPartialName("System.Drawing") | Out-Null; '
+                 '(New-Object System.Drawing.Text.InstalledFontCollection).Families | ForEach-Object { $_.Name }'],
+                capture_output=True, text=True, timeout=10
+            )
+            fontes = sorted(set(f.strip() for f in r.stdout.strip().split('\n') if f.strip()))
+        else:
+            # Linux: usar fc-list
+            r = sp.run(['fc-list', '--format', '%{family}\n'], capture_output=True, text=True, timeout=10)
+            raw = set()
+            for line in r.stdout.strip().split('\n'):
+                name = line.split(',')[0].strip()
+                if name and not name.startswith('Noto Sans') and not name.startswith('Noto Serif') and not name.startswith('Noto Kufi') and not name.startswith('Noto Naskh') and not name.startswith('Noto Nastaliq'):
+                    raw.add(name)
+            # Adicionar as Noto principais
+            raw.update(["Noto Sans", "Noto Serif", "Noto Mono"])
+            fontes = sorted(raw)
     except Exception:
-        fontes = ["Arial", "Arial Black", "Calibri", "Cambria", "Comic Sans MS", "Consolas",
-                  "Courier New", "Georgia", "Impact", "Segoe UI", "Tahoma", "Times New Roman",
-                  "Trebuchet MS", "Verdana"]
+        fontes = ["DejaVu Sans", "Liberation Sans", "Liberation Serif", "Noto Sans",
+                  "Noto Serif", "Open Sans", "Roboto", "Ubuntu"]
     _fontes_cache = fontes
     return fontes
 
@@ -522,12 +554,13 @@ def _executar_batch():
         engine_atual = None
         estado_batch["ativo"] = False
         _salvar_estado_batch()
-        # Matar qualquer FFmpeg órfão
-        try:
-            import subprocess as _sp
-            _sp.run(["taskkill", "/F", "/IM", "ffmpeg.exe"], capture_output=True, timeout=5)
-        except Exception:
-            pass
+        # Matar qualquer FFmpeg órfão (so no Windows)
+        if sys.platform == "win32":
+            try:
+                import subprocess as _sp
+                _sp.run(["taskkill", "/F", "/IM", "ffmpeg.exe"], capture_output=True, timeout=5)
+            except Exception:
+                pass
 
 
 @app.post("/api/batch")
@@ -590,14 +623,24 @@ def cancelar_batch():
 def browse_filesystem(path: str = ""):
     """Navega pelo sistema de arquivos local para seleção de pastas/arquivos."""
     if not path:
-        # Listar drives no Windows
-        import string
-        drives = []
-        for letra in string.ascii_uppercase:
-            drive = f"{letra}:/"
-            if Path(drive).exists():
-                drives.append({"name": f"{letra}:", "path": drive, "type": "drive"})
-        return drives
+        if sys.platform == "win32":
+            # Listar drives no Windows
+            import string
+            drives = []
+            for letra in string.ascii_uppercase:
+                drive = f"{letra}:/"
+                if Path(drive).exists():
+                    drives.append({"name": f"{letra}:", "path": drive, "type": "drive"})
+            return drives
+        else:
+            # Linux: mostrar raizes uteis
+            roots = [
+                {"name": "/", "path": "/", "type": "drive"},
+                {"name": "home", "path": "/root", "type": "drive"},
+                {"name": "exports", "path": str(BASE_DIR / "exports"), "type": "drive"},
+                {"name": "static", "path": str(BASE_DIR / "static"), "type": "drive"},
+            ]
+            return [r for r in roots if Path(r["path"]).exists()]
 
     p = Path(path)
     if not p.exists():
@@ -1170,7 +1213,7 @@ def listar_modelos_imagem():
         return {"success": False, "models": []}
     try:
         import httpx
-        r = httpx.get("https://api.ai33.pro/v1i/models", headers={"xi-api-key": api_key}, timeout=15)
+        r = _http_client.get("https://api.ai33.pro/v1i/models", headers={"xi-api-key": api_key}, timeout=15)
         return r.json()
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -1184,7 +1227,7 @@ async def preco_thumb_ai(request: Request):
     api_key = config.get("ai33_api_key", "")
     try:
         import httpx
-        r = httpx.post("https://api.ai33.pro/v1i/task/price",
+        r = _http_client.post("https://api.ai33.pro/v1i/task/price",
             headers={"xi-api-key": api_key, "Content-Type": "application/json"},
             json={
                 "model_id": dados.get("model_id", ""),
@@ -1238,7 +1281,7 @@ async def gerar_thumb_template(request: Request):
 
     try:
         import httpx
-        r = httpx.post(
+        r = _http_client.post(
             "https://api.ai33.pro/v1i/task/generate-image",
             headers={"xi-api-key": api_key},
             data={
@@ -1282,7 +1325,7 @@ async def gerar_thumb_ai(request: Request):
         elif resolution:
             params["resolution"] = resolution
 
-        r = httpx.post(
+        r = _http_client.post(
             "https://api.ai33.pro/v1i/task/generate-image",
             headers={"xi-api-key": api_key},
             data={
@@ -1306,7 +1349,7 @@ def status_thumb_ai(task_id: str):
     api_key = config.get("ai33_api_key", "")
     try:
         import httpx
-        r = httpx.get(
+        r = _http_client.get(
             f"https://api.ai33.pro/v1/task/{task_id}",
             headers={"xi-api-key": api_key, "Content-Type": "application/json"},
             timeout=15,
@@ -1314,6 +1357,184 @@ def status_thumb_ai(task_id: str):
         return r.json()
     except Exception as e:
         return {"status": "error", "error_message": str(e)}
+
+
+# === API: UPLOAD + THUMB PREVIEW ===
+
+@app.post("/api/upload/image")
+async def upload_image(request: Request):
+    """Upload de imagem (thumb background, etc). Salva em static/uploads/."""
+    from fastapi.responses import JSONResponse
+    import base64 as _b64
+    dados = await request.json()
+    filename = dados.get("filename", "upload.png")
+    b64data = dados.get("data", "")  # base64 sem header
+    if not b64data:
+        raise HTTPException(400, "data obrigatorio (base64)")
+    upload_dir = BASE_DIR / "static" / "uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    # Nome unico
+    safe_name = filename.replace(" ", "_").replace("/", "_").replace("\\\\", "_")
+    dest = upload_dir / safe_name
+    with open(dest, "wb") as f:
+        f.write(_b64.b64decode(b64data))
+    return {"ok": True, "path": f"/static/uploads/{safe_name}", "full_path": str(dest)}
+
+
+@app.get("/api/thumb/preview-fixa")
+def thumb_preview_fixa(
+    img: str = "", texto_cima: str = "TEXTO DE CIMA", texto_baixo: str = "TEXTO DE BAIXO",
+    fonte_cima: str = "Arial", tamanho_cima: int = 72, cor_cima: str = "#FFFFFF",
+    outline_cor_cima: str = "#000000", outline_cima: int = 3, y_cima: int = 15,
+    bold_cima: bool = True, maiuscula_cima: bool = True,
+    fonte_baixo: str = "Arial", tamanho_baixo: int = 48, cor_baixo: str = "#FFD700",
+    outline_cor_baixo: str = "#000000", outline_baixo: int = 3, y_baixo: int = 85,
+    bold_baixo: bool = True, maiuscula_baixo: bool = False,
+):
+    """Gera preview da thumbnail fixa com texto sobreposto. Retorna JPEG base64."""
+    from PIL import Image, ImageDraw, ImageFont
+    import base64 as _b64
+    import io
+
+    # Carregar imagem de fundo
+    img_path = Path(img) if img else None
+    if not img_path or not img_path.exists():
+        # Gerar fundo preto 1280x720
+        bg = Image.new("RGB", (1280, 720), (30, 30, 40))
+    else:
+        bg = Image.open(str(img_path)).convert("RGB")
+        bg = bg.resize((1280, 720), Image.LANCZOS)
+
+    draw = ImageDraw.Draw(bg)
+
+    def _resolve_font(name):
+        """Resolve nome de fonte pro path do arquivo .ttf."""
+        # Tentar direto (funciona no Windows com fontes instaladas)
+        try:
+            ImageFont.truetype(name, 20)
+            return name
+        except Exception:
+            pass
+        # Linux: usar fc-match
+        try:
+            import subprocess as _sp
+            r = _sp.run(['fc-match', '--format', '%{file}', name], capture_output=True, text=True, timeout=5)
+            if r.stdout.strip():
+                return r.stdout.strip()
+        except Exception:
+            pass
+        return name
+
+    def _draw_text(text, fonte_name, tamanho, cor, outline_cor, outline_w, y_pct, bold, maiusc):
+        if not text:
+            return
+        if maiusc:
+            text = text.upper()
+        try:
+            font = ImageFont.truetype(_resolve_font(fonte_name), tamanho)
+        except Exception:
+            font = ImageFont.load_default()
+        # Centralizar
+        bbox = draw.textbbox((0, 0), text, font=font)
+        tw = bbox[2] - bbox[0]
+        x = (1280 - tw) // 2
+        y = int(720 * y_pct / 100)
+        # Outline
+        if outline_w > 0:
+            for dx in range(-outline_w, outline_w + 1):
+                for dy in range(-outline_w, outline_w + 1):
+                    if dx or dy:
+                        draw.text((x + dx, y + dy), text, font=font, fill=outline_cor)
+        draw.text((x, y), text, font=font, fill=cor)
+
+    _draw_text(texto_cima, fonte_cima, tamanho_cima, cor_cima, outline_cor_cima, outline_cima, y_cima, bold_cima, maiuscula_cima)
+    _draw_text(texto_baixo, fonte_baixo, tamanho_baixo, cor_baixo, outline_cor_baixo, outline_baixo, y_baixo, bold_baixo, maiuscula_baixo)
+
+    buf = io.BytesIO()
+    bg.save(buf, format="JPEG", quality=85)
+    b64 = _b64.b64encode(buf.getvalue()).decode()
+    return {"ok": True, "image": f"data:image/jpeg;base64,{b64}"}
+
+
+# === API: RENDER WORKER (para render remoto via VPS) ===
+
+def _verificar_worker_token(request: Request):
+    """Verifica token de autenticacao do render worker."""
+    config = scriptwriter.carregar_config()
+    token = config.get("render_worker_token", "")
+    if not token:
+        raise HTTPException(403, "render_worker_token nao configurado")
+    auth = request.headers.get("Authorization", "")
+    if auth != f"Bearer {token}":
+        raise HTTPException(401, "Token invalido")
+
+
+@app.get("/api/render-worker/next-job")
+def render_worker_next_job(request: Request):
+    """Retorna o proximo job pendente para o render worker."""
+    _verificar_worker_token(request)
+    job = render_queue.proximo_job_remoto()
+    if not job:
+        return JSONResponse(status_code=204, content=None)
+    return job
+
+
+@app.get("/api/render-worker/download")
+def render_worker_download(request: Request, path: str = ""):
+    """Serve arquivo (MP3 narracao) para o render worker baixar."""
+    _verificar_worker_token(request)
+    if not path:
+        raise HTTPException(400, "path obrigatorio")
+    from fastapi.responses import FileResponse
+    file_path = Path(path)
+    if not file_path.exists():
+        raise HTTPException(404, f"Arquivo nao encontrado: {path}")
+    return FileResponse(str(file_path), filename=file_path.name)
+
+
+@app.post("/api/render-worker/progress")
+async def render_worker_progress(request: Request):
+    """Render worker reporta progresso intermediario de um job."""
+    _verificar_worker_token(request)
+    dados = await request.json()
+    canal_idx = dados.get("canal_idx")
+    etapa_detalhe = dados.get("etapa_detalhe", "")
+    progresso = dados.get("progresso", 0)
+    if canal_idx is not None:
+        kwargs = {"etapa_detalhe": etapa_detalhe, "progresso": progresso}
+        # Resetar timer quando worker realmente começa a processar este canal
+        if progresso <= 10:
+            import time as _time
+            kwargs["inicio"] = _time.time()
+        production_log.atualizar_canal(canal_idx, **kwargs)
+    return {"ok": True}
+
+
+@app.post("/api/render-worker/complete")
+async def render_worker_complete(request: Request):
+    """Render worker reporta conclusao de um job."""
+    _verificar_worker_token(request)
+    dados = await request.json()
+    job_id = dados.get("job_id", "")
+    sucesso = dados.get("sucesso", False)
+    erro = dados.get("erro", "")
+    video_path = dados.get("video_path", "")
+
+    if not job_id:
+        raise HTTPException(400, "job_id obrigatorio")
+
+    render_queue.completar_job_remoto(job_id, sucesso, erro, video_path)
+    return {"ok": True}
+
+
+@app.get("/api/render-worker/status")
+def render_worker_status(request: Request):
+    """Status da fila de render (para o worker consultar)."""
+    _verificar_worker_token(request)
+    return {
+        "estado": render_queue.obter_estado(),
+        "jobs_pendentes": render_queue.jobs_remotos_pendentes(),
+    }
 
 
 # === API: MONITOR ===
@@ -1468,9 +1689,12 @@ def cancelar_producao_completa():
 @app.post("/api/producao-completa/reset")
 def resetar_producao():
     """Reset total: mata processos, limpa todos os estados."""
+    global _reset_timestamp
+    _reset_timestamp = time.time()  # Health monitor ignora por 120s
+    # Sinalizar cancelamento primeiro (pra thread parar se estiver viva)
     orchestrator.cancelar()
     orchestrator.estado["ativo"] = False
-    orchestrator.estado["cancelado"] = True  # Sinalizar pra thread parar
+    orchestrator.estado["cancelado"] = True
     orchestrator.estado["loop"] = False
     narrator.estado_narracao["ativo"] = False
     narrator.estado_narracao["status"] = "idle"
@@ -1484,12 +1708,16 @@ def resetar_producao():
     production_log._state = {
         "ativo": False, "data_ref": "", "data_idx": None, "ordem_colunas": None,
         "inicio": None, "total_canais": 0, "canal_atual": 0,
-        "canais": [], "log": [], "concluidos": 0, "erros": 0, "pulados": 0, "cancelado": False,
+        "canais": [], "log": [], "concluidos": 0, "erros": 0, "pulados": 0, "cancelado": True,
     }
     production_log._salvar()
-    # Matar FFmpeg
-    import subprocess as sp
-    sp.run(["taskkill", "/F", "/IM", "ffmpeg.exe"], capture_output=True, timeout=5)
+    # Limpar render queue
+    render_queue.limpar()
+    # Matar processos orfaos (so no Windows)
+    if sys.platform == "win32":
+        import subprocess as sp
+        sp.run(["taskkill", "/F", "/IM", "ffmpeg.exe"], capture_output=True, timeout=5)
+        sp.run(["taskkill", "/F", "/IM", "claude.cmd"], capture_output=True, timeout=5)
     return {"ok": True}
 
 
@@ -1586,7 +1814,7 @@ async def chat_api(request: Request):
 
     try:
         import httpx
-        resp = httpx.post(
+        resp = _http_client.post(
             "https://api.anthropic.com/v1/messages",
             headers={
                 "x-api-key": api_key,
@@ -1737,9 +1965,10 @@ textarea { resize:vertical; min-height:80px; }
 .slider-val { font-size:13px; color:var(--accent); min-width:40px; text-align:right; }
 
 /* TEMAS GRID */
-.temas-grid { width:100%; border-collapse:collapse; min-width:600px; }
-.temas-grid th { background:var(--panel); padding:8px 12px; font-size:12px; font-weight:600; color:var(--text); border:1px solid var(--border); cursor:grab; user-select:none; min-width:160px; position:relative; }
-.temas-grid th:first-child { min-width:100px; cursor:default; }
+.temas-grid { width:100%; border-collapse:separate; border-spacing:0; min-width:600px; }
+.temas-grid th { background:var(--panel); padding:8px 12px; font-size:12px; font-weight:600; color:var(--text); border:1px solid var(--border); cursor:grab; user-select:none; min-width:160px; position:sticky; top:0; z-index:5; }
+.temas-grid th:first-child { min-width:100px; cursor:default; left:0; z-index:7; }
+.temas-grid td:first-child { position:sticky; left:0; z-index:4; }
 .temas-grid th .col-actions { position:absolute; top:2px; right:4px; display:none; }
 .temas-grid th:hover .col-actions { display:flex; gap:2px; }
 .temas-grid td { padding:0; border:1px solid var(--border); vertical-align:top; position:relative; }
@@ -2302,7 +2531,7 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
         <button class="btn btn-secondary btn-sm" onclick="syncTemasSupabase()">Sync Supabase</button>
       </div>
     </div>
-    <div style="overflow-x:auto">
+    <div style="overflow:auto;max-height:calc(100vh - 200px)">
       <table class="temas-grid" id="temas-grid">
         <thead id="temas-thead"></thead>
         <tbody id="temas-tbody"></tbody>
@@ -2917,9 +3146,13 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
             </div>
             <div class="form-group" style="margin:0">
               <label>Voz</label>
-              <select id="ed-voz-id" style="font-size:12px">
+              <select id="ed-voz-id" style="font-size:12px" onchange="document.getElementById('ed-voz-id-manual').value=this.value">
                 <option value="">Nenhuma (manual)</option>
               </select>
+            </div>
+            <div class="form-group" style="margin:0">
+              <label>Voice ID <span style="font-size:9px;color:var(--text-sec)">(manual)</span></label>
+              <input type="text" id="ed-voz-id-manual" placeholder="Cole o voice_id aqui..." style="font-size:11px;width:220px" oninput="if(this.value){document.getElementById('ed-voz-id').value=''}">
             </div>
           </div>
           <div class="form-row" style="margin-top:8px">
@@ -3140,47 +3373,190 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
 
       <!-- TAB: THUMBNAIL -->
       <div class="tab-content" id="tab-thumb">
+        <!-- MODO SELECTOR -->
         <div class="form-group">
-          <label>Prompt Base</label>
-          <textarea id="ed-thumb-prompt" rows="6" placeholder="YouTube thumbnail, 1280x720, **[CENA]**... [TEXTO DE CIMA]... [TEXTO DE BAIXO]..." style="font-size:11px"></textarea>
-          <div style="font-size:10px;color:var(--text-sec);margin-top:2px">Use [NOME] para placeholders. [TEXTO DE CIMA] e [TEXTO DE BAIXO] vem da celula do Temas.</div>
-        </div>
-        <div class="form-row">
-          <div class="form-group">
-            <label>Modelo AI</label>
-            <select id="ed-thumb-model" style="font-size:11px">
-              <option value="gpt-image-1.5">GPT Image 1.5</option>
-              <option value="bytedance-seedream-5-lite">Seedream 5 Lite</option>
-              <option value="bytedance-seedream-4.5">Seedream 4.5</option>
-              <option value="gemini-3-pro-image-preview">Gemini 3 Pro</option>
-            </select>
-          </div>
-          <div class="form-group">
-            <label>Aspect Ratio</label>
-            <select id="ed-thumb-ratio" style="font-size:11px">
-              <option value="16:9">16:9 (YouTube)</option>
-              <option value="1:1">1:1</option>
-              <option value="4:3">4:3</option>
-            </select>
-          </div>
-          <div class="form-group">
-            <label>Resolucao</label>
-            <select id="ed-thumb-res" style="font-size:11px">
-              <option value="2K">2K</option>
-              <option value="4K">4K</option>
-              <option value="1080p">1080p</option>
-              <option value="low">low</option>
-              <option value="medium">medium</option>
-              <option value="high">high</option>
-            </select>
+          <label style="font-weight:600">Modo de Thumbnail</label>
+          <div style="display:flex;gap:6px;margin-top:4px">
+            <button class="btn btn-sm" id="thumb-mode-fixa" onclick="_setThumbMode('fixa')" style="font-size:11px;padding:4px 12px">Imagem Fixa</button>
+            <button class="btn btn-sm" id="thumb-mode-ai-titulo" onclick="_setThumbMode('ai-titulo')" style="font-size:11px;padding:4px 12px">AI por Titulo</button>
+            <button class="btn btn-sm" id="thumb-mode-ai-pool" onclick="_setThumbMode('ai-pool')" style="font-size:11px;padding:4px 12px">AI por Pool</button>
           </div>
         </div>
-        <div style="margin-top:12px">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-            <label style="font-weight:600">Pools de Variaveis</label>
-            <button class="btn btn-secondary btn-sm" onclick="adicionarPoolThumb()" style="font-size:10px">+ Novo Pool</button>
+
+        <!-- MODO 1: IMAGEM FIXA -->
+        <div id="thumb-panel-fixa" style="display:none;margin-top:12px">
+          <div class="form-group">
+            <label>Imagem de Fundo</label>
+            <div style="display:flex;gap:6px;align-items:center">
+              <input type="text" id="ed-thumb-fixa-img" placeholder="Caminho ou URL da imagem..." style="font-size:11px;flex:1" readonly>
+              <label class="btn btn-secondary btn-sm" style="font-size:10px;cursor:pointer;margin:0">
+                Upload
+                <input type="file" accept="image/*" onchange="_uploadThumbBg(this)" style="display:none">
+              </label>
+              <button class="btn btn-primary btn-sm" onclick="_previewThumbFixa()" style="font-size:10px">Preview</button>
+            </div>
           </div>
-          <div id="ed-thumb-pools"></div>
+          <!-- PREVIEW -->
+          <div id="thumb-fixa-preview" style="display:none;margin:8px 0;border:1px solid var(--border);border-radius:6px;overflow:hidden;aspect-ratio:16/9;background:var(--bg)">
+            <img id="thumb-fixa-preview-img" style="width:100%;height:100%;object-fit:contain">
+          </div>
+
+          <!-- TEXTO DE CIMA -->
+          <div style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:12px;margin-top:12px">
+            <label style="font-weight:600;font-size:12px;color:var(--accent);display:block;margin-bottom:8px">[TEXTO DE CIMA]</label>
+            <div class="form-row">
+              <div class="form-group">
+                <label>Fonte</label>
+                <select id="ed-thumb-fixa-fonte-cima" style="font-size:11px"></select>
+              </div>
+              <div class="form-group">
+                <label>Tamanho</label>
+                <input type="number" id="ed-thumb-fixa-tamanho-cima" value="72" min="12" max="200" style="font-size:11px;width:70px">
+              </div>
+              <div class="form-group">
+                <label>Cor</label>
+                <input type="color" id="ed-thumb-fixa-cor-cima" value="#FFFFFF" style="width:40px;height:28px">
+              </div>
+              <div class="form-group">
+                <label>Cor Tracado</label>
+                <input type="color" id="ed-thumb-fixa-outline-cor-cima" value="#000000" style="width:40px;height:28px">
+              </div>
+              <div class="form-group">
+                <label>Tracado</label>
+                <input type="range" id="ed-thumb-fixa-outline-cima" min="0" max="10" step="1" value="3" oninput="document.getElementById('thumb-fixa-outline-cima-val').textContent=this.value" style="width:80px">
+                <span id="thumb-fixa-outline-cima-val" style="font-size:10px;color:var(--text-sec)">3</span>
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label>Posicao Y%</label>
+                <input type="range" id="ed-thumb-fixa-y-cima" min="5" max="50" value="15" oninput="document.getElementById('thumb-fixa-y-cima-val').textContent=this.value+'%'" style="width:120px">
+                <span id="thumb-fixa-y-cima-val" style="font-size:10px;color:var(--text-sec)">15%</span>
+              </div>
+              <div class="form-group">
+                <label>Bold</label>
+                <input type="checkbox" id="ed-thumb-fixa-bold-cima" checked>
+              </div>
+              <div class="form-group">
+                <label>Maiuscula</label>
+                <input type="checkbox" id="ed-thumb-fixa-maiuscula-cima" checked>
+              </div>
+            </div>
+          </div>
+
+          <!-- TEXTO DE BAIXO -->
+          <div style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:12px;margin-top:8px">
+            <label style="font-weight:600;font-size:12px;color:var(--accent);display:block;margin-bottom:8px">[TEXTO DE BAIXO]</label>
+            <div class="form-row">
+              <div class="form-group">
+                <label>Fonte</label>
+                <select id="ed-thumb-fixa-fonte-baixo" style="font-size:11px"></select>
+              </div>
+              <div class="form-group">
+                <label>Tamanho</label>
+                <input type="number" id="ed-thumb-fixa-tamanho-baixo" value="48" min="12" max="200" style="font-size:11px;width:70px">
+              </div>
+              <div class="form-group">
+                <label>Cor</label>
+                <input type="color" id="ed-thumb-fixa-cor-baixo" value="#FFD700" style="width:40px;height:28px">
+              </div>
+              <div class="form-group">
+                <label>Cor Tracado</label>
+                <input type="color" id="ed-thumb-fixa-outline-cor-baixo" value="#000000" style="width:40px;height:28px">
+              </div>
+              <div class="form-group">
+                <label>Tracado</label>
+                <input type="range" id="ed-thumb-fixa-outline-baixo" min="0" max="10" step="1" value="3" oninput="document.getElementById('thumb-fixa-outline-baixo-val').textContent=this.value" style="width:80px">
+                <span id="thumb-fixa-outline-baixo-val" style="font-size:10px;color:var(--text-sec)">3</span>
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label>Posicao Y%</label>
+                <input type="range" id="ed-thumb-fixa-y-baixo" min="50" max="95" value="85" oninput="document.getElementById('thumb-fixa-y-baixo-val').textContent=this.value+'%'" style="width:120px">
+                <span id="thumb-fixa-y-baixo-val" style="font-size:10px;color:var(--text-sec)">85%</span>
+              </div>
+              <div class="form-group">
+                <label>Bold</label>
+                <input type="checkbox" id="ed-thumb-fixa-bold-baixo" checked>
+              </div>
+              <div class="form-group">
+                <label>Maiuscula</label>
+                <input type="checkbox" id="ed-thumb-fixa-maiuscula-baixo">
+              </div>
+            </div>
+          </div>
+          <div style="font-size:10px;color:var(--text-sec);margin-top:8px">Textos vem dos campos [TEXTO DE CIMA] e [TEXTO DE BAIXO] da celula no Temas.</div>
+        </div>
+
+        <!-- MODO 2: AI POR TITULO -->
+        <div id="thumb-panel-ai-titulo" style="display:none;margin-top:12px">
+          <div class="form-group">
+            <label>Instrucoes do Agente (gera o prompt baseado no titulo/texto)</label>
+            <textarea id="ed-thumb-ai-titulo-instrucoes" rows="8" placeholder="Voce e um designer de thumbnails para YouTube. Dado o titulo e texto da thumbnail, gere um prompt detalhado para geracao de imagem..." style="font-size:11px"></textarea>
+            <div style="font-size:10px;color:var(--text-sec);margin-top:2px">O agente recebe: titulo, texto_cima, texto_baixo, canal. Deve retornar SOMENTE o prompt de imagem.</div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>Modelo AI (imagem)</label>
+              <select id="ed-thumb-ai-titulo-model" style="font-size:11px">
+                <option value="gemini-3-pro-image-preview" selected>Gemini 3 Pro</option>
+                <option value="gpt-image-1.5">GPT Image 1.5</option>
+                <option value="bytedance-seedream-5-lite">Seedream 5 Lite</option>
+                <option value="bytedance-seedream-4.5">Seedream 4.5</option>
+                <option value="flux-2-pro">Flux 2 Pro</option>
+                <option value="runway-gen4-image">Runway Gen4</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Resolucao</label>
+              <select id="ed-thumb-ai-titulo-res" style="font-size:11px">
+                <option value="1080p" selected>1080p</option>
+                <option value="2K">2K</option>
+                <option value="4K">4K</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <!-- MODO 3: AI POR POOL -->
+        <div id="thumb-panel-ai-pool" style="display:none;margin-top:12px">
+          <div class="form-group">
+            <label>Prompt Base</label>
+            <textarea id="ed-thumb-prompt" rows="6" placeholder="YouTube thumbnail 1280x720, [CHARACTER] in a [SCENARIO], bold text [TEXTO DE CIMA] at top, [TEXTO DE BAIXO] at bottom..." style="font-size:11px"></textarea>
+            <div style="font-size:10px;color:var(--text-sec);margin-top:2px">Variaveis: [CHARACTER], [SCENARIO] (sorteados dos pools abaixo), [TEXTO DE CIMA] e [TEXTO DE BAIXO] (da celula no Temas).</div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>Modelo AI</label>
+              <select id="ed-thumb-pool-model" style="font-size:11px">
+                <option value="gemini-3-pro-image-preview" selected>Gemini 3 Pro</option>
+                <option value="gpt-image-1.5">GPT Image 1.5</option>
+                <option value="bytedance-seedream-5-lite">Seedream 5 Lite</option>
+                <option value="bytedance-seedream-4.5">Seedream 4.5</option>
+                <option value="flux-2-pro">Flux 2 Pro</option>
+                <option value="runway-gen4-image">Runway Gen4</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Resolucao</label>
+              <select id="ed-thumb-pool-res" style="font-size:11px">
+                <option value="1080p" selected>1080p</option>
+                <option value="2K">2K</option>
+                <option value="4K">4K</option>
+              </select>
+            </div>
+          </div>
+          <div style="margin-top:12px">
+            <label style="font-weight:600;font-size:12px">Pool: CHARACTER</label>
+            <textarea id="ed-thumb-pool-character" rows="4" placeholder="Um personagem por linha...&#10;A glowing ethereal being with white robes&#10;A cosmic warrior with golden armor&#10;A mystical woman with starlight eyes" style="font-size:10px;width:100%;margin-top:4px"></textarea>
+            <span id="thumb-pool-character-count" style="font-size:10px;color:var(--text-sec)">0 opcoes</span>
+          </div>
+          <div style="margin-top:10px">
+            <label style="font-weight:600;font-size:12px">Pool: SCENARIO</label>
+            <textarea id="ed-thumb-pool-scenario" rows="4" placeholder="Um cenario por linha...&#10;A vast cosmic nebula with purple and blue hues&#10;An ancient temple floating among the stars&#10;A golden sunrise over sacred mountains" style="font-size:10px;width:100%;margin-top:4px"></textarea>
+            <span id="thumb-pool-scenario-count" style="font-size:10px;color:var(--text-sec)">0 opcoes</span>
+          </div>
         </div>
       </div>
 
@@ -3463,7 +3839,15 @@ async function abrirEditor(id) {
     }
     filtrarVozesTemplate();
     if (voz.voice_id) {
-      setTimeout(function(){ document.getElementById('ed-voz-id').value = voz.voice_id; }, 200);
+      document.getElementById('ed-voz-id-manual').value = voz.voice_id;
+      setTimeout(function(){
+        var sel = document.getElementById('ed-voz-id');
+        sel.value = voz.voice_id;
+        // Se nao encontrou na lista, manter no campo manual
+        if (sel.value !== voz.voice_id) {
+          document.getElementById('ed-voz-id-manual').value = voz.voice_id;
+        }
+      }, 300);
     }
     document.getElementById('ed-voz-speed').value = voz.speed || 1.0;
     document.getElementById('voz-speed-val').textContent = (voz.speed || 1.0) + 'x';
@@ -3543,6 +3927,7 @@ async function abrirEditor(id) {
     resetAjustes();
     document.getElementById('ed-voz-provider').value = 'all';
     document.getElementById('ed-voz-id').innerHTML = '<option value="">Nenhuma (manual)</option>';
+    document.getElementById('ed-voz-id-manual').value = '';
     document.getElementById('ed-voz-speed').value = 1.0;
     document.getElementById('voz-speed-val').textContent = '1.0x';
     document.getElementById('ed-voz-pitch').value = 0;
@@ -3687,62 +4072,198 @@ function _coletarRegras() {
 }
 
 // === THUMBNAIL POOLS ===
-function renderThumbPools(pools) {
-  var container = document.getElementById('ed-thumb-pools');
-  container.innerHTML = '';
-  if (!pools) return;
-  Object.keys(pools).forEach(function(name) {
-    _addPoolUI(container, name, pools[name]);
+// Funções de pool legado (removidas — pools agora são CHARACTER/SCENARIO fixos)
+function renderThumbPools() {}
+function _addPoolUI() {}
+function adicionarPoolThumb() {}
+
+function _uploadThumbBg(input) {
+  var file = input.files[0];
+  if (!file) return;
+  var reader = new FileReader();
+  reader.onload = async function(e) {
+    var b64 = e.target.result.split(',')[1]; // remover data:image/...;base64,
+    try {
+      var res = await fetch('/api/upload/image', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ filename: file.name, data: b64 })
+      });
+      var d = await res.json();
+      if (d.ok) {
+        document.getElementById('ed-thumb-fixa-img').value = d.path;
+        toast('Imagem enviada', 'success');
+        _previewThumbFixa();
+      } else {
+        toast('Erro: ' + (d.detail || ''), 'error');
+      }
+    } catch(err) { toast('Erro upload: ' + err.message, 'error'); }
+  };
+  reader.readAsDataURL(file);
+}
+
+async function _previewThumbFixa() {
+  var img = document.getElementById('ed-thumb-fixa-img').value;
+  var params = new URLSearchParams({
+    img: img,
+    texto_cima: 'TEXTO DE CIMA',
+    texto_baixo: 'TEXTO DE BAIXO',
+    fonte_cima: document.getElementById('ed-thumb-fixa-fonte-cima').value || 'Arial',
+    tamanho_cima: document.getElementById('ed-thumb-fixa-tamanho-cima').value || '72',
+    cor_cima: document.getElementById('ed-thumb-fixa-cor-cima').value || '#FFFFFF',
+    outline_cor_cima: document.getElementById('ed-thumb-fixa-outline-cor-cima').value || '#000000',
+    outline_cima: document.getElementById('ed-thumb-fixa-outline-cima').value || '3',
+    y_cima: document.getElementById('ed-thumb-fixa-y-cima').value || '15',
+    bold_cima: document.getElementById('ed-thumb-fixa-bold-cima').checked,
+    maiuscula_cima: document.getElementById('ed-thumb-fixa-maiuscula-cima').checked,
+    fonte_baixo: document.getElementById('ed-thumb-fixa-fonte-baixo').value || 'Arial',
+    tamanho_baixo: document.getElementById('ed-thumb-fixa-tamanho-baixo').value || '48',
+    cor_baixo: document.getElementById('ed-thumb-fixa-cor-baixo').value || '#FFD700',
+    outline_cor_baixo: document.getElementById('ed-thumb-fixa-outline-cor-baixo').value || '#000000',
+    outline_baixo: document.getElementById('ed-thumb-fixa-outline-baixo').value || '3',
+    y_baixo: document.getElementById('ed-thumb-fixa-y-baixo').value || '85',
+    bold_baixo: document.getElementById('ed-thumb-fixa-bold-baixo').checked,
+    maiuscula_baixo: document.getElementById('ed-thumb-fixa-maiuscula-baixo').checked,
   });
+  try {
+    var res = await fetch('/api/thumb/preview-fixa?' + params.toString());
+    var d = await res.json();
+    if (d.ok) {
+      document.getElementById('thumb-fixa-preview-img').src = d.image;
+      document.getElementById('thumb-fixa-preview').style.display = 'block';
+    }
+  } catch(e) { toast('Erro preview: ' + e.message, 'error'); }
 }
 
-function _addPoolUI(container, name, items) {
-  var div = document.createElement('div');
-  div.style.cssText = 'background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px;margin-bottom:8px';
-  div.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">'
-    + '<input type="text" class="pool-name" value="' + (name || '') + '" placeholder="Nome (ex: CENA)" style="font-size:12px;font-weight:600;background:transparent;border:none;color:var(--accent);width:200px">'
-    + '<div style="display:flex;gap:4px;align-items:center"><span class="pool-count" style="font-size:10px;color:var(--text-sec)">0 opcoes</span>'
-    + '<button class="btn btn-danger btn-sm" style="font-size:9px;padding:1px 6px" onclick="this.closest(&quot;[data-pool]&quot;).remove()">X</button></div></div>'
-    + '<textarea class="pool-items" rows="4" placeholder="Uma opcao por linha..." style="font-size:10px;width:100%"></textarea>';
-  div.dataset.pool = '1';
-  var ta = div.querySelector('.pool-items');
-  ta.value = (items || []).join('\\n');
-  var countEl = div.querySelector('.pool-count');
-  countEl.textContent = (items || []).length + ' opcoes';
-  ta.oninput = function() { countEl.textContent = ta.value.split('\\n').filter(Boolean).length + ' opcoes'; };
-  container.appendChild(div);
-}
+var _thumbMode = 'ai-pool';
 
-function adicionarPoolThumb() {
-  var container = document.getElementById('ed-thumb-pools');
-  _addPoolUI(container, '', []);
+function _setThumbMode(mode) {
+  _thumbMode = mode;
+  ['fixa', 'ai-titulo', 'ai-pool'].forEach(function(m) {
+    document.getElementById('thumb-panel-' + m).style.display = m === mode ? 'block' : 'none';
+    var btn = document.getElementById('thumb-mode-' + m);
+    if (btn) {
+      btn.className = m === mode ? 'btn btn-sm btn-primary' : 'btn btn-sm btn-secondary';
+    }
+  });
+  // Carregar fontes pro modo fixa
+  if (mode === 'fixa') {
+    var sel = document.getElementById('ed-thumb-fixa-fonte');
+    if (sel && !sel.options.length) {
+      fetch('/api/fonts').then(function(r){ return r.json(); }).then(function(fonts) {
+        sel.innerHTML = fonts.map(function(f){ return '<option value="' + f + '">' + f + '</option>'; }).join('');
+      });
+    }
+  }
 }
 
 function _coletarThumbConfig() {
-  var prompt = document.getElementById('ed-thumb-prompt').value;
-  if (!prompt) return undefined;
-  var pools = {};
-  document.querySelectorAll('#ed-thumb-pools [data-pool]').forEach(function(div) {
-    var name = div.querySelector('.pool-name').value.trim();
-    var items = div.querySelector('.pool-items').value.split('\\n').filter(Boolean);
-    if (name && items.length) pools[name] = items;
-  });
-  return {
-    prompt_base: prompt,
-    pools: pools,
-    model_id: document.getElementById('ed-thumb-model').value,
-    aspect_ratio: document.getElementById('ed-thumb-ratio').value,
-    resolution: document.getElementById('ed-thumb-res').value,
-  };
+  var config = { mode: _thumbMode, aspect_ratio: '16:9' };
+
+  if (_thumbMode === 'fixa') {
+    config.imagem = document.getElementById('ed-thumb-fixa-img').value;
+    config.texto_cima = {
+      fonte: document.getElementById('ed-thumb-fixa-fonte-cima').value,
+      tamanho: parseInt(document.getElementById('ed-thumb-fixa-tamanho-cima').value) || 72,
+      cor: document.getElementById('ed-thumb-fixa-cor-cima').value,
+      outline_cor: document.getElementById('ed-thumb-fixa-outline-cor-cima').value,
+      outline: parseInt(document.getElementById('ed-thumb-fixa-outline-cima').value) || 3,
+      y: parseInt(document.getElementById('ed-thumb-fixa-y-cima').value) || 15,
+      bold: document.getElementById('ed-thumb-fixa-bold-cima').checked,
+      maiuscula: document.getElementById('ed-thumb-fixa-maiuscula-cima').checked,
+    };
+    config.texto_baixo = {
+      fonte: document.getElementById('ed-thumb-fixa-fonte-baixo').value,
+      tamanho: parseInt(document.getElementById('ed-thumb-fixa-tamanho-baixo').value) || 48,
+      cor: document.getElementById('ed-thumb-fixa-cor-baixo').value,
+      outline_cor: document.getElementById('ed-thumb-fixa-outline-cor-baixo').value,
+      outline: parseInt(document.getElementById('ed-thumb-fixa-outline-baixo').value) || 3,
+      y: parseInt(document.getElementById('ed-thumb-fixa-y-baixo').value) || 85,
+      bold: document.getElementById('ed-thumb-fixa-bold-baixo').checked,
+      maiuscula: document.getElementById('ed-thumb-fixa-maiuscula-baixo').checked,
+    };
+
+  } else if (_thumbMode === 'ai-titulo') {
+    config.instrucoes = document.getElementById('ed-thumb-ai-titulo-instrucoes').value;
+    config.model_id = document.getElementById('ed-thumb-ai-titulo-model').value;
+    config.resolution = document.getElementById('ed-thumb-ai-titulo-res').value;
+
+  } else if (_thumbMode === 'ai-pool') {
+    config.prompt_base = document.getElementById('ed-thumb-prompt').value;
+    config.model_id = document.getElementById('ed-thumb-pool-model').value;
+    config.resolution = document.getElementById('ed-thumb-pool-res').value;
+    var chars = document.getElementById('ed-thumb-pool-character').value.split('\\n').filter(Boolean);
+    var scens = document.getElementById('ed-thumb-pool-scenario').value.split('\\n').filter(Boolean);
+    config.pools = {};
+    if (chars.length) config.pools.CHARACTER = chars;
+    if (scens.length) config.pools.SCENARIO = scens;
+  }
+
+  return config;
 }
 
 function _carregarThumbConfig(tc) {
-  document.getElementById('ed-thumb-prompt').value = (tc && tc.prompt_base) || '';
-  document.getElementById('ed-thumb-model').value = (tc && tc.model_id) || 'gpt-image-1.5';
-  document.getElementById('ed-thumb-ratio').value = (tc && tc.aspect_ratio) || '16:9';
-  document.getElementById('ed-thumb-res').value = (tc && tc.resolution) || '2K';
-  renderThumbPools(tc ? tc.pools : null);
+  if (!tc) { _setThumbMode('ai-pool'); return; }
+  var mode = tc.mode || 'ai-pool';
+  // Compatibilidade: se tem prompt_base mas sem mode, é ai-pool
+  if (!tc.mode && tc.prompt_base) mode = 'ai-pool';
+  _setThumbMode(mode);
+
+  if (mode === 'fixa') {
+    var el;
+    el = document.getElementById('ed-thumb-fixa-img'); if (el) el.value = tc.imagem || '';
+    var tc_cima = tc.texto_cima || {};
+    var tc_baixo = tc.texto_baixo || {};
+    // Carregar fontes e setar depois
+    fetch('/api/fonts').then(function(r){ return r.json(); }).then(function(fonts) {
+      var opts = fonts.map(function(f){ return '<option value="' + f + '">' + f + '</option>'; }).join('');
+      var s1 = document.getElementById('ed-thumb-fixa-fonte-cima');
+      var s2 = document.getElementById('ed-thumb-fixa-fonte-baixo');
+      if (s1) { s1.innerHTML = opts; s1.value = tc_cima.fonte || 'Arial'; }
+      if (s2) { s2.innerHTML = opts; s2.value = tc_baixo.fonte || 'Arial'; }
+    });
+    // Texto de Cima
+    el = document.getElementById('ed-thumb-fixa-tamanho-cima'); if (el) el.value = tc_cima.tamanho || 72;
+    el = document.getElementById('ed-thumb-fixa-cor-cima'); if (el) el.value = tc_cima.cor || '#FFFFFF';
+    el = document.getElementById('ed-thumb-fixa-outline-cor-cima'); if (el) el.value = tc_cima.outline_cor || '#000000';
+    el = document.getElementById('ed-thumb-fixa-outline-cima'); if (el) { el.value = tc_cima.outline != null ? tc_cima.outline : 3; document.getElementById('thumb-fixa-outline-cima-val').textContent = el.value; }
+    el = document.getElementById('ed-thumb-fixa-y-cima'); if (el) { el.value = tc_cima.y || 15; document.getElementById('thumb-fixa-y-cima-val').textContent = el.value + '%'; }
+    el = document.getElementById('ed-thumb-fixa-bold-cima'); if (el) el.checked = tc_cima.bold !== false;
+    el = document.getElementById('ed-thumb-fixa-maiuscula-cima'); if (el) el.checked = tc_cima.maiuscula !== false;
+    // Texto de Baixo
+    el = document.getElementById('ed-thumb-fixa-tamanho-baixo'); if (el) el.value = tc_baixo.tamanho || 48;
+    el = document.getElementById('ed-thumb-fixa-cor-baixo'); if (el) el.value = tc_baixo.cor || '#FFD700';
+    el = document.getElementById('ed-thumb-fixa-outline-cor-baixo'); if (el) el.value = tc_baixo.outline_cor || '#000000';
+    el = document.getElementById('ed-thumb-fixa-outline-baixo'); if (el) { el.value = tc_baixo.outline != null ? tc_baixo.outline : 3; document.getElementById('thumb-fixa-outline-baixo-val').textContent = el.value; }
+    el = document.getElementById('ed-thumb-fixa-y-baixo'); if (el) { el.value = tc_baixo.y || 85; document.getElementById('thumb-fixa-y-baixo-val').textContent = el.value + '%'; }
+    el = document.getElementById('ed-thumb-fixa-bold-baixo'); if (el) el.checked = tc_baixo.bold !== false;
+    el = document.getElementById('ed-thumb-fixa-maiuscula-baixo'); if (el) el.checked = tc_baixo.maiuscula !== false;
+
+  } else if (mode === 'ai-titulo') {
+    var el;
+    el = document.getElementById('ed-thumb-ai-titulo-instrucoes'); if (el) el.value = tc.instrucoes || '';
+    el = document.getElementById('ed-thumb-ai-titulo-model'); if (el) el.value = tc.model_id || 'gemini-3-pro-image-preview';
+    el = document.getElementById('ed-thumb-ai-titulo-res'); if (el) el.value = tc.resolution || '1080p';
+
+  } else if (mode === 'ai-pool') {
+    var el;
+    el = document.getElementById('ed-thumb-prompt'); if (el) el.value = tc.prompt_base || '';
+    el = document.getElementById('ed-thumb-pool-model'); if (el) el.value = tc.model_id || 'gemini-3-pro-image-preview';
+    el = document.getElementById('ed-thumb-pool-res'); if (el) el.value = tc.resolution || '1080p';
+    var pools = tc.pools || {};
+    el = document.getElementById('ed-thumb-pool-character'); if (el) { el.value = (pools.CHARACTER || []).join('\\n'); document.getElementById('thumb-pool-character-count').textContent = (pools.CHARACTER || []).length + ' opcoes'; }
+    el = document.getElementById('ed-thumb-pool-scenario'); if (el) { el.value = (pools.SCENARIO || []).join('\\n'); document.getElementById('thumb-pool-scenario-count').textContent = (pools.SCENARIO || []).length + ' opcoes'; }
+  }
 }
+
+// Atualizar contadores dos pools ao digitar
+document.addEventListener('input', function(e) {
+  if (e.target.id === 'ed-thumb-pool-character') {
+    document.getElementById('thumb-pool-character-count').textContent = e.target.value.split('\\n').filter(Boolean).length + ' opcoes';
+  }
+  if (e.target.id === 'ed-thumb-pool-scenario') {
+    document.getElementById('thumb-pool-scenario-count').textContent = e.target.value.split('\\n').filter(Boolean).length + ' opcoes';
+  }
+});
 
 async function salvarTemplate() {
   const res_str = document.getElementById('ed-resolucao').value;
@@ -3777,7 +4298,7 @@ async function salvarTemplate() {
       vinheta: parseFloat(document.getElementById('ed-vinheta').value),
     },
     narracao_voz: {
-      voice_id: document.getElementById('ed-voz-id').value,
+      voice_id: document.getElementById('ed-voz-id-manual').value || document.getElementById('ed-voz-id').value,
       provider: document.getElementById('ed-voz-provider').value,
       speed: parseFloat(document.getElementById('ed-voz-speed').value) || 1.0,
       pitch: parseInt(document.getElementById('ed-voz-pitch').value) || 0,
@@ -6279,7 +6800,7 @@ function _executarReplicar(colunas) {
   var count = 0;
 
   if (_replicarCampo === '_all') {
-    // Replicar todos os campos
+    // Replicar todos os campos (inclui vazio — usa Ctrl+clique no Replicar Tudo pra confirmar)
     var tema = document.getElementById('cel-tema').value;
     var titulo = document.getElementById('cel-titulo').value;
     var thumb = document.getElementById('cel-thumb').value;
@@ -6287,9 +6808,9 @@ function _executarReplicar(colunas) {
       var key = ri + '_' + ci;
       if (!temasData.celulas) temasData.celulas = {};
       if (!temasData.celulas[key]) temasData.celulas[key] = {};
-      if (tema) temasData.celulas[key].tema = tema;
-      if (titulo) temasData.celulas[key].titulo = titulo;
-      if (thumb) temasData.celulas[key].thumb = thumb;
+      temasData.celulas[key].tema = tema;
+      temasData.celulas[key].titulo = titulo;
+      temasData.celulas[key].thumb = thumb;
       temasData.celulas[key].synced = false;
       count++;
     });
@@ -6349,7 +6870,9 @@ function abrirReplicarTudo() {
   var tema = document.getElementById('cel-tema').value;
   var titulo = document.getElementById('cel-titulo').value;
   var thumb = document.getElementById('cel-thumb').value;
-  if (!tema && !titulo && !thumb) { toast('Todos os campos estão vazios', 'error'); return; }
+  if (!tema && !titulo && !thumb) {
+    if (!confirm('Todos os campos estão vazios. Replicar vazio vai APAGAR tema/titulo/thumb nas colunas selecionadas. Continuar?')) return;
+  }
 
   _replicarCampo = '_all';
   document.getElementById('replicar-title').textContent = 'Replicar Tudo para...';
@@ -7154,7 +7677,7 @@ async function carregarThumbPage() {
   renderThumbCards();
 
   var dateInput = document.getElementById('thumb-batch-data');
-  if (!dateInput.value) {
+  if (dateInput && !dateInput.value) {
     var hoje = new Date();
     dateInput.value = hoje.toISOString().slice(0, 10);
   }
@@ -7261,7 +7784,8 @@ function _saveThumbCardData() {
 }
 
 async function puxarTextosThumb() {
-  var dateVal = document.getElementById('thumb-batch-data').value;
+  var _el = document.getElementById('thumb-batch-data');
+  var dateVal = _el ? _el.value : '';
   if (!dateVal) { toast('Selecione a data primeiro', 'error'); return; }
 
   if (!temasData || !temasData.linhas || !temasData.linhas.length) {
@@ -7340,7 +7864,8 @@ async function gerarThumb(tid) {
   if (!texto || !texto.value.trim()) { toast('Digite o texto da thumbnail', 'error'); return; }
   if (!imagem || !imagem.value.trim()) { toast('Selecione a imagem de fundo', 'error'); return; }
 
-  var dateVal = document.getElementById('thumb-batch-data').value || new Date().toISOString().slice(0, 10);
+  var _dtEl = document.getElementById('thumb-batch-data');
+  var dateVal = (_dtEl ? _dtEl.value : '') || new Date().toISOString().slice(0, 10);
   var dateParts = dateVal.split('-');
   var dataStr = dateParts[0] + dateParts[1] + dateParts[2];
   var dataPasta = dateVal;
@@ -7492,7 +8017,7 @@ var _monitorAtivo = false;
 function startMonitorPolling() {
   stopMonitorPolling();
   refreshMonitor();
-  _monitorInterval = setInterval(refreshMonitor, _monitorAtivo ? 5000 : 15000);
+  _monitorInterval = setInterval(refreshMonitor, _monitorAtivo ? 8000 : 30000);
   _monitorTimerInterval = setInterval(_updateMonitorTimer, 1000);
 }
 
@@ -7757,16 +8282,21 @@ render_queue.iniciar_worker()
 
 # === HEALTH MONITOR (thread em background) ===
 
+_reset_timestamp = 0  # Timestamp do ultimo reset — health monitor ignora por 120s apos reset
+_server_start_time = time.time()  # Health monitor so retoma producoes iniciadas APOS o startup
+
 def _health_monitor():
-    """Verifica a cada 60s se a producao deveria estar rodando mas a thread morreu."""
+    """Verifica a cada 60s o estado da producao.
+    Se detecta producao orfa (ativo no disco mas thread morta), apenas LIMPA o estado.
+    NAO retoma automaticamente — o usuario relanca manualmente se quiser."""
     while True:
         time.sleep(60)
         try:
             log_state = production_log.obter_estado()
             if log_state.get("ativo") and not orchestrator.estado.get("ativo"):
-                # State no disco diz ativo mas em memoria nao = thread morreu
-                production_log.adicionar_log("HEALTH MONITOR: thread morta detectada, retomando...")
-                orchestrator.tentar_retomar()
+                # Thread morreu ou servidor reiniciou — limpar estado no disco
+                production_log.adicionar_log("HEALTH MONITOR: producao orfa detectada, limpando estado...")
+                production_log.finalizar(cancelado=True)
         except Exception as e:
             print(f"[HEALTH MONITOR] Erro: {e}")
 
@@ -7789,4 +8319,5 @@ threading.Thread(target=_health_monitor, daemon=True).start()
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8500)
+    _host = "0.0.0.0" if sys.platform != "win32" else "127.0.0.1"
+    uvicorn.run(app, host=_host, port=8500, timeout_keep_alive=30)

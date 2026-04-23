@@ -171,6 +171,15 @@
 
 --- BUGS / CORRECOES ---
 
+[ ] NARRACAO: RESUMIR CHUNKS JA BAIXADOS APOS RESTART
+    Quando o servidor cai e reinicia, o orchestrator recomeca a narracao
+    do zero, gerando chunks duplicados (chunk_0, chunk_1...) na API do
+    ai33.pro, desperdicando creditos TTS.
+    Solucao: antes de gerar, verificar se chunks ja existem na pasta
+    de narracoes (ex: CON_chunk_0.mp3, CON_chunk_1.mp3) e prosseguir
+    a partir do proximo chunk faltante. So concatenar no final.
+    Prioridade: ALTA
+
 [ ] AGENTE DE TITULO NAO FUNCIONA CORRETAMENTE
     O agente de titulos nao entende as instrucoes e da output errado.
     As vezes nao retorna nada e fica pensando eternamente (timeout?).

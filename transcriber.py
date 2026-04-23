@@ -97,45 +97,75 @@ def transcrever(mp3_path: str, idioma: str = None, modelo: str = "medium", callb
 
 
 def _transcrever_faster_whisper(mp3_path: str, idioma: str, modelo: str, duracao_total: float = 0, callback_progresso=None) -> list:
-    """Transcrição usando faster-whisper (CTranslate2)."""
-    from faster_whisper import WhisperModel
+    """Transcrição usando faster-whisper em subprocess isolado.
 
-    kwargs = {}
-    if idioma:
-        kwargs["language"] = idioma
+    Rodar em subprocess protege contra segfault nativo do CTranslate2/cuDNN:
+    se o processo filho crashar (exit code != 0), caimos para CPU automaticamente.
+    """
+    import sys as _sys
+    import subprocess as _sp
 
-    # Tentar GPU primeiro, se falhar (falta CUDA libs) usar CPU
-    for device, compute in [("cuda", "float16"), ("cpu", "int8")]:
-        try:
-            model = WhisperModel(modelo, device=device, compute_type=compute)
-            segments, info = model.transcribe(mp3_path, **kwargs)
-            resultado = []
-            for seg in segments:
+    worker = Path(__file__).parent / "_whisper_subprocess.py"
+    if not worker.exists():
+        raise RuntimeError(f"_whisper_subprocess.py nao encontrado: {worker}")
+
+    last_err = ""
+    for device in ("cuda", "cpu"):
+        cmd = [_sys.executable, "-u", str(worker), mp3_path, modelo, device]
+        if idioma:
+            cmd.append(idioma)
+
+        proc = _sp.Popen(
+            cmd,
+            stdout=_sp.PIPE,
+            stderr=_sp.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=str(Path(__file__).parent),
+        )
+
+        resultado = []
+        err_msg = ""
+
+        for line in proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except Exception:
+                continue
+
+            t = ev.get("type")
+            if t == "segment":
                 resultado.append({
-                    "start": seg.start,
-                    "end": seg.end,
-                    "text": seg.text
+                    "start": ev["start"],
+                    "end": ev["end"],
+                    "text": ev["text"],
                 })
                 if callback_progresso and duracao_total > 0:
-                    pct = min(95.0, (seg.end / duracao_total) * 100)
+                    pct = min(95.0, (ev["end"] / duracao_total) * 100)
                     callback_progresso(pct)
-            # Liberar modelo da VRAM para o FFmpeg NVENC poder usar
-            del model
-            import gc, ctypes
-            gc.collect()
-            try:
-                import torch
-                torch.cuda.empty_cache()
-            except ImportError:
+            elif t == "done":
                 pass
-            return resultado
-        except Exception as e:
-            if device == "cpu":
-                raise
-            # GPU falhou, tentar CPU
-            continue
+            elif t == "error":
+                err_msg = ev.get("msg", "erro desconhecido")
 
-    raise RuntimeError("Falha na transcrição com GPU e CPU")
+        proc.wait()
+
+        if proc.returncode == 0 and resultado:
+            return resultado
+
+        stderr = proc.stderr.read() if proc.stderr else ""
+        last_err = err_msg or stderr[-500:] or f"exit code {proc.returncode} (possivel crash nativo)"
+
+        if device == "cuda":
+            # Fallback silencioso para CPU
+            continue
+        raise RuntimeError(f"Transcricao falhou (GPU e CPU): {last_err}")
+
+    raise RuntimeError(f"Transcricao falhou: {last_err}")
 
 
 def _transcrever_openai_whisper(mp3_path: str, idioma: str, modelo: str) -> list:

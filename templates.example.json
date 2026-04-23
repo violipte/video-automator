@@ -30,10 +30,15 @@
       "maiuscula": true
     },
     "narracao_voz": {
-      "voice_id": "your-voice-id",
+      "voice_id": "your-primary-voice-id",
       "provider": "minimax_clone",
       "speed": 1.0,
-      "pitch": 0
+      "pitch": 0,
+      "fallback": {
+        "voice_id": "default-workspace__your-inworld-voice",
+        "provider": "inworld",
+        "model": "inworld-tts-1.5-max"
+      }
     },
     "overlays": [],
     "ajustes": {},

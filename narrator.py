@@ -9,6 +9,12 @@ from pathlib import Path
 
 import httpx
 
+# Cliente httpx compartilhado com connection pooling (evita esgotamento de portas)
+_http_client = httpx.Client(
+    timeout=httpx.Timeout(300.0, connect=15.0),
+    limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+)
+
 BASE_DIR = Path(__file__).parent
 NARRACOES_DIR = BASE_DIR / "narracoes"
 NARRACOES_DIR.mkdir(exist_ok=True)
@@ -42,7 +48,7 @@ def _headers(api_key: str) -> dict:
 def listar_vozes_elevenlabs_shared(api_key: str) -> list:
     """Lista vozes compartilhadas (Voice Library) do ElevenLabs."""
     try:
-        resp = httpx.get(
+        resp = _http_client.get(
             f"{API_BASE}/v1/shared-voices?page_size=100",
             headers={"xi-api-key": api_key},
             timeout=15.0,
@@ -69,7 +75,7 @@ def listar_vozes_elevenlabs_shared(api_key: str) -> list:
 def listar_vozes_elevenlabs(api_key: str) -> list:
     """Lista vozes do ElevenLabs. Marca favoritos/bookmarked."""
     try:
-        resp = httpx.get(
+        resp = _http_client.get(
             f"{API_BASE}/v2/voices?page_size=100",
             headers={"xi-api-key": api_key},
             timeout=15.0,
@@ -98,7 +104,7 @@ def listar_vozes_elevenlabs(api_key: str) -> list:
 def listar_vozes_minimax(api_key: str, page: int = 1, page_size: int = 50) -> list:
     """Lista vozes disponíveis do Minimax."""
     try:
-        resp = httpx.post(
+        resp = _http_client.post(
             f"{API_BASE}/v1m/voice/list",
             headers=_headers(api_key),
             json={"page": page, "page_size": page_size, "tag_list": []},
@@ -124,7 +130,7 @@ def listar_vozes_minimax(api_key: str, page: int = 1, page_size: int = 50) -> li
 def listar_vozes_clonadas(api_key: str) -> list:
     """Lista vozes clonadas do Minimax."""
     try:
-        resp = httpx.get(
+        resp = _http_client.get(
             f"{API_BASE}/v1m/voice/clone",
             headers={"xi-api-key": api_key},
             timeout=15.0,
@@ -153,7 +159,7 @@ def gerar_narracao_elevenlabs(
 ) -> dict:
     """Inicia geração TTS via ElevenLabs. Retorna task_id."""
     try:
-        resp = httpx.post(
+        resp = _http_client.post(
             f"{API_BASE}/v1/text-to-speech/{voice_id}?output_format=mp3_44100_128",
             headers=_headers(api_key),
             json={
@@ -180,7 +186,7 @@ def gerar_narracao_minimax(
 ) -> dict:
     """Inicia geração TTS via Minimax. Retorna task_id."""
     try:
-        resp = httpx.post(
+        resp = _http_client.post(
             f"{API_BASE}/v1m/task/text-to-speech",
             headers=_headers(api_key),
             json={
@@ -214,7 +220,7 @@ def consultar_tarefa(api_key: str, task_id: str) -> dict:
     """Consulta status de uma tarefa. Retry em 502/503/timeout."""
     for attempt in range(5):
         try:
-            resp = httpx.get(
+            resp = _http_client.get(
                 f"{API_BASE}/v1/task/{task_id}",
                 headers=_headers(api_key),
                 timeout=15.0,
@@ -237,7 +243,7 @@ def baixar_audio(url: str, destino: str) -> str:
     Path(destino).parent.mkdir(parents=True, exist_ok=True)
     for attempt in range(3):
         try:
-            resp = httpx.get(url, timeout=300.0, follow_redirects=True)
+            resp = _http_client.get(url, timeout=300.0, follow_redirects=True)
             resp.raise_for_status()
             with open(destino, "wb") as f:
                 f.write(resp.content)
@@ -402,6 +408,14 @@ def narrar_chunked_sequencial(api_key: str, provider: str, voice_id: str, texto:
             estado["status"] = "processing"
             estado["progresso"] = int(i / total_chunks * 90)
 
+            # Verificar se chunk ja existe no disco (resume apos crash/restart)
+            chunk_path = str(destino_dir / f"_chunk_{nome_saida}_{i}.mp3")
+            if Path(chunk_path).exists() and Path(chunk_path).stat().st_size > 1000:
+                print(f"[NARRACAO-SEQ] {nome_saida}: Chunk {i+1}/{total_chunks} - JA EXISTE ({Path(chunk_path).stat().st_size} bytes), pulando")
+                chunk_paths.append(chunk_path)
+                estado["chunks_done"] = i + 1
+                continue
+
             print(f"[NARRACAO-SEQ] {nome_saida}: Chunk {i+1}/{total_chunks} - gerando...")
             result = gerar_narracao_minimax(
                 api_key, voice_id, chunk_text,
@@ -432,11 +446,12 @@ def narrar_chunked_sequencial(api_key: str, provider: str, voice_id: str, texto:
             else:
                 raise RuntimeError(f"Chunk {i+1}/{total_chunks}: timeout (10min)")
 
-            if audio_url:
-                chunk_path = str(destino_dir / f"_chunk_{nome_saida}_{i}.mp3")
-                print(f"[NARRACAO-SEQ] {nome_saida}: Chunk {i+1}/{total_chunks} - baixando...")
-                baixar_audio(audio_url, chunk_path)
-                chunk_paths.append(chunk_path)
+            if not audio_url:
+                raise RuntimeError(f"Chunk {i+1}/{total_chunks}: audio_url vazio (API retornou done sem arquivo)")
+
+            print(f"[NARRACAO-SEQ] {nome_saida}: Chunk {i+1}/{total_chunks} - baixando...")
+            baixar_audio(audio_url, chunk_path)
+            chunk_paths.append(chunk_path)
 
             estado["chunks_done"] = i + 1
             print(f"[NARRACAO-SEQ] {nome_saida}: Chunk {i+1}/{total_chunks} - OK")
@@ -464,8 +479,8 @@ def narrar_chunked_sequencial(api_key: str, provider: str, voice_id: str, texto:
         estado["status"] = "error"
         estado["erro"] = str(e)
         estado["ativo"] = False
-        for cp in chunk_paths:
-            Path(cp).unlink(missing_ok=True)
+        # NAO deletar chunks — permite resume na proxima tentativa
+        print(f"[NARRACAO-SEQ] {nome_saida}: Erro ({e}). {len(chunk_paths)} chunks preservados para resume.")
         return {"ok": False, "audio_local": "", "erro": str(e), "chunks": total_chunks}
 
 

@@ -1,22 +1,35 @@
 """
-Fila unica de render. Tanto o modo automatico (orchestrator) quanto o
-modo manual (batch/producao) enfileiram jobs aqui. Um unico worker
-consome a fila, garantindo que so 1 render roda por vez (GPU/NVENC).
+Fila unica de render. Suporta dois modos:
+- LOCAL: worker interno consome a fila e chama render_fn() diretamente (GPU local)
+- REMOTO: jobs ficam na fila esperando um render_worker externo buscar via HTTP
+
+O modo e definido por REMOTE_MODE (True = VPS, False = local com GPU).
 """
 
+import json
 import threading
 import time
 import traceback
 from queue import Queue, Empty
 from pathlib import Path
 
+# === CONFIGURACAO ===
+# True = modo VPS (render worker externo busca jobs via API)
+# False = modo local (worker interno executa render_fn diretamente)
+REMOTE_MODE = True
+
 # Fila global de render
 _queue = Queue()
 _worker_thread = None
 _running = False
 
+# Jobs remotos: job_id -> job_data (para o render worker buscar)
+_remote_jobs = []  # lista ordenada de jobs pendentes
+_remote_jobs_lock = threading.Lock()
+_remote_current = None  # job sendo processado pelo worker remoto
+
 # Callbacks registrados por quem enfileirou
-# job_id -> {"on_progress": fn, "on_done": fn, "on_error": fn}
+# job_id -> {"on_done": fn, "on_error": fn, "event": Event}
 _callbacks = {}
 _callbacks_lock = threading.Lock()
 
@@ -29,8 +42,10 @@ estado = {
 }
 
 
+# === WORKER LOCAL (modo local) ===
+
 def _worker():
-    """Worker que consome a fila de render. Roda em thread daemon."""
+    """Worker que consome a fila de render localmente. So roda se REMOTE_MODE=False."""
     global _running
     _running = True
 
@@ -61,7 +76,7 @@ def _worker():
             with _callbacks_lock:
                 cb = _callbacks.pop(job_id, {})
             if cb.get("on_done"):
-                cb["on_done"]()
+                cb["on_done"]("")
 
         except Exception as e:
             traceback.print_exc()
@@ -80,7 +95,9 @@ def _worker():
 
 
 def iniciar_worker():
-    """Inicia o worker de render (chamar no startup do app)."""
+    """Inicia o worker de render (chamar no startup do app). So faz algo em modo local."""
+    if REMOTE_MODE:
+        return  # Em modo remoto, nao tem worker local
     global _worker_thread
     if _worker_thread and _worker_thread.is_alive():
         return
@@ -88,33 +105,147 @@ def iniciar_worker():
     _worker_thread.start()
 
 
-def enfileirar(job_id: str, render_fn, fonte: str = "manual", on_done=None, on_error=None):
+# === ENFILEIRAR (ambos os modos) ===
+
+def enfileirar(job_id: str, render_fn=None, fonte: str = "manual",
+               on_done=None, on_error=None, job_data: dict = None):
     """Enfileira um job de render.
 
     Args:
         job_id: identificador unico (ex: "CON_20260411")
-        render_fn: funcao que executa o render (sem args)
+        render_fn: funcao que executa o render (modo local apenas)
         fonte: "auto" (orchestrator) ou "manual" (batch)
         on_done: callback quando render concluir
         on_error: callback(erro_str) quando render falhar
+        job_data: dict serializavel com dados do job (modo remoto)
     """
     with _callbacks_lock:
         _callbacks[job_id] = {"on_done": on_done, "on_error": on_error}
 
-    _queue.put({
-        "id": job_id,
-        "render_fn": render_fn,
-        "fonte": fonte,
-        "ts": time.time(),
-    })
+    if REMOTE_MODE:
+        # Modo remoto: guardar job serializavel para o worker externo buscar
+        job_entry = {
+            "id": job_id,
+            "fonte": fonte,
+            "ts": time.time(),
+            "status": "pending",  # pending -> processing -> done/error
+            **(job_data or {}),
+        }
+        with _remote_jobs_lock:
+            _remote_jobs.append(job_entry)
+        estado["fila_tamanho"] = len(_remote_jobs)
+        estado["ativo"] = True
+    else:
+        # Modo local: enfileirar com callable
+        _queue.put({
+            "id": job_id,
+            "render_fn": render_fn,
+            "fonte": fonte,
+            "ts": time.time(),
+        })
+        estado["fila_tamanho"] = _queue.qsize()
+        iniciar_worker()
 
-    estado["fila_tamanho"] = _queue.qsize()
 
-    # Garantir worker rodando
-    iniciar_worker()
+# === API REMOTA (para render_worker.py buscar jobs) ===
+
+WORKER_JOB_TIMEOUT = 7200  # 2 horas — se job fica "processing" mais que isso, considerar worker morto
+
+
+def _recuperar_jobs_travados():
+    """Verifica se algum job ficou travado em 'processing' (worker morreu).
+    Re-enfileira como 'pending' para o proximo worker pegar."""
+    now = time.time()
+    with _remote_jobs_lock:
+        for job in _remote_jobs:
+            if job["status"] == "processing":
+                started = job.get("started_at", now)
+                if now - started > WORKER_JOB_TIMEOUT:
+                    print(f"[RENDER_QUEUE] Job {job['id']} travado ha {int(now - started)}s. Re-enfileirando.")
+                    job["status"] = "pending"
+                    job.pop("started_at", None)
+
+
+def proximo_job_remoto() -> dict | None:
+    """Retorna o proximo job pendente para o render worker. Marca como 'processing'."""
+    global _remote_current
+    # Primeiro, recuperar jobs que ficaram travados (worker morreu)
+    _recuperar_jobs_travados()
+    with _remote_jobs_lock:
+        for job in _remote_jobs:
+            if job["status"] == "pending":
+                job["status"] = "processing"
+                job["started_at"] = time.time()
+                _remote_current = job
+                estado["ativo"] = True
+                estado["job_atual"] = job["id"]
+                estado["fonte"] = job.get("fonte", "?")
+                # Retornar copia serializavel (sem callables)
+                return {k: v for k, v in job.items() if k != "render_fn"}
+    return None
+
+
+def completar_job_remoto(job_id: str, sucesso: bool, erro: str = "", video_path: str = ""):
+    """Chamado pelo render worker quando termina um job."""
+    global _remote_current
+    with _remote_jobs_lock:
+        for j, job in enumerate(_remote_jobs):
+            if job["id"] == job_id:
+                _remote_jobs.pop(j)
+                break
+        _remote_current = None
+        estado["fila_tamanho"] = sum(1 for j in _remote_jobs if j["status"] == "pending")
+        estado["ativo"] = estado["fila_tamanho"] > 0 or any(j["status"] == "processing" for j in _remote_jobs)
+        estado["job_atual"] = None
+
+    # Chamar callbacks
+    with _callbacks_lock:
+        cb = _callbacks.pop(job_id, {})
+    if sucesso:
+        if cb.get("on_done"):
+            cb["on_done"](video_path)
+    else:
+        if cb.get("on_error"):
+            cb["on_error"](erro)
+
+
+def jobs_remotos_pendentes() -> list:
+    """Lista todos os jobs remotos (para debug/UI)."""
+    with _remote_jobs_lock:
+        return [
+            {k: v for k, v in j.items() if k != "render_fn"}
+            for j in _remote_jobs
+        ]
+
+
+# === LIMPAR (ambos os modos) ===
+
+def limpar():
+    """Esvazia a fila de render e reseta o estado."""
+    # Modo local
+    while not _queue.empty():
+        try:
+            _queue.get_nowait()
+            _queue.task_done()
+        except Empty:
+            break
+    # Modo remoto
+    global _remote_current
+    with _remote_jobs_lock:
+        _remote_jobs.clear()
+        _remote_current = None
+    with _callbacks_lock:
+        _callbacks.clear()
+    estado["ativo"] = False
+    estado["job_atual"] = None
+    estado["fila_tamanho"] = 0
+    estado["fonte"] = ""
 
 
 def tamanho_fila() -> int:
+    if REMOTE_MODE:
+        with _remote_jobs_lock:
+            return len(_remote_jobs)
     return _queue.qsize()
 
 
