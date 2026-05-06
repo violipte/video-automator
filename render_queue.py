@@ -149,7 +149,7 @@ def enfileirar(job_id: str, render_fn=None, fonte: str = "manual",
 
 # === API REMOTA (para render_worker.py buscar jobs) ===
 
-WORKER_JOB_TIMEOUT = 7200  # 2 horas — se job fica "processing" mais que isso, considerar worker morto
+WORKER_JOB_TIMEOUT = 300  # 5min — se job fica "processing" mais que isso, considerar worker morto
 
 
 def _recuperar_jobs_travados():

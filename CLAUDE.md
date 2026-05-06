@@ -801,24 +801,35 @@ If fallback is configured and `config.inworld_api_key` exists, calls `narrator_i
 
 ---
 
-## Loop Repass (Blindagem extra)
+## Roteiro Fallback Tolerance
 
-Feature that reprocesses dates that finished with channel errors at the end of a production loop. Acts as a safety net in case Inworld fallback also fails or ai33.pro had temporary outage.
+Per-template config: `tolerancia_fallback_pct` (default `0.80`).
+
+When the primary provider exhausts its `max_retries=2` and still returns a script shorter than `min_roteiro_chars` (default `22000`), the orchestrator triggers `forcar_fallback=True`. The fallback result is accepted if `len(fb_result) >= min_chars * tolerancia_fallback_pct`. Example: min 22000ch with default 80% → fallback accepts anything ≥17600ch.
+
+The accepted-with-tolerance case logs: `Fallback forcado ACEITO COM TOLERANCIA (Nch >= Mch min, target era Tch, provider=X)`. Below tolerance, it still raises `erro`. Tighten via `tolerancia_fallback_pct: 0.90` or loosen to `0.70` per template.
+
+---
+
+## Loop Repass IN-PLACE (Blindagem extra)
+
+Each date that finishes with channel errors is re-processed IN-PLACE before the loop advances to the next date. Acts as a safety net for transient outages (Gemini 503, ai33.pro/Inworld failure, etc).
 
 ### Flow in `_produzir_loop` (orchestrator.py)
-1. Normal pass: iterates through dates from `data_idx_inicio`.
-2. After each `produzir_data_completa(data_idx)`, checks `production_log` for channels with `etapa=erro`.
-3. Dates with errors are added to `datas_com_erro[]`.
-4. After all dates processed, runs **repass** (max `REPASS_MAX=2`):
-   - Re-invokes `produzir_data_completa` for each flagged date.
-   - Since orchestrator already skips channels with existing MP4/MP3, only errored ones are retried.
-   - A date drops from the list if repass clears all its errors.
-5. Final log entry if any dates still have errors after max repasses.
+1. For each date from `data_idx_inicio` to end of grid:
+   a. Run `produzir_data_completa(data_idx)`.
+   b. Check `production_log` for channels with `etapa=erro` via `_data_teve_erro()`.
+   c. If errors exist, re-invoke `produzir_data_completa(data_idx)` up to `REPASS_MAX=2` extra times.
+   d. Stop repass loop early as soon as `_data_teve_erro()` returns False.
+   e. Only THEN advance to next date.
+2. The orchestrator already skips channels with existing MP4/MP3/.txt, so repass only retries the errored ones.
+3. The forced fallback in `scriptwriter.executar_pipeline_isolado(forcar_fallback=True)` skips the failing primary provider (e.g. Claude) and goes straight to the next in `FALLBACK_CHAIN` (Gemini, then GPT).
 
-### Why this matters
-- ai33.pro and Inworld can both fail transiently. A single retry pass often resolves issues.
-- Dates without errors are never re-processed — zero overhead on healthy runs.
+### Why IN-PLACE (not end-of-loop)
+- Old behavior: failed dates accumulated in `datas_com_erro[]` and were retried only after the entire loop finished. Problem: a date that failed early would only be retried hours later, after all subsequent dates were processed — leaving production gaps in chronological order.
+- New behavior: a date is "closed" before the loop moves on. No production gaps — date N is never skipped while date N+1 starts.
 - Cancellation via UI respected at every iteration (`estado["cancelado"]`).
+- Dates without errors run zero extra repasses — no overhead on healthy runs.
 
 ---
 
@@ -948,7 +959,7 @@ See `BACKLOG.txt` for the full list. Key pending items by priority:
 - **Inworld TTS fallback**: `narrator_inworld.py` + automatic trigger after Minimax MAX_NARR_RETRIES exhaust
 - **Template schema**: `narracao_voz.fallback` field with Inworld provider/voice_id/model
 - **Voice cloning Inworld**: 8 clones (Arabella, Bill, Brian, Elara, Joanne, Knightley, Scarlet, Valentino) via `/voices/v1/voices:clone`
-- **Loop repass**: `REPASS_MAX=2` re-processes dates that finished with errors at end of loop
+- **Loop repass IN-PLACE**: each date that finishes with errors is re-processed up to `REPASS_MAX=2` times BEFORE the loop advances. Replaces the old end-of-loop repass that left production gaps in chronological order.
 - **Whisper crash isolation**: `_whisper_subprocess.py` runs faster-whisper in subprocess with auto-fallback CPU on native crash
 - **Stale render job recovery**: `WORKER_JOB_TIMEOUT=300s` (was 7200s) reduces recovery time for dead workers
 - Thumbnail AI generation (ai33.pro /v1i endpoints, per-template thumb_config with prompt pools)

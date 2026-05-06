@@ -509,10 +509,16 @@ def executar_pipeline(pipeline_id: str, entrada: str, contexto_extra: dict = Non
 
 # === EXECUCAO ISOLADA (thread-safe, para roteiros paralelos) ===
 
-def executar_pipeline_isolado(pipeline_id: str, entrada: str, contexto_extra: dict = None) -> dict:
+def executar_pipeline_isolado(pipeline_id: str, entrada: str, contexto_extra: dict = None, forcar_fallback: bool = False) -> dict:
     """
     Executa pipeline sem usar estado_execucao global.
     Thread-safe: cada chamada usa apenas variaveis locais.
+
+    Args:
+        forcar_fallback: Se True, em cada etapa LLM pula direto pro fallback do provider primario,
+                         em vez de tentar o primario primeiro. Util quando o primario esta gerando
+                         output ruim (ex: roteiros curtos) e queremos forcar outro provider.
+
     Retorna {"ok": bool, "resultado": str, "erro": str, "etapas": list}.
     """
     pipelines = carregar_pipelines()
@@ -578,23 +584,43 @@ def executar_pipeline_isolado(pipeline_id: str, entrada: str, contexto_extra: di
                     if not fn:
                         raise ValueError(f"Provedor desconhecido: {provedor}")
 
-                    try:
-                        resultado = fn(system_msg, user_msg, api_key, modelo)
-                        etapa_info["provider_usado"] = provedor
-                        etapa_info["fallback_used"] = False
-                    except Exception as llm_err:
+                    # Se forcar_fallback=True, pula direto pro fallback (sem tentar primario)
+                    if forcar_fallback:
                         fallback_cred = _obter_fallback_credencial(provedor)
                         if fallback_cred:
-                            print(f"[FALLBACK-ISO] {provedor}/{modelo} falhou: {llm_err}. Tentando {fallback_cred['provedor']}/{fallback_cred['modelo']}...")
                             fb_fn = CHAMADAS.get(fallback_cred["provedor"])
                             if fb_fn:
+                                print(f"[FORCED-FALLBACK] Pulando {provedor}/{modelo}, usando {fallback_cred['provedor']}/{fallback_cred['modelo']}")
                                 resultado = fb_fn(system_msg, user_msg, fallback_cred["api_key"], fallback_cred["modelo"])
                                 etapa_info["provider_usado"] = fallback_cred["provedor"]
                                 etapa_info["fallback_used"] = True
                             else:
-                                raise llm_err
+                                # fallback nao disponivel, segue primario
+                                resultado = fn(system_msg, user_msg, api_key, modelo)
+                                etapa_info["provider_usado"] = provedor
+                                etapa_info["fallback_used"] = False
                         else:
-                            raise llm_err
+                            resultado = fn(system_msg, user_msg, api_key, modelo)
+                            etapa_info["provider_usado"] = provedor
+                            etapa_info["fallback_used"] = False
+                    else:
+                        try:
+                            resultado = fn(system_msg, user_msg, api_key, modelo)
+                            etapa_info["provider_usado"] = provedor
+                            etapa_info["fallback_used"] = False
+                        except Exception as llm_err:
+                            fallback_cred = _obter_fallback_credencial(provedor)
+                            if fallback_cred:
+                                print(f"[FALLBACK-ISO] {provedor}/{modelo} falhou: {llm_err}. Tentando {fallback_cred['provedor']}/{fallback_cred['modelo']}...")
+                                fb_fn = CHAMADAS.get(fallback_cred["provedor"])
+                                if fb_fn:
+                                    resultado = fb_fn(system_msg, user_msg, fallback_cred["api_key"], fallback_cred["modelo"])
+                                    etapa_info["provider_usado"] = fallback_cred["provedor"]
+                                    etapa_info["fallback_used"] = True
+                                else:
+                                    raise llm_err
+                            else:
+                                raise llm_err
 
                 etapa_info["status"] = "concluido"
                 etapa_info["chars"] = len(resultado)

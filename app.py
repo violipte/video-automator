@@ -2090,9 +2090,94 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
 .audio-preview-row { display:flex; align-items:center; gap:12px; margin-top:12px; }
 .audio-preview-row .btn { flex-shrink:0; }
 .audio-preview-row span { font-size:12px; color:var(--text-sec); }
+
+/* ============ MOBILE ============ */
+/* Hamburger button (hidden on desktop) */
+.btn-hamburger { display:none; position:fixed; top:10px; left:10px; z-index:1000; width:40px; height:40px; border-radius:6px; background:var(--panel); border:1px solid var(--border); color:var(--accent); cursor:pointer; font-size:20px; align-items:center; justify-content:center; }
+.sidebar-backdrop { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.5); z-index:998; }
+.sidebar-backdrop.open { display:block; }
+
+@media (max-width: 768px) {
+  body { font-size: 15px; }
+
+  .btn-hamburger { display:flex; }
+
+  /* Sidebar slides in as drawer */
+  .sidebar {
+    position:fixed; top:0; left:-240px; height:100vh; width:240px; z-index:999;
+    transition: left 0.25s ease; box-shadow: 2px 0 10px rgba(0,0,0,0.4);
+  }
+  .sidebar.open { left:0; }
+
+  .main { padding: 56px 12px 16px 12px; }
+
+  .page-header { flex-direction:column; align-items:stretch; gap:10px; margin-bottom:14px; }
+  .page-header h2 { font-size:18px; padding-left:48px; }
+  .page-header > div { display:flex; flex-wrap:wrap; gap:6px; }
+
+  /* Buttons: larger touch targets */
+  .btn { padding: 10px 14px; font-size: 14px; min-height: 40px; }
+  .btn-sm { padding: 8px 12px; font-size: 12px; min-height: 36px; }
+
+  /* Modals fullscreen on mobile */
+  .modal-overlay { padding: 0 !important; align-items: stretch !important; }
+  .modal { max-width: 100vw !important; max-height: 100vh; width: 100vw; height: 100vh; border-radius: 0; display: flex; flex-direction: column; }
+  .modal-header { flex-shrink: 0; }
+  .modal-body { flex: 1; max-height: none; overflow-y: auto; padding: 16px; }
+  .modal-footer { flex-shrink: 0; padding: 12px 16px; }
+
+  /* Cards spacing */
+  .card { padding: 12px; }
+
+  /* === MONITOR (mobile cards) === */
+  #page-monitor .monitor-grid { grid-template-columns: 1fr !important; }
+  #page-monitor table { font-size: 12px; }
+
+  /* === LOG (mobile cards) === */
+  #log-table thead { display:none; }
+  #log-table tbody tr { display:block; background:var(--bg-2); border:1px solid var(--border); border-radius:8px; padding:10px; margin-bottom:8px; }
+  #log-table tbody tr td { display:block; padding:3px 0; border:none !important; }
+  #log-table tbody tr td:nth-child(1) { font-size:11px; color:var(--text-sec); }
+  #log-table tbody tr td:nth-child(2) { font-size:14px; font-weight:bold; color:var(--accent); }
+  #log-table tbody tr td:nth-child(3) { font-size:12px; color:var(--text-sec); margin-bottom:6px; }
+  #log-table tbody tr td:nth-child(n+4) { display:inline-block; width:33%; text-align:center; vertical-align:top; }
+
+  #temas-filter-bar { flex-wrap:wrap; }
+  #temas-filter-bar button, #temas-filter-bar input { font-size:11px; }
+  #temas-filter-info { width:100%; margin-top:4px; margin-left:0 !important; }
+
+  /* === TEMAS (mobile stacked list) === */
+  #temas-grid { display:none; }
+  #temas-grid-mobile { display:block !important; }
+
+  /* Generic tables: smaller */
+  table { font-size: 11px; }
+
+  /* Forms */
+  input, select, textarea { font-size: 16px !important; /* evita zoom iOS ao focar */ }
+  .form-group label { font-size: 13px; }
+}
+
+#temas-grid-mobile { display:none; }
+.tg-mobile-date { background:var(--bg-2); border:1px solid var(--border); border-radius:8px; margin-bottom:10px; overflow:hidden; }
+.tg-mobile-date-header { padding:10px 12px; background:var(--bg-3); cursor:pointer; display:flex; align-items:center; justify-content:space-between; font-weight:600; }
+.tg-mobile-date-header .tg-mob-count { font-size:11px; color:var(--text-sec); font-weight:400; }
+.tg-mobile-channels { padding:8px 12px; display:none; }
+.tg-mobile-date.open .tg-mobile-channels { display:block; }
+.tg-mobile-channel { padding:8px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:8px; cursor:pointer; font-size:13px; }
+.tg-mobile-channel:last-child { border-bottom:none; }
+.tg-mobile-channel:hover, .tg-mobile-channel:active { background:var(--bg-3); }
+.tg-mobile-channel .tgmc-status { font-size:16px; width:20px; text-align:center; }
+.tg-mobile-channel .tgmc-tag { font-weight:600; min-width:50px; }
+.tg-mobile-channel .tgmc-tema { flex:1; color:var(--text-sec); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
 </style>
 </head>
 <body>
+
+<!-- Hamburger button (mobile only) -->
+<button class="btn-hamburger" onclick="toggleSidebar()" aria-label="Menu">&#9776;</button>
+<div class="sidebar-backdrop" onclick="toggleSidebar(false)"></div>
 
 <!-- SIDEBAR -->
 <nav class="sidebar">
@@ -2582,6 +2667,7 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
         <thead id="temas-thead"></thead>
         <tbody id="temas-tbody"></tbody>
       </table>
+      <div id="temas-grid-mobile"></div>
     </div>
     <div id="temas-empty" class="empty-state" style="display:none">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0"/></svg>
@@ -3818,7 +3904,98 @@ function showPage(page) {
   document.getElementById('page-' + page).classList.add('active');
   document.querySelector('[data-page="' + page + '"]').classList.add('active');
   _loadPageData(page);
+  // Fecha sidebar no mobile apos navegar
+  if (window.innerWidth <= 768) toggleSidebar(false);
 }
+
+// === MOBILE: sidebar drawer ===
+function toggleSidebar(force) {
+  var sb = document.querySelector('.sidebar');
+  var bd = document.querySelector('.sidebar-backdrop');
+  if (!sb) return;
+  var willOpen = typeof force === 'boolean' ? force : !sb.classList.contains('open');
+  sb.classList.toggle('open', willOpen);
+  if (bd) bd.classList.toggle('open', willOpen);
+}
+
+function _isMobile() { return window.innerWidth <= 768; }
+
+// === TEMAS MOBILE: lista vertical ===
+function renderTemasGridMobile() {
+  var wrap = document.getElementById('temas-grid-mobile');
+  if (!wrap) return;
+  // Sempre renderiza (CSS decide visibilidade via @media)
+
+  var cols = (temasData && temasData.colunas) || [];
+  var rows = (temasData && temasData.linhas) || [];
+  var celulas = (temasData && temasData.celulas) || {};
+
+  // aplica filtro de datas (reusa o mesmo localStorage de temasFiltro)
+  var cfg = {preset:'mes', start:'', end:''};
+  try { cfg = JSON.parse(localStorage.getItem('temasFiltro') || '{}'); } catch(e){}
+  if (cfg.preset === 'mes' && (!cfg.start || !cfg.end)) {
+    var hoje = new Date(); hoje.setHours(0,0,0,0);
+    var m0 = new Date(hoje.getFullYear(), hoje.getMonth(), 1);
+    var m1 = new Date(hoje.getFullYear(), hoje.getMonth()+1, 0);
+    cfg.start = _temasDateISO(m0); cfg.end = _temasDateISO(m1);
+  }
+  var startD = cfg.start ? new Date(cfg.start) : null;
+  var endD = cfg.end ? new Date(cfg.end) : null;
+
+  var html = '';
+  rows.forEach(function(row, ri) {
+    var d = _temasParseData(row.data);
+    if (d) {
+      if (startD && d < startD) return;
+      if (endD && d > endD) return;
+    }
+    // Conta status por canal (done, erro, pendente)
+    var done = 0, erro = 0, total = 0;
+    cols.forEach(function(col, ci) {
+      var cel = celulas[ri + '_' + ci];
+      if (!cel || !cel.tema) return;
+      total++;
+      if (cel.done) done++;
+    });
+    var rowOpen = (row.data === _hojeBR()) ? ' open' : '';
+    html += '<div class="tg-mobile-date' + rowOpen + '">';
+    html += '<div class="tg-mobile-date-header" onclick="tgmToggle(this)">';
+    html += '<span>' + row.data + '</span>';
+    html += '<span class="tg-mob-count">' + done + '/' + total + (erro ? ' · ' + erro + ' err' : '') + '</span>';
+    html += '</div>';
+    html += '<div class="tg-mobile-channels">';
+    cols.forEach(function(col, ci) {
+      var cel = celulas[ri + '_' + ci] || {};
+      var tema = cel.tema || '';
+      var icon = cel.done ? '✅' : (tema ? '○' : '·');
+      html += '<div class="tg-mobile-channel" onclick="editarCelula(' + ri + ',' + ci + ')">';
+      html += '<span class="tgmc-status">' + icon + '</span>';
+      html += '<span class="tgmc-tag">' + (col.nome || '') + '</span>';
+      html += '<span class="tgmc-tema">' + tema.replace(/\\n/g, ' ').slice(0, 60) + '</span>';
+      html += '</div>';
+    });
+    html += '</div></div>';
+  });
+  wrap.innerHTML = html || '<div style="padding:20px;text-align:center;color:var(--text-sec)">Nenhuma data no filtro</div>';
+}
+
+function _hojeBR() {
+  var d = new Date();
+  var dd = String(d.getDate()).padStart(2,'0');
+  var mm = String(d.getMonth()+1).padStart(2,'0');
+  return dd + '/' + mm + '/' + d.getFullYear();
+}
+
+function tgmToggle(el) {
+  if (el && el.parentElement) el.parentElement.classList.toggle('open');
+}
+
+// Re-renderizar ao redimensionar (ex: rotacionar celular)
+window.addEventListener('resize', function() {
+  if (_currentPage === 'temas') {
+    try { renderTemasGridMobile(); } catch(e){}
+  }
+});
 
 function _loadPageData(page) {
   if (page === 'templates') carregarTemplates();
@@ -6545,6 +6722,7 @@ function renderTemasGrid() {
   });
   tbody.innerHTML = html;
   temasAplicarFiltro();
+  try { renderTemasGridMobile(); } catch(e){}
 }
 
 // === FILTRO DE LINHAS NO GRID TEMAS ===
@@ -6635,6 +6813,9 @@ function temasAplicarFiltro() {
   });
   var info = document.getElementById('temas-filter-info');
   if (info) info.textContent = visiveis + '/' + total + ' linhas';
+
+  // Re-renderizar lista mobile ao mudar filtro
+  try { renderTemasGridMobile(); } catch(e){}
 }
 
 function adicionarColunaTemas() {
@@ -8180,6 +8361,11 @@ fetch('/api/health').then(function(r){ return r.json(); }).then(function(d){
 
 // Sempre iniciar polling do Monitor em background
 startMonitorPolling();
+
+// Mobile: abrir em Monitor por default
+if (window.innerWidth <= 768) {
+  try { showPage('monitor'); } catch(e) { console.error('mobile init:', e); }
+}
 
 // === MONITOR ===
 var _monitorInterval = null;

@@ -194,17 +194,70 @@ def _gerar_roteiro_para_canal(job_index, job, cel, data_ref, pasta_roteiros=None
     provider, fallback_used = _extrai_provider(last_res)
 
     if resultado and len(resultado) < min_chars:
-        production_log.atualizar_canal(job_index, etapa="erro", erro=f"Roteiro muito curto apos {max_retries} tentativas ({len(resultado)} chars)")
-        production_log.adicionar_log(f"{tag}: ERRO - roteiro curto apos {max_retries} tentativas ({len(resultado)} chars)")
+        # Ultima cartada: forca fallback de provider (pula primario, vai direto pro proximo na chain).
+        # Util quando o provider primario esta consistentemente gerando output curto.
+        #
+        # Tolerancia: como o fallback eh a ultima cartada antes de marcar erro, aceitamos
+        # roteiros menores que min_chars desde que >= min_chars * tolerancia_fallback_pct.
+        # Default 80% (ex: min 22000ch -> aceita >= 17600ch). Configuravel por template.
+        tolerancia_pct = float(tmpl.get("tolerancia_fallback_pct", 0.80))
+        min_aceito_fb = int(min_chars * tolerancia_pct)
+
+        production_log.adicionar_log(
+            f"{tag}: Roteiro CURTO ({len(resultado)} chars) apos {max_retries} retries. "
+            f"Tentando FALLBACK forcado (aceita >= {min_aceito_fb}ch com tolerancia {int(tolerancia_pct*100)}%)..."
+        )
+        production_log.atualizar_canal(job_index, etapa_detalhe="Fallback forcado de provider...")
         try:
-            video_log_db.registrar_roteiro(
-                data_ref, tag, "erro", provider=provider, fallback=fallback_used,
-                chars=len(resultado), erro=f"Roteiro curto ({len(resultado)} chars)",
-                template=tmpl.get("nome", ""), template_id=job.get("template_id", ""),
+            res_fb = scriptwriter.executar_pipeline_isolado(
+                pipeline_id, cel.get("tema", ""),
+                contexto_extra=contexto, forcar_fallback=True,
             )
-        except Exception:
-            pass
-        return (job_index, None, "Roteiro curto")
+            fb_resultado = res_fb.get("resultado", "") if res_fb else ""
+            fb_chars = len(fb_resultado)
+
+            if res_fb and res_fb.get("ok") and fb_chars >= min_aceito_fb:
+                resultado = fb_resultado
+                last_res = res_fb
+                provider, fallback_used = _extrai_provider(res_fb)
+                if fb_chars >= min_chars:
+                    production_log.adicionar_log(f"{tag}: Fallback forcado OK ({fb_chars} chars, provider={provider})")
+                else:
+                    production_log.adicionar_log(
+                        f"{tag}: Fallback forcado ACEITO COM TOLERANCIA "
+                        f"({fb_chars}ch >= {min_aceito_fb}ch min, target era {min_chars}ch, provider={provider})"
+                    )
+            else:
+                # Mesmo com fallback ficou curto demais (abaixo da tolerancia), marca erro
+                production_log.atualizar_canal(
+                    job_index, etapa="erro",
+                    erro=f"Roteiro curto ate com fallback ({fb_chars} chars, min aceito {min_aceito_fb})"
+                )
+                production_log.adicionar_log(
+                    f"{tag}: ERRO - mesmo fallback gerou roteiro curto demais "
+                    f"({fb_chars}ch < {min_aceito_fb}ch min com tolerancia)"
+                )
+                try:
+                    video_log_db.registrar_roteiro(
+                        data_ref, tag, "erro", provider=provider, fallback=True,
+                        chars=fb_chars, erro=f"Roteiro curto mesmo com fallback ({fb_chars} chars, min aceito {min_aceito_fb})",
+                        template=tmpl.get("nome", ""), template_id=job.get("template_id", ""),
+                    )
+                except Exception:
+                    pass
+                return (job_index, None, "Roteiro curto (fallback tambem falhou)")
+        except Exception as e:
+            production_log.atualizar_canal(job_index, etapa="erro", erro=f"Fallback forcado exception: {e}")
+            production_log.adicionar_log(f"{tag}: ERRO - fallback forcado exception: {e}")
+            try:
+                video_log_db.registrar_roteiro(
+                    data_ref, tag, "erro", provider=provider, fallback=fallback_used,
+                    chars=len(resultado), erro=f"Fallback exception: {str(e)[:100]}",
+                    template=tmpl.get("nome", ""), template_id=job.get("template_id", ""),
+                )
+            except Exception:
+                pass
+            return (job_index, None, f"Fallback forcado falhou: {e}")
 
     if resultado and len(resultado) > 100:
         temas_data = _carregar_temas()
@@ -869,8 +922,13 @@ def _data_teve_erro() -> bool:
 
 
 def _produzir_loop(data_idx_inicio: int, ordem_colunas: list = None):
-    """Produz em loop: completa uma data, avanca pra proxima ate acabar ou cancelar.
-    No fim do loop, reprocessa datas que terminaram com canais em erro (max REPASS_MAX vezes por data).
+    """Produz em loop: completa uma data, faz repass IN-PLACE dela mesma se houver erros,
+    e SO ENTAO avanca pra proxima.
+
+    Cada data eh processada uma primeira vez; se deixar canais em 'erro', tenta de novo
+    ate REPASS_MAX vezes adicionais ANTES de avancar pra proxima data. Como o orchestrator
+    pula canais com MP4/MP3/.txt ja existentes, apenas os canais com erro sao re-tentados,
+    e o forced fallback do scriptwriter cuida de pular o provider que falhou.
     """
     global estado
     temas_data = _carregar_temas()
@@ -882,9 +940,6 @@ def _produzir_loop(data_idx_inicio: int, ordem_colunas: list = None):
     estado["loop"] = True
     estado["loop_data_atual"] = data_idx_inicio
     estado["loop_total"] = total_datas - data_idx_inicio
-
-    # Datas que terminaram com erro na primeira passada (sao reprocessadas no final)
-    datas_com_erro: list[int] = []
 
     for data_idx in range(data_idx_inicio, total_datas):
         if estado["cancelado"]:
@@ -907,8 +962,9 @@ def _produzir_loop(data_idx_inicio: int, ordem_colunas: list = None):
             production_log.adicionar_log(f"LOOP: Data {linhas[data_idx].get('data','')} sem temas, parando loop")
             break
 
+        data_ref = linhas[data_idx].get('data', '')
         estado["loop_data_atual"] = data_idx
-        production_log.adicionar_log(f"LOOP: Iniciando data {data_idx + 1}/{total_datas} ({linhas[data_idx].get('data','')})")
+        production_log.adicionar_log(f"LOOP: Iniciando data {data_idx + 1}/{total_datas} ({data_ref})")
 
         # Produzir essa data (bloqueia ate concluir)
         produzir_data_completa(data_idx, ordem_colunas=ordem_colunas)
@@ -916,43 +972,35 @@ def _produzir_loop(data_idx_inicio: int, ordem_colunas: list = None):
         if estado["cancelado"]:
             break
 
-        # Marcar pra reprocessar se deixou canais em erro
-        if _data_teve_erro():
-            data_ref = linhas[data_idx].get("data", "")
-            production_log.adicionar_log(f"LOOP: Data {data_ref} terminou com erros, marcada para repass")
-            datas_com_erro.append(data_idx)
+        # === REPASS IN-PLACE ===
+        # Se essa data deixou canais em erro, refaz a producao da mesma data
+        # ate REPASS_MAX vezes ANTES de avancar pra proxima. Canais com MP4/MP3/.txt
+        # ja gerados sao pulados automaticamente pelo orchestrator; apenas os em erro
+        # sao re-tentados (e o forced fallback puxa outro provider).
+        for pass_num in range(1, REPASS_MAX + 1):
+            if estado["cancelado"]:
+                break
+            if not _data_teve_erro():
+                break
+            production_log.adicionar_log(
+                f"LOOP: Data {data_ref} com erros, repass in-place {pass_num}/{REPASS_MAX} antes de avancar"
+            )
+            produzir_data_completa(data_idx, ordem_colunas=ordem_colunas)
+            if not _data_teve_erro():
+                production_log.adicionar_log(f"LOOP: Data {data_ref} OK apos repass in-place {pass_num}")
+                break
+
+        if not estado["cancelado"] and _data_teve_erro():
+            production_log.adicionar_log(
+                f"LOOP: Data {data_ref} ainda com erros apos {REPASS_MAX} repasses, "
+                f"avancando para proxima data"
+            )
 
         # Recarregar temas pra proxima data (pode ter mudado)
         temas_data = _carregar_temas()
         linhas = temas_data.get("linhas", [])
         colunas = temas_data.get("colunas", [])
         celulas = temas_data.get("celulas", {})
-
-    # === REPASS: re-processa datas com erro ===
-    if datas_com_erro and not estado["cancelado"]:
-        production_log.adicionar_log(f"LOOP: Iniciando repass de {len(datas_com_erro)} datas com erros")
-
-        for pass_num in range(1, REPASS_MAX + 1):
-            restantes: list[int] = []
-            for data_idx in datas_com_erro:
-                if estado["cancelado"]:
-                    break
-                data_ref = linhas[data_idx].get("data", "") if data_idx < len(linhas) else f"idx={data_idx}"
-                production_log.adicionar_log(f"LOOP: Repass {pass_num}/{REPASS_MAX} da data {data_ref}")
-                estado["loop_data_atual"] = data_idx
-                produzir_data_completa(data_idx, ordem_colunas=ordem_colunas)
-                if _data_teve_erro():
-                    restantes.append(data_idx)
-                    production_log.adicionar_log(f"LOOP: Data {data_ref} ainda com erros apos repass {pass_num}")
-                else:
-                    production_log.adicionar_log(f"LOOP: Data {data_ref} OK apos repass {pass_num}")
-
-            if estado["cancelado"] or not restantes:
-                break
-            datas_com_erro = restantes
-
-        if datas_com_erro:
-            production_log.adicionar_log(f"LOOP: {len(datas_com_erro)} datas encerraram com erros apos {REPASS_MAX} repasses")
 
     estado["loop"] = False
     estado["ativo"] = False
@@ -964,6 +1012,7 @@ def iniciar_producao(data_idx: int, temas_data: dict = None, ordem_colunas: list
     if estado["ativo"]:
         return {"ok": False, "erro": "Producao ja em andamento"}
 
+    estado["cancelado"] = False  # fix: evita que reset anterior bloqueie novo inicio
     # Limpar state anterior para forcar nova producao (nao resume)
     production_log._state = {
         "ativo": False, "data_ref": "", "data_idx": None, "ordem_colunas": None,

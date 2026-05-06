@@ -10,6 +10,14 @@ import json
 import ctypes
 from pathlib import Path
 
+# Forca stdout/stderr a usarem UTF-8 (default no Windows e cp1252, o que corrompe
+# caracteres acentuados/especiais como AOUss alemaes ao serem decodificados como UTF-8 pelo parent).
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+except Exception:
+    pass
+
 
 def _load_nvidia_dlls():
     nvidia = Path(sys.executable).parent / "Lib" / "site-packages" / "nvidia"
