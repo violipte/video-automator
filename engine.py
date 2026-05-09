@@ -810,6 +810,12 @@ class VideoEngine:
         cmd = ["ffmpeg", "-y", "-threads", "16"]
         cmd.extend(inputs)
         cmd.extend(["-filter_complex_script", str(filter_file)])
+        # Fix #3: escrita atomica via .tmp + rename pra evitar race com
+        # auto-download.py (que polla *.mp4 no Network Volume RunPod).
+        # FFmpeg escreve em output.mp4.tmp; auto-download ignora .tmp;
+        # so renomeia pra .mp4 quando metadata stripping termina (atomico).
+        output_tmp = self.output_path + ".tmp"
+
         cmd.extend([
             "-map", f"[{ultimo_video}]",
             "-map", f"[{audio_label}]",
@@ -821,7 +827,7 @@ class VideoEngine:
             "-b:a", "192k",
             "-movflags", "+faststart",
             "-t", f"{self.duracao_total:.2f}",
-            self.output_path
+            output_tmp
         ])
 
         Path(self.output_path).parent.mkdir(parents=True, exist_ok=True)
@@ -863,27 +869,35 @@ class VideoEngine:
             self.processo.kill()
             self.processo.wait()
         if self.processo.returncode != 0:
-            # Deletar arquivo incompleto/corrompido
-            if Path(self.output_path).exists():
-                Path(self.output_path).unlink(missing_ok=True)
+            # Deletar arquivo .tmp incompleto/corrompido
+            if Path(output_tmp).exists():
+                Path(output_tmp).unlink(missing_ok=True)
             raise RuntimeError(f"FFmpeg falhou com código {self.processo.returncode}")
 
-        # Limpar metadados do vídeo (remove encoder, software, timestamps)
-        if Path(self.output_path).exists():
-            clean_path = self.output_path.replace(".mp4", "_clean.mp4")
+        # Limpar metadados do vídeo (remove encoder, software, timestamps).
+        # Le de output.mp4.tmp, escreve em output.mp4_clean.tmp, e atomic
+        # rename pra output.mp4 final. Auto-download so ve .mp4 quando completo.
+        if Path(output_tmp).exists():
+            clean_tmp = self.output_path + "_clean.tmp"
             clean_cmd = [
-                "ffmpeg", "-y", "-i", self.output_path,
+                "ffmpeg", "-y", "-i", output_tmp,
                 "-map_metadata", "-1",
                 "-c", "copy",
                 "-fflags", "+bitexact",
                 "-flags:v", "+bitexact",
                 "-flags:a", "+bitexact",
-                clean_path
+                clean_tmp
             ]
             ret = subprocess.run(clean_cmd, capture_output=True, timeout=60)
-            if ret.returncode == 0 and Path(clean_path).exists():
-                Path(self.output_path).unlink()
-                Path(clean_path).rename(self.output_path)
+            if ret.returncode == 0 and Path(clean_tmp).exists():
+                Path(output_tmp).unlink(missing_ok=True)
+                Path(clean_tmp).rename(self.output_path)  # atomic: .tmp -> .mp4
+            else:
+                # Cleanup metadata falhou — fallback: renomear .tmp direto pra .mp4.
+                # Perde o strip de metadata mas preserva o video.
+                Path(output_tmp).rename(self.output_path)
+                if Path(clean_tmp).exists():
+                    Path(clean_tmp).unlink(missing_ok=True)
 
         if callback_progresso:
             callback_progresso(100.0)
