@@ -776,6 +776,14 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
 
         production_log.adicionar_log(f"Render: {len(_render_pendentes)} canais enfileirados | Narracao: {len(canais_sem_narracao)} canais pendentes")
 
+        # === SKIP PRIMARIO APOS N FALHAS CONSECUTIVAS ===
+        # Se 2+ canais consecutivos cairem em fallback (sinal de outage do
+        # ai33.pro), pula totalmente o primario nos canais subsequentes que
+        # tem fallback Inworld configurado. Reseta quando o primario sucede
+        # em algum canal. Escopo: apenas esta execucao de produzir_data_completa.
+        falhas_consec_primario = 0
+        SKIP_PRIMARIO_THRESHOLD = 2
+
         # --- DEPOIS: narrar os que faltam (sequencial) ---
         # Heuristica anti-timeout: se 2 canais consecutivos cairem em fallback Inworld
         # (Minimax via ai33.pro engasgando), os canais subsequentes da MESMA DATA
@@ -808,6 +816,23 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
                 continue
 
             MAX_NARR_RETRIES = 2
+            narr_succeeded = False  # default p/ caso o for_loop abaixo nao executar
+
+            # Gate skip: se 2+ canais seguidos cairam em fallback E este canal tem
+            # Inworld configurado, pula direto pro Inworld (zera retries primario).
+            _fb_cfg = (job.get("template") or {}).get("narracao_voz", {}).get("fallback") or {}
+            _inworld_key = config.get("inworld_api_key", "")
+            _pode_inworld = bool(
+                _fb_cfg.get("provider") == "inworld"
+                and _inworld_key
+                and _fb_cfg.get("voice_id")
+            )
+            _skip_primario = (falhas_consec_primario >= SKIP_PRIMARIO_THRESHOLD) and _pode_inworld
+            if _skip_primario:
+                production_log.adicionar_log(
+                    f"{tag}: SKIP primario ({falhas_consec_primario} falhas consec) -> direto Inworld"
+                )
+                MAX_NARR_RETRIES = 0  # for_loop nao executa, vai direto pro bloco Inworld
 
             # Decisao: pular Minimax e ir direto pro Inworld?
             if forcar_inworld_resto_data:
@@ -974,7 +999,12 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
                     break
 
             if narr_succeeded:
+                falhas_consec_primario = 0  # primario voltou: reseta sinal de outage
                 continue
+
+            # Tentou primario e falhou: incrementa contador (so se REALMENTE tentou)
+            if not _skip_primario:
+                falhas_consec_primario += 1
 
             # === FALLBACK INWORLD ===
             # Todos os retries do provedor primario falharam. Tenta Inworld se configurado.
