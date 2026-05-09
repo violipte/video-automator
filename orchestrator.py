@@ -784,6 +784,44 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
         falhas_consec_primario = 0
         SKIP_PRIMARIO_THRESHOLD = 2
 
+        # === PROBE INICIAL DO ai33.pro ===
+        # Antes de iniciar narracao, manda 1 chunk de 8000 chars com a voz
+        # do primeiro canal pendente. Se ambas tentativas falharem (300s
+        # primeira, 180s retry), considera primario OUT e ja ativa o gate
+        # de skip para todos os canais subsequentes (mandatorio: todos os
+        # canais tem fallback Inworld configurado).
+        # Salta o probe se nao ha canal pendente (todos ja tem MP3).
+        if canais_sem_narracao and api_key:
+            _probe_job = canais_sem_narracao[0][1]
+            _probe_voice_id_short = (_probe_job.get("voice_id", "") or "")[:12]
+            production_log.adicionar_log(
+                f"PROBE ai33.pro: testando voz {_probe_job.get('voice_provider', '')}/{_probe_voice_id_short} "
+                f"(chunk 8k chars, 300s+180s)..."
+            )
+            try:
+                probe_result = narrator.testar_ai33pro(
+                    api_key=api_key,
+                    voice_provider=_probe_job.get("voice_provider", ""),
+                    voice_id=_probe_job.get("voice_id", ""),
+                    voice_speed=_probe_job.get("voice_speed", 1.0),
+                    voice_pitch=_probe_job.get("voice_pitch", 0),
+                )
+                if probe_result.get("ok"):
+                    production_log.adicionar_log(
+                        f"PROBE ai33.pro: OK em {probe_result.get('elapsed_s', 0):.1f}s. Producao normal."
+                    )
+                else:
+                    production_log.adicionar_log(
+                        f"PROBE ai33.pro: FALHOU - {probe_result.get('erro', '')}. "
+                        f"Ativando skip primario para canais com Inworld."
+                    )
+                    # Forca o gate skip a partir do primeiro canal
+                    falhas_consec_primario = SKIP_PRIMARIO_THRESHOLD
+            except Exception as _e:
+                production_log.adicionar_log(
+                    f"PROBE ai33.pro: exception inesperada - {_e}. Producao segue sem skip forcado."
+                )
+
         # --- DEPOIS: narrar os que faltam (sequencial) ---
         # Heuristica anti-timeout: se 2 canais consecutivos cairem em fallback Inworld
         # (Minimax via ai33.pro engasgando), os canais subsequentes da MESMA DATA

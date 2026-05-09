@@ -237,6 +237,113 @@ def consultar_tarefa(api_key: str, task_id: str) -> dict:
             return {"status": "error", "error_message": str(e)}
 
 
+# === HEALTH PROBE (chamado pelo orchestrator antes de cada producao) ===
+
+def testar_ai33pro(
+    api_key: str,
+    voice_provider: str,
+    voice_id: str,
+    voice_speed: float = 1.0,
+    voice_pitch: int = 0,
+    timeout_first: float = 300.0,
+    timeout_retry: float = 180.0,
+) -> dict:
+    """Probe de saude do ai33.pro antes da producao iniciar.
+
+    Envia 1 chunk de ~8000 chars (tamanho real de chunk produtivo Minimax)
+    com a voz REAL que sera usada na producao, e aguarda a task completar.
+    Detecta outage do primario ANTES de qualquer canal comecar, evitando
+    que canais 1+2 paguem o pedagio de retries antes do skip dinamico ativar.
+
+    1 retry com timeout reduzido. Se ambas falharem, primario considerado
+    OUT e o orchestrator forca todos os canais (com Inworld) pra fallback.
+
+    Audio gerado pelo provedor e descartado (nao baixa MP3); o probe
+    so valida ate o status "done" da task.
+
+    Retorna {"ok": bool, "erro": str, "elapsed_s": float, "credits": int}.
+    """
+    # Texto neutro de ~8000 chars (tamanho real de chunk produtivo Minimax)
+    base = (
+        "This is a synthetic health check sent before a production batch "
+        "to confirm that the text-to-speech provider is responsive and "
+        "able to render a realistic chunk. The output of this call is "
+        "discarded and exists only as a reachability and latency probe. "
+    )
+    texto = (base * 40)[:8000]
+
+    timeouts = [timeout_first, timeout_retry]
+    last_erro = ""
+    inicio_total = time.time()
+
+    for attempt, timeout_total in enumerate(timeouts):
+        deadline = time.time() + timeout_total
+        try:
+            if voice_provider in ("minimax", "minimax_clone"):
+                start_result = gerar_narracao_minimax(
+                    api_key, voice_id, texto,
+                    speed=voice_speed, pitch=voice_pitch,
+                )
+            elif voice_provider in ("elevenlabs", "elevenlabs_shared"):
+                start_result = gerar_narracao_elevenlabs(api_key, voice_id, texto)
+            else:
+                return {
+                    "ok": False,
+                    "erro": f"provider desconhecido: {voice_provider}",
+                    "elapsed_s": 0.0,
+                    "credits": 0,
+                }
+
+            if not start_result.get("ok"):
+                last_erro = f"start tentativa {attempt+1}: {start_result.get('erro', '')}"
+                if attempt < len(timeouts) - 1:
+                    time.sleep(5)
+                continue
+
+            task_id = start_result.get("task_id", "")
+            credits = start_result.get("credits", 0)
+            if not task_id:
+                last_erro = f"start tentativa {attempt+1}: sem task_id"
+                if attempt < len(timeouts) - 1:
+                    time.sleep(5)
+                continue
+
+            # Polling ate done/error/timeout
+            terminou_ok = False
+            while time.time() < deadline:
+                st = consultar_tarefa(api_key, task_id)
+                status = st.get("status", "")
+                if status == "done":
+                    return {
+                        "ok": True,
+                        "erro": "",
+                        "elapsed_s": time.time() - inicio_total,
+                        "credits": credits,
+                    }
+                if status == "error":
+                    last_erro = f"task tentativa {attempt+1}: {st.get('error_message', 'erro')}"
+                    terminou_ok = True  # nao foi sucesso, mas saiu do loop com motivo
+                    break
+                time.sleep(3)
+            if not terminou_ok:
+                last_erro = f"timeout {timeout_total:.0f}s (tentativa {attempt+1})"
+
+            if attempt < len(timeouts) - 1:
+                time.sleep(5)
+
+        except Exception as e:
+            last_erro = f"exception tentativa {attempt+1}: {e}"
+            if attempt < len(timeouts) - 1:
+                time.sleep(5)
+
+    return {
+        "ok": False,
+        "erro": last_erro,
+        "elapsed_s": time.time() - inicio_total,
+        "credits": 0,
+    }
+
+
 def baixar_audio(url: str, destino: str) -> str:
     """Baixa arquivo de audio de uma URL para destino local. Retry 3x com timeout generoso."""
     import time as _time
