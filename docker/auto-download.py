@@ -75,11 +75,19 @@ def get_active_pod():
 
 
 def list_remote_files(pod):
-    """Lista arquivos em /workspace/exports/ via SSH. Retorna [(path, size), ...]."""
+    """Lista arquivos em /workspace/exports/ via SSH. Retorna [(path, size), ...].
+
+    Defense-in-depth contra race com FFmpeg em escrita:
+      - Filtra *.tmp no shell find (engine.py escreve em output.mp4.tmp e
+        renomeia atomicamente pra .mp4 quando completa o cleanup metadata).
+      - Filtra novamente no Python (caso o find shell por algum motivo deixe
+        passar). Junto com a deteccao de "size estabilizado" mais abaixo,
+        garante 3 camadas de protecao contra MP4 sem moov atom.
+    """
     cmd = SSH_BASE + [
         "-p", str(pod["port"]),
         f"root@{pod['ip']}",
-        f"find {REMOTE_BASE} -type f -printf '%s\\t%P\\n' 2>/dev/null",
+        f"find {REMOTE_BASE} -type f ! -name '*.tmp' -printf '%s\\t%P\\n' 2>/dev/null",
     ]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
@@ -95,6 +103,9 @@ def list_remote_files(pod):
             continue
         try:
             size_str, rel = line.split("\t", 1)
+            # Defesa Python: ignora *.tmp mesmo se shell find deixou passar
+            if rel.endswith(".tmp"):
+                continue
             files.append((rel, int(size_str)))
         except ValueError:
             continue
