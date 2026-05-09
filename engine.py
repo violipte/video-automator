@@ -255,9 +255,16 @@ class VideoEngine:
                 for cp in clips:
                     if cp:
                         f.write(f"file '{cp}'\n")
+            # Re-encode (NAO -c copy) pra normalizar timestamps/fps entre clips.
+            # Causa documentada do bug "footage trava na 2a imagem": clips Ken Burns
+            # gerados via OpenCV+NVENC podem ter PTS com gaps. concat demuxer com
+            # -c copy preserva esses gaps -> FFmpeg congela no ultimo frame valido.
+            # libx264 ultrafast crf 23 + cfr resolve. Render ~5-10% mais lento.
             concat_cmd = [
                 "ffmpeg", "-y", "-f", "concat", "-safe", "0",
-                "-i", str(concat_list), "-c", "copy",
+                "-i", str(concat_list),
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+                "-vsync", "cfr", "-r", str(fps),
                 "-t", f"{self.duracao_total:.2f}",
                 bg_concat_path
             ]
