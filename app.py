@@ -1589,18 +1589,30 @@ def render_worker_download(request: Request, path: str = ""):
 
 @app.post("/api/render-worker/progress")
 async def render_worker_progress(request: Request):
-    """Render worker reporta progresso intermediario de um job."""
+    """Render worker reporta progresso intermediario de um job.
+
+    Tambem serve como heartbeat: se job_id eh fornecido, reseta started_at do
+    job em _remote_jobs (via render_queue.tocar_job_remoto). Isso evita que
+    _recuperar_jobs_travados re-enfileire um job que ainda esta rodando.
+    """
     _verificar_worker_token(request)
     dados = await request.json()
     canal_idx = dados.get("canal_idx")
     etapa_detalhe = dados.get("etapa_detalhe", "")
     progresso = dados.get("progresso", 0)
+    job_id = dados.get("job_id", "")
+
+    # Heartbeat: reset started_at do job (evita re-enqueue por timeout)
+    if job_id:
+        render_queue.tocar_job_remoto(job_id)
+
     if canal_idx is not None:
         kwargs = {"etapa_detalhe": etapa_detalhe, "progresso": progresso}
-        # Resetar timer quando worker realmente começa a processar este canal
-        if progresso <= 10:
-            import time as _time
-            kwargs["inicio"] = _time.time()
+        # Resetar timer da UI em qualquer chamada (antes era so progresso<=10).
+        # Isso garante que o tempo decorrido no Monitor reflete o ultimo
+        # heartbeat, nao o inicio do job (que pode ter sido ha 30min).
+        import time as _time
+        kwargs["inicio"] = _time.time()
         production_log.atualizar_canal(canal_idx, **kwargs)
     return {"ok": True}
 

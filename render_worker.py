@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 import traceback
 import urllib.request
@@ -130,16 +131,49 @@ def download_file(config: dict, vps_path: str, local_dest: str) -> bool:
         return False
 
 
-def report_progress(config: dict, canal_idx: int, etapa_detalhe: str, progresso: int = 0):
-    """Reporta progresso intermediario ao VPS."""
+def report_progress(config: dict, canal_idx: int, etapa_detalhe: str, progresso: int = 0,
+                    job_id: str = ""):
+    """Reporta progresso intermediario ao VPS.
+
+    job_id (opcional): se fornecido, VPS reseta started_at do job (heartbeat)
+    para evitar re-enqueue por timeout. Recomendado em qualquer chamada
+    durante operacao longa (transcricao, render).
+    """
     try:
-        api_request(config, "POST", "/api/render-worker/progress", {
+        payload = {
             "canal_idx": canal_idx,
             "etapa_detalhe": etapa_detalhe,
             "progresso": progresso,
-        })
+        }
+        if job_id:
+            payload["job_id"] = job_id
+        api_request(config, "POST", "/api/render-worker/progress", payload)
     except Exception:
         pass  # Nao falhar por causa de report de progresso
+
+
+class _HeartbeatThread(threading.Thread):
+    """Thread daemon que envia report_progress a cada 30s durante operacao
+    longa (engine.montar). Garante que o VPS sabe que o worker esta vivo
+    e nao re-enfileira o job. Para de rodar quando stop_event e setado.
+    """
+    def __init__(self, config, job_id, canal_idx, mensagem, progresso, interval=30):
+        super().__init__(daemon=True)
+        self.config = config
+        self.job_id = job_id
+        self.canal_idx = canal_idx
+        self.mensagem = mensagem
+        self.progresso = progresso
+        self.interval = interval
+        self.stop_event = threading.Event()
+
+    def run(self):
+        while not self.stop_event.wait(self.interval):
+            report_progress(self.config, self.canal_idx, self.mensagem,
+                            self.progresso, job_id=self.job_id)
+
+    def stop(self):
+        self.stop_event.set()
 
 
 def report_complete(config: dict, job_id: str, sucesso: bool, erro: str = "", video_path: str = ""):
@@ -180,9 +214,9 @@ def process_job(config: dict, job: dict) -> bool:
 
     if Path(narr_local).exists() and Path(narr_local).stat().st_size > 1000:
         log(f"  MP3 local existe: {tag}.mp3 ({Path(narr_local).stat().st_size} bytes)")
-        report_progress(config, canal_idx, f"MP3 local ({tag}.mp3)", 5)
+        report_progress(config, canal_idx, f"MP3 local ({tag}.mp3)", 5, job_id=job_id)
     else:
-        report_progress(config, canal_idx, "Baixando MP3 do VPS...", 5)
+        report_progress(config, canal_idx, "Baixando MP3 do VPS...", 5, job_id=job_id)
         log(f"  Baixando narracao: {job.get('narr_filename', '?')}")
         if not download_file(config, narr_vps_path, narr_local):
             report_complete(config, job_id, False, "Falha ao baixar MP3")
@@ -207,20 +241,29 @@ def process_job(config: dict, job: dict) -> bool:
     # Verificar se video ja existe
     if Path(video_path).exists() and Path(video_path).stat().st_size > 1000:
         log(f"  Video ja existe: {video_nome}")
-        report_progress(config, canal_idx, f"Video existe ({video_nome})", 100)
+        report_progress(config, canal_idx, f"Video existe ({video_nome})", 100, job_id=job_id)
         report_complete(config, job_id, True, video_path=video_path)
         return True
 
     max_retries = 2
     for attempt in range(max_retries + 1):
+        heartbeat = None
         try:
             # 3. Transcrever (Whisper GPU)
-            report_progress(config, canal_idx, "Transcrevendo...", 10)
+            report_progress(config, canal_idx, "Transcrevendo...", 10, job_id=job_id)
             log(f"  Transcrevendo...")
-            srt_path = transcriber.transcrever(narr_local, idioma)
+            # Heartbeat durante transcricao (pode demorar 1-3min)
+            heartbeat = _HeartbeatThread(config, job_id, canal_idx, "Transcrevendo...", 10)
+            heartbeat.start()
+            try:
+                srt_path = transcriber.transcrever(narr_local, idioma)
+            finally:
+                heartbeat.stop()
+                heartbeat.join(timeout=5)
+                heartbeat = None
 
             # 4. Corrigir legendas
-            report_progress(config, canal_idx, "Corrigindo legendas...", 20)
+            report_progress(config, canal_idx, "Corrigindo legendas...", 20, job_id=job_id)
             log(f"  Corrigindo legendas...")
             lc = tmpl.get("legenda_config", {})
             maiuscula = lc.get("maiuscula", tmpl.get("estilo_legenda") == 2)
@@ -234,7 +277,13 @@ def process_job(config: dict, job: dict) -> bool:
             # 5. Renderizar (FFmpeg NVENC GPU) — passa callback pra reportar
             # progresso real (Ken Burns 0-60%, montagem final 60-100% mapeado pra 30-100)
             retry_msg = f" (retry {attempt})" if attempt > 0 else ""
-            report_progress(config, canal_idx, f"Renderizando{retry_msg}... 30%", 30)
+            # Combina callback de progresso REAL (do master) + job_id pro heartbeat
+            # do tocar_job_remoto (do DEV). Cada call do report_progress reseta
+            # started_at no VPS, entao o callback (chamado a cada 3% ou 8s)
+            # ja serve como heartbeat efetivo - dispensa _HeartbeatThread separada
+            # durante render. Throttle do callback garante minimo 1 call a cada
+            # 8s, MUITO mais frequente que o WORKER_JOB_TIMEOUT=7200s.
+            report_progress(config, canal_idx, f"Renderizando{retry_msg}... 30%", 30, job_id=job_id)
             log(f"  Renderizando{retry_msg}...")
             engine = VideoEngine(tmpl, narr_local, video_path)
 
@@ -251,7 +300,7 @@ def process_job(config: dict, job: dict) -> bool:
                     _last_pct[0] = new_pct
                     _last_report_ts[0] = now
                     try:
-                        report_progress(config, canal_idx, f"Renderizando{retry_msg}... {new_pct}%", new_pct)
+                        report_progress(config, canal_idx, f"Renderizando{retry_msg}... {new_pct}%", new_pct, job_id=job_id)
                     except Exception:
                         pass
 
@@ -266,6 +315,14 @@ def process_job(config: dict, job: dict) -> bool:
                 raise RuntimeError("Video nao gerado ou vazio")
 
         except Exception as e:
+            # Garantir que qualquer heartbeat orfao seja parado
+            if heartbeat is not None:
+                try:
+                    heartbeat.stop()
+                    heartbeat.join(timeout=5)
+                except Exception:
+                    pass
+                heartbeat = None
             if Path(video_path).exists():
                 Path(video_path).unlink(missing_ok=True)
             if attempt < max_retries:

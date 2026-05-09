@@ -157,7 +157,11 @@ def enfileirar(job_id: str, render_fn=None, fonte: str = "manual",
 
 # === API REMOTA (para render_worker.py buscar jobs) ===
 
-WORKER_JOB_TIMEOUT = 300  # 5min — se job fica "processing" mais que isso, considerar worker morto
+WORKER_JOB_TIMEOUT = 7200  # 2h — folga pra render maximo (~30min) + transcricao + retries.
+# IMPORTANTE: o worker manda heartbeat via /api/render-worker/progress a cada
+# ~30s, e cada chamada chama tocar_job_remoto() resetando started_at. Entao
+# este timeout so dispara quando o worker REALMENTE morreu (sem heartbeat).
+# Antes era 300s (5min) e re-enfileirava jobs vivos -> double-render -> MP4 corrompido.
 
 
 def _recuperar_jobs_travados():
@@ -172,6 +176,23 @@ def _recuperar_jobs_travados():
                     print(f"[RENDER_QUEUE] Job {job['id']} travado ha {int(now - started)}s. Re-enfileirando.")
                     job["status"] = "pending"
                     job.pop("started_at", None)
+
+
+def tocar_job_remoto(job_id: str) -> bool:
+    """Heartbeat do worker: reseta started_at do job para agora.
+    Chamado a cada call do endpoint /api/render-worker/progress.
+    Sinaliza que o worker esta vivo e o job NAO deve ser re-enfileirado por
+    _recuperar_jobs_travados.
+
+    Retorna True se job foi encontrado em _remote_jobs (vivo), False se ja
+    completou ou nunca existiu.
+    """
+    with _remote_jobs_lock:
+        for job in _remote_jobs:
+            if job["id"] == job_id and job.get("status") == "processing":
+                job["started_at"] = time.time()
+                return True
+    return False
 
 
 def proximo_job_remoto(worker_id: str = "default") -> dict | None:
@@ -198,19 +219,31 @@ def proximo_job_remoto(worker_id: str = "default") -> dict | None:
 
 def completar_job_remoto(job_id: str, sucesso: bool, erro: str = "", video_path: str = "",
                           local_storage: str = "local", tamanho_mb: float = 0):
-    """Chamado pelo render worker quando termina um job."""
+    """Chamado pelo render worker quando termina um job.
+
+    Idempotente: se o job_id ja foi completado anteriormente (ex: 2 workers
+    pegaram o mesmo job por causa de re-enqueue por timeout), a segunda chamada
+    e um no-op silencioso. Nao corrompe estado, nao re-dispara callbacks.
+    """
     global _remote_current
+    job_existia = False
     with _remote_jobs_lock:
         for j, job in enumerate(_remote_jobs):
             if job["id"] == job_id:
                 _remote_jobs.pop(j)
+                job_existia = True
                 break
-        _remote_current = None
-        estado["fila_tamanho"] = sum(1 for j in _remote_jobs if j["status"] == "pending")
-        estado["ativo"] = estado["fila_tamanho"] > 0 or any(j["status"] == "processing" for j in _remote_jobs)
-        estado["job_atual"] = None
+        if job_existia:
+            _remote_current = None
+            estado["fila_tamanho"] = sum(1 for j in _remote_jobs if j["status"] == "pending")
+            estado["ativo"] = estado["fila_tamanho"] > 0 or any(j["status"] == "processing" for j in _remote_jobs)
+            estado["job_atual"] = None
 
-    # Chamar callbacks
+    if not job_existia:
+        print(f"[RENDER_QUEUE] completar_job_remoto({job_id}): job ja completou (idempotente), ignorando duplicata")
+        return
+
+    # Chamar callbacks (apenas se job existia)
     with _callbacks_lock:
         cb = _callbacks.pop(job_id, {})
     if sucesso:
