@@ -134,10 +134,16 @@ def _gerar_prompt_via_agente(canal: str, tema: str, titulo: str,
         "to generate, including scene, character, composition, lighting, "
         "text overlay positioning, and style."
     )
+    # Thumb completa pra agentes que esperam string unica (ex: thumbnail-eno).
+    # Top/bottom dividido tambem fornecido pra agentes que precisam controlar
+    # placement de texto explicitamente. Cada agente usa o que precisar.
+    thumb_full = (f"{thumb_top} {thumb_bottom}".strip()
+                  if thumb_bottom else (thumb_top or ""))
     user_msg = (
         f"Generate a YouTube thumbnail prompt for channel **{canal}**.\n\n"
         f"Tema: {tema}\n"
         f"Titulo: {titulo}\n"
+        f"Thumb: {thumb_full}\n"
         f"Thumb top text:    {thumb_top}\n"
         f"Thumb bottom text: {thumb_bottom}\n\n"
         f"Output ONLY the visual prompt:"
