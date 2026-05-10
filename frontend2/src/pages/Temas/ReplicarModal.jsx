@@ -7,12 +7,17 @@ import { Button } from '../../components/Common/Button'
 export function ReplicarModal({ spec, srcRow, srcCol, temas, onClose, onApply }) {
   const [datasSel, setDatasSel] = useState(new Set())
   const [canaisSel, setCanaisSel] = useState(new Set())
+  // Por default, esconde datas passadas. Causa raiz do bug 2026-05-10:
+  // usuario selecionou 12/04 achando que era 12/05 porque a lista mostrava
+  // todas as 42 datas em ordem ASC enquanto o grid principal mostra DESC.
+  const [mostrarPassadas, setMostrarPassadas] = useState(false)
 
   useEffect(() => {
-    if (!spec) { setDatasSel(new Set()); setCanaisSel(new Set()); return }
+    if (!spec) { setDatasSel(new Set()); setCanaisSel(new Set()); setMostrarPassadas(false); return }
     // default: nenhum selecionado
     setDatasSel(new Set())
     setCanaisSel(new Set())
+    setMostrarPassadas(false)
   }, [spec])
 
   if (!spec || !temas) return null
@@ -21,6 +26,37 @@ export function ReplicarModal({ spec, srcRow, srcCol, temas, onClose, onApply })
   const colunas = temas.colunas || []
   const srcDataLabel = (linhas[srcRow] || {}).data || `linha ${srcRow}`
   const srcCanalLabel = (colunas[srcCol] || {}).nome || `coluna ${srcCol}`
+
+  // Helpers pra filtrar/ordenar datas no modal (separados da ordem do array
+  // temas.linhas pra evitar mismatch com o grid principal que mostra DESC).
+  function parseDateBR(s) {
+    const [d, m, y] = (s || '').split('/').map(Number)
+    if (!y) return null
+    return new Date(y, m - 1, d)
+  }
+  const hoje = new Date()
+  hoje.setHours(0, 0, 0, 0)
+  // Lista visivel: filtrada (so futuro+hoje, exceto se mostrarPassadas=true,
+  // mas SEMPRE inclui a linha origem) e ordenada DESC (recentes em cima,
+  // espelhando o grid principal). Mantem o indice ORIGINAL `i` pra que
+  // toggleData(i) e srcRow continuem corretos.
+  const linhasVisiveis = linhas
+    .map((l, i) => ({ l, i }))
+    .filter(({ l, i }) => {
+      if (mostrarPassadas) return true
+      if (i === srcRow) return true
+      const dt = parseDateBR(l.data)
+      return !dt || dt >= hoje
+    })
+    .sort((a, b) => {
+      const da = parseDateBR(a.l.data)
+      const db = parseDateBR(b.l.data)
+      if (!da && !db) return 0
+      if (!da) return 1
+      if (!db) return -1
+      return db - da  // DESC: mais recentes em cima
+    })
+  const passadasOcultas = linhas.length - linhasVisiveis.length
 
   function toggleData(idx) {
     if (idx === srcRow) return  // origem nao pode ser destino
@@ -37,7 +73,8 @@ export function ReplicarModal({ spec, srcRow, srcCol, temas, onClose, onApply })
   }
 
   function selectAllDatas() {
-    setDatasSel(new Set(linhas.map((_, i) => i).filter(i => i !== srcRow)))
+    // Seleciona apenas as datas VISIVEIS (respeita filtro futuro/passado)
+    setDatasSel(new Set(linhasVisiveis.filter(({ i }) => i !== srcRow).map(({ i }) => i)))
   }
   function clearDatas() { setDatasSel(new Set()) }
   function selectAllCanais() {
@@ -168,14 +205,24 @@ export function ReplicarModal({ spec, srcRow, srcCol, temas, onClose, onApply })
         {/* Datas */}
         <div>
           <div className="replicar-section-head">
-            <span>Datas destino ({datasSel.size}/{linhas.length - 1})</span>
+            <span>Datas destino ({datasSel.size}/{linhasVisiveis.length - (linhasVisiveis.some(({ i }) => i === srcRow) ? 1 : 0)})</span>
             <div style={{ display: 'flex', gap: 4 }}>
               <button className="mini-btn" onClick={selectAllDatas}>todas</button>
               <button className="mini-btn" onClick={clearDatas}>nenhuma</button>
+              {passadasOcultas > 0 && !mostrarPassadas && (
+                <button className="mini-btn" onClick={() => setMostrarPassadas(true)} title={`${passadasOcultas} datas anteriores a hoje estao escondidas`}>
+                  + ver passadas ({passadasOcultas})
+                </button>
+              )}
+              {mostrarPassadas && (
+                <button className="mini-btn" onClick={() => setMostrarPassadas(false)}>
+                  ⎯ esconder passadas
+                </button>
+              )}
             </div>
           </div>
           <div className="replicar-list">
-            {linhas.map((l, i) => {
+            {linhasVisiveis.map(({ l, i }) => {
               const isSrc = i === srcRow
               return (
                 <label key={i} className={`replicar-item ${isSrc ? 'replicar-src' : ''} ${datasSel.has(i) ? 'replicar-on' : ''}`}>
