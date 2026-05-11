@@ -260,10 +260,17 @@ class VideoEngine:
             # gerados via OpenCV+NVENC podem ter PTS com gaps. concat demuxer com
             # -c copy preserva esses gaps -> FFmpeg congela no ultimo frame valido.
             # libx264 ultrafast crf 23 + cfr resolve. Render ~5-10% mais lento.
+            #
+            # HOTFIX 2026-05-11 (PROD reportou EINVAL no Pass 2 final assembly):
+            # -pix_fmt yuv420p OBRIGATORIO. Sem ele, libx264 pode gerar yuvj420p
+            # (full range JPEG colorspace) baseado nos clips NVENC de entrada.
+            # NVENC encoder do Pass 2 (h264_nvenc) rejeita esse pix_fmt -> EINVAL
+            # silencioso (exit code 4294967274 = -22). 100% deterministico.
             concat_cmd = [
                 "ffmpeg", "-y", "-f", "concat", "-safe", "0",
                 "-i", str(concat_list),
                 "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+                "-pix_fmt", "yuv420p",
                 "-vsync", "cfr", "-r", str(fps),
                 "-t", f"{self.duracao_total:.2f}",
                 bg_concat_path
@@ -847,10 +854,22 @@ class VideoEngine:
         _last_progress_time = _time.time()
         _stall_timeout = 600  # 10 min sem progresso = morto
 
+        # HOTFIX 2026-05-11 (incidente FFmpeg EINVAL silencioso no Pass 2):
+        # Buffer stderr completo (limitado a 5000 linhas finais pra nao explodir
+        # RAM em runs longos). Se exit code != 0, grava em arquivo de log.
+        # Sem isso, EINVAL e outros erros do FFmpeg ficam invisiveis - so
+        # sabemos o exit code mas nao a mensagem real.
+        _stderr_buffer = []
+        _MAX_STDERR_LINES = 5000
+
         for linha in self.processo.stderr:
             if self.cancelado:
                 self.processo.kill()
                 raise RuntimeError("Produção cancelada pelo usuário.")
+            # Acumula stderr (rolling buffer - mantem so as ultimas N linhas)
+            _stderr_buffer.append(linha)
+            if len(_stderr_buffer) > _MAX_STDERR_LINES:
+                _stderr_buffer = _stderr_buffer[-_MAX_STDERR_LINES:]
             match = re.search(r"time=(\d{2}):(\d{2}):(\d{2})\.(\d{2})", linha)
             if match and self.duracao_total > 0:
                 hh, mm, ss, cs = int(match.group(1)), int(match.group(2)), int(match.group(3)), int(match.group(4))
@@ -872,7 +891,30 @@ class VideoEngine:
             # Deletar arquivo .tmp incompleto/corrompido
             if Path(output_tmp).exists():
                 Path(output_tmp).unlink(missing_ok=True)
-            raise RuntimeError(f"FFmpeg falhou com código {self.processo.returncode}")
+            # Salvar stderr completo em arquivo pra debug (sem isso ficamos cegos)
+            stderr_text = "".join(_stderr_buffer)
+            log_path = TEMP_DIR / f"ffmpeg_fail_{int(_time.time())}_{Path(self.output_path).stem}.log"
+            try:
+                log_path.write_text(
+                    f"=== FFmpeg falhou ===\n"
+                    f"output: {self.output_path}\n"
+                    f"returncode: {self.processo.returncode}\n"
+                    f"duracao_total: {self.duracao_total:.2f}s\n"
+                    f"cmd: {' '.join(cmd[:30])}... (truncated)\n"
+                    f"=== STDERR ({len(_stderr_buffer)} lines, last {_MAX_STDERR_LINES}) ===\n"
+                    f"{stderr_text}",
+                    encoding="utf-8"
+                )
+                log_msg = f" - log: {log_path}"
+            except Exception as _e:
+                log_msg = f" - falhou tambem salvando log: {_e}"
+            # Inclui ultima linha real do stderr na exception (ajuda debug imediato)
+            ultimas_linhas = "".join(_stderr_buffer[-10:]).strip().split("\n")
+            tail = " | ".join(l.strip() for l in ultimas_linhas if l.strip())[:300]
+            raise RuntimeError(
+                f"FFmpeg falhou com código {self.processo.returncode}{log_msg}. "
+                f"Stderr tail: {tail}"
+            )
 
         # Limpar metadados do vídeo (remove encoder, software, timestamps).
         # Le de output.mp4.tmp, escreve em output.mp4_clean.tmp, e atomic
