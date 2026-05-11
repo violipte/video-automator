@@ -1,0 +1,7 @@
+{
+  "schema_version": "1.0",
+  "comment": "Lockfile compartilhado pelos 4 Claudes (Maestro/PROD/DEV/OBS). Cada Claude le antes de editar, escreve sua reserva, libera ao terminar. TTL maximo 600s. Detalhes em Notion: pagina 'Status & Lockfile'.",
+  "locks": [],
+  "updated_at": "2026-05-10T22:48:00",
+  "updated_by": "PROD (lock liberado pre-Commit 2 do Passo 1)"
+}

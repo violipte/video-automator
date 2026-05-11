@@ -1,0 +1,202 @@
+.backlog-add-row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: flex-end;
+}
+
+.backlog-toolbar {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+
+.backlog-toolbar > div {
+  max-width: 200px;
+}
+
+.backlog-count {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Tabela */
+.backlog-table-wrap {
+  overflow-x: auto;
+}
+
+.backlog-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+}
+
+.backlog-table thead {
+  background: var(--panel-2);
+}
+
+.backlog-table th {
+  padding: 10px 12px;
+  text-align: left;
+  font-weight: var(--fw-medium);
+  color: var(--text-sec);
+  font-size: var(--text-xs);
+  letter-spacing: var(--track-wide);
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--border);
+}
+
+.backlog-table td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.backlog-table tbody tr {
+  transition: background var(--t-fast);
+}
+.backlog-table tbody tr:hover {
+  background: var(--panel-2);
+}
+
+.cell-input {
+  width: 100%;
+  background: var(--input-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+  font-size: var(--text-sm);
+  color: var(--text);
+  font-family: inherit;
+  transition: all var(--t-fast);
+  box-shadow: var(--input-shadow-inset);
+}
+
+.cell-input:hover {
+  border-color: var(--border-hi);
+  background: var(--input-bg-hover);
+}
+
+.cell-input:focus {
+  border-color: var(--accent);
+  background: var(--input-bg-hover);
+  box-shadow: var(--shadow-glow), var(--input-shadow-inset);
+  outline: none;
+}
+
+/* Toggle Geral/CO* */
+.status-toggle {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 5px 12px;
+  font-size: var(--text-xs);
+  font-weight: var(--fw-medium);
+  color: var(--text-sec);
+  letter-spacing: var(--track-wide);
+  transition: all var(--t-fast);
+  min-width: 48px;
+}
+
+.status-toggle:hover {
+  border-color: var(--border-hi);
+  color: var(--text);
+}
+
+.status-toggle.on {
+  background: var(--accent);
+  color: #052e1c;
+  border-color: var(--accent);
+  font-weight: var(--fw-semi);
+  box-shadow: 0 0 8px rgba(16, 185, 129, 0.3);
+}
+
+/* Link pill */
+.link-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-sec);
+  font-size: var(--text-xs);
+  font-weight: var(--fw-medium);
+  letter-spacing: var(--track-wide);
+  transition: all var(--t-fast);
+}
+
+.link-pill:hover {
+  border-color: var(--accent);
+  color: var(--accent-text);
+  background: var(--accent-soft);
+}
+
+/* Row actions */
+.row-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--text-sec);
+  font-size: var(--text-md);
+  margin-left: 4px;
+  transition: all var(--t-fast);
+}
+
+.row-action:hover {
+  border-color: var(--border-hi);
+  color: var(--text);
+}
+
+.row-action.danger:hover {
+  background: var(--danger-soft);
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+/* Mobile cards */
+.backlog-cards {
+  display: none;
+  padding: 12px;
+}
+
+.backlog-card {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+  margin-bottom: 10px;
+}
+
+.backlog-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+@media (max-width: 768px) {
+  .backlog-table-wrap > table {
+    display: none;
+  }
+  .backlog-cards {
+    display: block;
+  }
+  .backlog-add-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .backlog-add-row .input-wrap {
+    flex: 1 1 auto !important;
+    min-width: 0 !important;
+  }
+}

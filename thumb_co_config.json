@@ -1,0 +1,40 @@
+{
+  "_descricao": "Config thumbnail CO* (modo imagem_fixa). PITER preenche os campos abaixo: imagem_base, fonte, cor_texto, posicao_top/bottom, outline.",
+  "_default_aplicavel_a": "Aplicado a todos CO1-CO4 a menos que canal tenha override em 'canais'.",
+  "default": {
+    "modo": "imagem_fixa",
+    "imagem_base": "",
+    "fonte": "fonts/Anton-Regular.ttf",
+    "tamanho_fonte": 110,
+    "cor_texto": "#FFFFFF",
+    "outline_width": 6,
+    "outline_color": "#000000",
+    "split_texto": true,
+    "posicao_top": {
+      "x_pct": 50,
+      "y_pct": 18,
+      "max_chars_linha": 24,
+      "align": "center"
+    },
+    "posicao_bottom": {
+      "x_pct": 50,
+      "y_pct": 78,
+      "max_chars_linha": 24,
+      "align": "center"
+    },
+    "_PENDENTE": "Piter preencher imagem_base + ajustar fonte/cor/posicao"
+  },
+  "canais": {
+    "CO1": {"_override": false, "imagem_base": ""},
+    "CO2": {"_override": false, "imagem_base": ""},
+    "CO3": {"_override": false, "imagem_base": ""},
+    "CO4": {"_override": false, "imagem_base": ""}
+  },
+  "_fontes_disponiveis_em_video_automator_fonts": [
+    "Anton-Regular.ttf",
+    "Inter.ttf",
+    "OpenSans.ttf",
+    "Poppins-Black.ttf",
+    "Poppins-Bold.ttf"
+  ]
+}
