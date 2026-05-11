@@ -93,26 +93,50 @@ def _ensure_video(db: dict, data: str, canal: str, template: str = "", template_
 
 # === ETAPAS ===
 
-def registrar_roteiro(data: str, canal: str, status: str,
-                       provider: str = "", fallback: bool = False,
-                       chars: int = 0, erro: str = "",
-                       template: str = "", template_id: str = ""):
-    """Registra resultado da etapa roteiro.
-
-    status: 'ok' | 'erro' | 'pendente'
-    provider: 'claude_cli' | 'claude' | 'gemini' | 'gpt' | ...
-    fallback: True se provider nao era o primario
+def iniciar_etapa(data: str, canal: str, etapa: str,
+                   template: str = "", template_id: str = ""):
+    """Marca etapa como iniciada. Salva 'inicio' (ISO timestamp).
+    Idempotente: se ja foi setado, nao sobrescreve (preserva tempo total real).
+    etapa: 'roteiro' | 'narracao' | 'render'
     """
     with _lock:
         db = _load()
         v = _ensure_video(db, data, canal, template, template_id)
+        et = v.setdefault(etapa, {"status": "pendente"})
+        if not et.get("inicio"):
+            et["inicio"] = _now()
+            et["status"] = "rodando"
+        _save(db)
+
+
+def registrar_roteiro(data: str, canal: str, status: str,
+                       provider: str = "", fallback: bool = False,
+                       chars: int = 0, erro: str = "",
+                       template: str = "", template_id: str = ""):
+    """Registra resultado da etapa roteiro. Marca 'fim' = agora."""
+    with _lock:
+        db = _load()
+        v = _ensure_video(db, data, canal, template, template_id)
+        et = v.get("roteiro", {})
+        # Preserva inicio se ja existia (de iniciar_etapa)
+        inicio = et.get("inicio")
         v["roteiro"] = {
             "status": status,
             "provider": provider,
             "fallback": fallback,
             "chars": chars,
             "timestamp": _now(),
+            "fim": _now(),
         }
+        if inicio:
+            v["roteiro"]["inicio"] = inicio
+            try:
+                from datetime import datetime as _dt
+                d_inicio = _dt.fromisoformat(inicio)
+                d_fim = _dt.fromisoformat(_now())
+                v["roteiro"]["duracao_s"] = round((d_fim - d_inicio).total_seconds(), 1)
+            except Exception:
+                pass
         if erro:
             v["roteiro"]["erro"] = erro
         _save(db)
@@ -123,14 +147,12 @@ def registrar_narracao(data: str, canal: str, status: str,
                         fallback: bool = False, chunks: int = 0,
                         path: str = "", erro: str = "",
                         template: str = "", template_id: str = ""):
-    """Registra resultado da etapa narracao.
-
-    provider: 'minimax_clone' | 'elevenlabs' | 'inworld'
-    fallback: True se foi usado o fallback do template (Inworld apos Minimax falhar)
-    """
+    """Registra resultado da etapa narracao. Marca 'fim'."""
     with _lock:
         db = _load()
         v = _ensure_video(db, data, canal, template, template_id)
+        et = v.get("narracao", {})
+        inicio = et.get("inicio")
         v["narracao"] = {
             "status": status,
             "provider": provider,
@@ -138,7 +160,17 @@ def registrar_narracao(data: str, canal: str, status: str,
             "fallback": fallback,
             "chunks": chunks,
             "timestamp": _now(),
+            "fim": _now(),
         }
+        if inicio:
+            v["narracao"]["inicio"] = inicio
+            try:
+                from datetime import datetime as _dt
+                d_inicio = _dt.fromisoformat(inicio)
+                d_fim = _dt.fromisoformat(_now())
+                v["narracao"]["duracao_s"] = round((d_fim - d_inicio).total_seconds(), 1)
+            except Exception:
+                pass
         if path:
             v["narracao"]["path"] = path
         if erro:
@@ -150,20 +182,29 @@ def registrar_render(data: str, canal: str, status: str,
                       local_storage: str = "local", path: str = "",
                       tamanho_mb: float = 0, erro: str = "",
                       template: str = "", template_id: str = ""):
-    """Registra resultado da etapa render.
-
-    local_storage: 'local' (disco F:) | 'google_drive'
-    """
+    """Registra resultado da etapa render. Marca 'fim'."""
     with _lock:
         db = _load()
         v = _ensure_video(db, data, canal, template, template_id)
+        et = v.get("render", {})
+        inicio = et.get("inicio")
         v["render"] = {
             "status": status,
             "local_storage": local_storage,
             "path": path,
             "tamanho_mb": round(tamanho_mb, 1),
             "timestamp": _now(),
+            "fim": _now(),
         }
+        if inicio:
+            v["render"]["inicio"] = inicio
+            try:
+                from datetime import datetime as _dt
+                d_inicio = _dt.fromisoformat(inicio)
+                d_fim = _dt.fromisoformat(_now())
+                v["render"]["duracao_s"] = round((d_fim - d_inicio).total_seconds(), 1)
+            except Exception:
+                pass
         if erro:
             v["render"]["erro"] = erro
         _save(db)
@@ -223,3 +264,81 @@ def resumo() -> dict:
         if v.get("narracao", {}).get("fallback"):
             por_data[d]["narr_fallback"] += 1
     return {"por_data": por_data, "total_videos": len(db["videos"])}
+
+
+def historico_data(data: str) -> list:
+    """Retorna detalhamento por canal de uma data, com tempos por etapa.
+    Aceita YYYY-MM-DD ou DD/MM/YYYY.
+    """
+    if "/" in data:
+        parts = data.split("/")
+        if len(parts) == 3:
+            data = f"{parts[2]}-{parts[1]}-{parts[0]}"
+    with _lock:
+        db = _load()
+    out = []
+    for v in db["videos"].values():
+        if v.get("data") != data:
+            continue
+        rot = v.get("roteiro", {}) or {}
+        nar = v.get("narracao", {}) or {}
+        ren = v.get("render", {}) or {}
+        # Tempo total = max(fim) - min(inicio) entre as 3 etapas
+        ts = []
+        for et in (rot, nar, ren):
+            if et.get("inicio"):
+                ts.append(("inicio", et["inicio"]))
+            if et.get("fim"):
+                ts.append(("fim", et["fim"]))
+        total_s = None
+        if ts:
+            try:
+                from datetime import datetime as _dt
+                inicios = [_dt.fromisoformat(t[1]) for t in ts if t[0] == "inicio"]
+                fins    = [_dt.fromisoformat(t[1]) for t in ts if t[0] == "fim"]
+                if inicios and fins:
+                    total_s = round((max(fins) - min(inicios)).total_seconds(), 1)
+            except Exception:
+                pass
+        out.append({
+            "canal": v.get("canal"),
+            "template": v.get("template"),
+            "roteiro": {
+                "status": rot.get("status"),
+                "provider": rot.get("provider"),
+                "fallback": bool(rot.get("fallback")),
+                "chars": rot.get("chars"),
+                "duracao_s": rot.get("duracao_s"),
+                "inicio": rot.get("inicio"),
+                "fim": rot.get("fim"),
+            },
+            "narracao": {
+                "status": nar.get("status"),
+                "provider": nar.get("provider"),
+                "voice_id": nar.get("voice_id"),
+                "fallback": bool(nar.get("fallback")),
+                "chunks": nar.get("chunks"),
+                "duracao_s": nar.get("duracao_s"),
+                "inicio": nar.get("inicio"),
+                "fim": nar.get("fim"),
+            },
+            "render": {
+                "status": ren.get("status"),
+                "path": ren.get("path"),
+                "tamanho_mb": ren.get("tamanho_mb"),
+                "duracao_s": ren.get("duracao_s"),
+                "inicio": ren.get("inicio"),
+                "fim": ren.get("fim"),
+            },
+            "total_s": total_s,
+        })
+    out.sort(key=lambda v: v.get("canal") or "")
+    return out
+
+
+def datas_disponiveis() -> list:
+    """Lista datas (YYYY-MM-DD) que tem registros, ordenadas desc."""
+    with _lock:
+        db = _load()
+    datas = sorted({v.get("data") for v in db["videos"].values() if v.get("data")}, reverse=True)
+    return datas

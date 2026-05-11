@@ -71,6 +71,23 @@ _static_dir = BASE_DIR / "static"
 _static_dir.mkdir(exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")
 
+# Frontend2 (React) servido em /v2 — UI nova convivendo com a antiga durante migração
+_frontend2_dir = BASE_DIR / "static-frontend2"
+if _frontend2_dir.exists() and (_frontend2_dir / "index.html").exists():
+    # SPA fallback: rotas /v2/* que não sejam arquivo estático retornam index.html
+    # (deixa React Router resolver client-side)
+    @app.get("/v2/{full_path:path}")
+    def _frontend2_spa(full_path: str):
+        # Se é arquivo (assets/, .js, .css, etc), tenta servir; senão fallback pra index.html
+        target = _frontend2_dir / full_path
+        if target.is_file():
+            return FileResponse(target)
+        return FileResponse(_frontend2_dir / "index.html")
+
+    @app.get("/v2")
+    def _frontend2_root():
+        return FileResponse(_frontend2_dir / "index.html")
+
 SERVER_START_TIME = time.time()
 
 # === ESTADO GLOBAL ===
@@ -1041,8 +1058,52 @@ def obter_roteiro_celula(key: str):
 
 @app.post("/api/temas")
 async def salvar_temas_grid(request: Request):
-    """Salva o grid inteiro de temas."""
-    dados = await request.json()
+    """Salva o grid inteiro de temas. Aceita {linhas, colunas, celulas} direto ou {temas: {...}} aninhado.
+
+    IMPORTANTE: faz MERGE das celulas com o que ja existe em disco. Sem o merge, o
+    GET /api/temas?light=true (que omite 'roteiro' e injeta 'tem_roteiro' como flag)
+    + qualquer POST subsequente apagaria todos os roteiros do disco.
+    """
+    body = await request.json()
+    dados = body.get("temas") if isinstance(body, dict) and "temas" in body else body
+    if not isinstance(dados, dict):
+        dados = {}
+
+    # SAFETY: rejeita payload que zere o grid existente (proteção contra UI bug)
+    novo_linhas = dados.get("linhas", [])
+    novo_colunas = dados.get("colunas", [])
+    if not novo_linhas and not novo_colunas:
+        # checa se ja existem dados em disco
+        try:
+            atual = scriptwriter.carregar_temas() or {}
+            if atual.get("linhas") or atual.get("colunas"):
+                return {"ok": False, "erro": "Bloqueado: payload vazio mas existem dados. Operação refusada pra evitar zerar temas.json."}
+        except Exception:
+            pass
+
+    # MERGE de celulas com o disco: preserva campos que o frontend nao mandou
+    # (ex: 'roteiro' que e omitido pelo GET light) e remove a flag artefato 'tem_roteiro'.
+    try:
+        atual = scriptwriter.carregar_temas() or {}
+        atual_celulas = atual.get("celulas") if isinstance(atual.get("celulas"), dict) else {}
+    except Exception:
+        atual_celulas = {}
+
+    novas_celulas = dados.get("celulas") if isinstance(dados.get("celulas"), dict) else {}
+    if isinstance(atual_celulas, dict):
+        merged_celulas = {}
+        for key, novo_cel in novas_celulas.items():
+            if not isinstance(novo_cel, dict):
+                merged_celulas[key] = novo_cel
+                continue
+            cel_atual = atual_celulas.get(key) if isinstance(atual_celulas.get(key), dict) else {}
+            cel_atual = cel_atual or {}
+            # Limpa artefato do GET light (so existe nele, nao deve ir pro disco)
+            novo_cel_clean = {k: v for k, v in novo_cel.items() if k != "tem_roteiro"}
+            # Merge: campos do disco sao preservados, novos campos do frontend sobrescrevem
+            merged_celulas[key] = {**cel_atual, **novo_cel_clean}
+        dados["celulas"] = merged_celulas
+
     scriptwriter.salvar_temas(dados)
     # Sync com Supabase: enviar cada célula com título
     config = scriptwriter.carregar_config()
@@ -1498,10 +1559,16 @@ def _verificar_worker_token(request: Request):
 
 
 @app.get("/api/render-worker/next-job")
-def render_worker_next_job(request: Request):
-    """Retorna o proximo job pendente para o render worker."""
+def render_worker_next_job(request: Request, worker_id: str = ""):
+    """Retorna o proximo job pendente para o render worker.
+    worker_id query param identifica unicamente cada worker (pra watchdog
+    detectar pods sem trabalhar)."""
     _verificar_worker_token(request)
-    job = render_queue.proximo_job_remoto()
+    if not worker_id:
+        # Fallback: usa IP+port da conexão pra identificar
+        client = request.client
+        worker_id = f"{client.host}:{client.port}" if client else "unknown"
+    job = render_queue.proximo_job_remoto(worker_id=worker_id)
     if not job:
         return JSONResponse(status_code=204, content=None)
     return job
@@ -1671,6 +1738,122 @@ def monitor_status():
 
 
 # === API: PRODUCTION LOG ===
+
+@app.get("/api/production-log")
+def prod_log_get():
+    """Retorna o estado completo da produção AUTO (canais, etapas, log).
+    Usado pelo Monitor v2 pra exibir produção em andamento."""
+    return production_log.obter_estado()
+
+
+@app.get("/api/production-log/historico")
+def prod_log_historico(data: str = ""):
+    """Retorna histórico detalhado por canal de uma data específica.
+    Inclui tempos de cada etapa (roteiro/narração/render) + provider + fallback.
+    Sem ?data= retorna lista de datas disponíveis.
+    """
+    import video_log_db
+    if not data:
+        return {"datas": video_log_db.datas_disponiveis()}
+    return {"data": data, "canais": video_log_db.historico_data(data)}
+
+
+@app.get("/api/tts/health")
+def tts_health(horas: float = 24):
+    """Métricas TTS (Minimax via ai33.pro + Inworld fallback) das últimas N horas.
+    Dados a partir do momento em que tts_metrics começou a logar (não retroativo).
+    """
+    try:
+        import tts_metrics
+        return tts_metrics.health(horas=horas)
+    except Exception as e:
+        return {"erro": str(e), "janela_h": horas, "total_iniciados": 0}
+
+
+# === PODS LIFECYCLE (RunPod auto-management) ===
+
+@app.get("/api/pods/status")
+def pods_status():
+    """Lista pods da conta + status + custo por hora."""
+    try:
+        import pods_manager
+        return {"pods": pods_manager.listar_pods()}
+    except Exception as e:
+        return {"erro": str(e), "pods": []}
+
+
+@app.post("/api/pods/start")
+async def pods_start(request: Request):
+    """Sobe N pods e dispara bootstrap em cada. Body: {n: 3}.
+
+    Aguarda IP/SSH atribuído + bootstrap rodando antes de retornar (~3-4min).
+    Workers começam a pollar VPS em mais ~3min após retorno.
+    """
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    n = int(body.get("n", 3))
+    try:
+        import pods_manager
+        return pods_manager.start_pods(n=n)
+    except Exception as e:
+        return {"ok": False, "msg": str(e)}
+
+
+@app.post("/api/pods/stop")
+def pods_stop():
+    """Para todos os pods (preserva config, $0 GPU)."""
+    try:
+        import pods_manager
+        return pods_manager.stop_all_pods()
+    except Exception as e:
+        return {"ok": False, "msg": str(e)}
+
+
+@app.post("/api/pods/delete")
+def pods_delete():
+    """Deleta TODOS os pods (zero custo total, perde config)."""
+    try:
+        import pods_manager
+        return pods_manager.delete_all_pods()
+    except Exception as e:
+        return {"ok": False, "msg": str(e)}
+
+
+# Cron interno: a cada 60s, scale-down de pods ociosos (durante produção)
+# E a cada 60s tambem auto-shutdown idle (apos producao terminar)
+def _start_auto_shutdown_cron():
+    import threading
+    import pods_manager
+
+    def loop():
+        # Espera 30s de warmup pra app subir tudo antes de começar a checar
+        time.sleep(30)
+        while True:
+            try:
+                # WATCHDOG: detecta pods ligados sem trabalhar (anti-vazamento $$$)
+                pods_manager.watchdog_check()
+            except Exception:
+                pass
+            try:
+                # Durante produção: desligar pods ociosos quando fila reduz
+                pods_manager.auto_scale_down_check(workers_per_pod=2)
+            except Exception:
+                pass
+            try:
+                # Após produção: desligar tudo se idle por X min
+                pods_manager.auto_shutdown_check(idle_minutes=5)
+            except Exception:
+                pass
+            time.sleep(60)
+
+    t = threading.Thread(target=loop, name="pods-auto-shutdown", daemon=True)
+    t.start()
+
+
+try:
+    _start_auto_shutdown_cron()
+except Exception as _e:
+    print(f"[app] AVISO: auto-shutdown cron nao iniciou: {_e}")
+
 
 @app.post("/api/production-log/start")
 async def prod_log_start(request: Request):
@@ -1897,6 +2080,386 @@ async def salvar_config_endpoint(request: Request):
     return {"ok": True}
 
 
+# === API: PREVIEW DE ARQUIVOS (overlay, CTA, moldura, font) ===
+
+_ALLOWED_PREVIEW_ROOTS = [
+    str(BASE_DIR.resolve()),                     # /opt/video-automator/
+    "/opt/video-automator",
+    "/opt/video-automator-dev",
+    "/workspace",                                # RunPod worker
+    "F:\\Canal Dark",                            # Windows PC do operador
+    "F:/Canal Dark",
+]
+_BLOCKED_FILES = {"credentials.json", "config.json", "worker_config.json", "coringa_automacao.json"}
+
+
+@app.get("/api/preview/serve")
+def preview_serve(path: str):
+    """Serve um arquivo do servidor pra preview na UI (overlay, CTA, moldura, etc).
+    Apenas paths sob /opt/video-automator/ ou F:\\Canal Dark\\ por segurança.
+    Bloqueia arquivos sensíveis (credentials.json, config.json, etc)."""
+    from fastapi.responses import FileResponse, JSONResponse
+    p = Path(path)
+    if not p.is_absolute():
+        p = BASE_DIR / path
+    try:
+        resolved = str(p.resolve())
+    except Exception:
+        return JSONResponse({"erro": "Path invalido"}, status_code=400)
+
+    # Whitelist de roots
+    if not any(resolved.startswith(root) or resolved.replace("\\", "/").startswith(root.replace("\\", "/"))
+               for root in _ALLOWED_PREVIEW_ROOTS):
+        return JSONResponse({"erro": "Path fora dos diretorios permitidos"}, status_code=403)
+
+    if not p.exists() or not p.is_file():
+        return JSONResponse({"erro": f"Arquivo nao encontrado no servidor: {path}"}, status_code=404)
+
+    if p.name.lower() in _BLOCKED_FILES or p.name.startswith("."):
+        return JSONResponse({"erro": "Acesso negado"}, status_code=403)
+
+    return FileResponse(str(p))
+
+
+@app.get("/api/preview/font")
+def preview_font(name: str):
+    """Serve uma fonte da pasta /fonts pra preview de legenda na UI."""
+    from fastapi.responses import FileResponse, JSONResponse
+    # Apenas nome do arquivo, sem path traversal
+    safe_name = Path(name).name  # remove qualquer path
+    p = BASE_DIR / "fonts" / safe_name
+    if not p.exists():
+        return JSONResponse({"erro": "Fonte nao encontrada"}, status_code=404)
+    return FileResponse(str(p), media_type="font/ttf")
+
+
+# === API: BACKLOG TEMAS ===
+
+import backlog_temas_db  # noqa: E402
+import videos_meta  # noqa: E402
+
+
+@app.get("/api/backlog")
+def backlog_listar(geral: str = None, co: str = None, incluir_concluidos: bool = True):
+    """Lista itens do backlog ordenados por data ASC.
+    Filtros: geral='Ok'|'', co='Ok'|'', incluir_concluidos=false oculta itens com Geral=Ok E CO=Ok."""
+    return {"itens": backlog_temas_db.listar(geral=geral, co=co, incluir_concluidos=incluir_concluidos)}
+
+
+@app.post("/api/backlog")
+async def backlog_adicionar(request: Request):
+    """Adiciona item. Body: {link?, titulo?, texto_thumb?, data?}.
+
+    Aceita 2 modos:
+    - Com link YT: enrich automatico (oEmbed pra titulo, GPT-4o pra texto thumb).
+    - Sem link (tema manual): exige titulo, video_id fica vazio.
+    Falhas no auto-enrich nao quebram a adicao - campos ficam vazios pra editar manual.
+    """
+    body = await request.json()
+    link = (body.get("link") or "").strip()
+    titulo = (body.get("titulo") or "").strip()
+    texto_thumb = (body.get("texto_thumb") or "").strip()
+
+    if not link and not titulo:
+        return {"ok": False, "erro": "Forneça pelo menos um link YouTube OU um título manual"}
+
+    # Auto-enrich: so se TEM link e algum campo vazio
+    enrich_aplicado = []
+    if link and (not titulo or not texto_thumb):
+        vid = backlog_temas_db._extrair_video_id(link) or ""
+        if vid:  # so enrich se link e valido
+            meta = videos_meta.enriquecer_video(link, video_id=vid)
+            if not titulo and meta.get("titulo"):
+                titulo = meta["titulo"]
+                enrich_aplicado.append("titulo")
+            if not texto_thumb and meta.get("texto_thumb"):
+                texto_thumb = meta["texto_thumb"]
+                enrich_aplicado.append("texto_thumb")
+
+    resultado = backlog_temas_db.adicionar(
+        link=link, titulo=titulo, texto_thumb=texto_thumb,
+        data=body.get("data"),
+    )
+    if "erro" in resultado:
+        return {"ok": False, "erro": resultado["erro"]}
+    return {"ok": True, "item": resultado, "enrich_aplicado": enrich_aplicado}
+
+
+@app.put("/api/backlog/{item_id}")
+async def backlog_atualizar(item_id: str, request: Request):
+    """Atualiza campos do item. Body aceita: titulo, texto_thumb, data, geral, co."""
+    body = await request.json()
+    item = backlog_temas_db.atualizar(item_id, **body)
+    if isinstance(item, dict) and "erro" in item:
+        return {"ok": False, "erro": item["erro"]}
+    if not item:
+        return {"ok": False, "erro": "Item nao encontrado ou nada para atualizar"}
+    return {"ok": True, "item": item}
+
+
+@app.delete("/api/backlog/{item_id}")
+def backlog_remover(item_id: str):
+    if not backlog_temas_db.remover(item_id):
+        return {"ok": False, "erro": "Item nao encontrado"}
+    return {"ok": True}
+
+
+@app.post("/api/backlog/{item_id}/reenriquecer")
+def backlog_reenriquecer(item_id: str):
+    """Re-extrai titulo + texto_thumb via oEmbed + OCR (sobrescreve campos)."""
+    item = backlog_temas_db.obter(item_id)
+    if not item:
+        return {"ok": False, "erro": "Item nao encontrado"}
+    meta = videos_meta.enriquecer_video(item["link"], video_id=item.get("video_id", ""))
+    campos = {}
+    if meta.get("titulo"):
+        campos["titulo"] = meta["titulo"]
+    if meta.get("texto_thumb"):
+        campos["texto_thumb"] = meta["texto_thumb"]
+    if not campos:
+        return {"ok": False, "erro": "Nada extraido (oEmbed e OCR falharam)"}
+    atualizado = backlog_temas_db.atualizar(item_id, **campos)
+    return {"ok": True, "item": atualizado, "campos": list(campos.keys())}
+
+
+# === API: CORINGA (distribuicao Backlog -> grid Temas) ===
+
+import coringa_distribuidor  # noqa: E402
+
+
+@app.post("/api/coringa/processar-agora")
+def coringa_processar_agora():
+    """Forca um ciclo do cron Coringa imediatamente (em vez de esperar 15min)."""
+    res = coringa_distribuidor.processar_backlog_pendentes_geral()
+    return {"ok": True, **res}
+
+
+@app.get("/api/coringa/status")
+def coringa_status():
+    return coringa_distribuidor.status_cron()
+
+
+@app.get("/api/coringa/config")
+def coringa_config_listar():
+    return {"canais": coringa_distribuidor.listar_config_canais(),
+            "co_slots": list(coringa_distribuidor.CO_SLOTS)}
+
+
+@app.put("/api/coringa/config/{nome}")
+async def coringa_config_atualizar(nome: str, request: Request):
+    body = await request.json()
+    res = coringa_distribuidor.atualizar_config_canal(
+        nome,
+        recebe=body.get("recebe"),
+        adaptado=body.get("adaptado"),
+        casing=body.get("casing"),
+        vinculo_co_origem=body.get("vinculo_co_origem"),
+    )
+    if "erro" in res:
+        return {"ok": False, "erro": res["erro"]}
+    return {"ok": True, "config": res}
+
+
+@app.get("/api/coringa/dist-status")
+def coringa_dist_status():
+    return coringa_distribuidor.status_cron_dist()
+
+
+@app.post("/api/coringa/distribuir-agora")
+def coringa_distribuir_agora():
+    """Forca distribuicao imediata (ignora delay) das Coringas pendentes."""
+    res = coringa_distribuidor.processar_distribuicao_pendentes(ignorar_delay=True)
+    return {"ok": True, **res}
+
+
+@app.post("/api/coringa/distribuir-linha/{row_idx}")
+def coringa_distribuir_linha_endpoint(row_idx: int):
+    """Distribui Coringa de uma linha especifica (forca, ignora delay)."""
+    res = coringa_distribuidor.distribuir_linha_coringa(row_idx, ignorar_delay=True)
+    return res
+
+
+@app.post("/api/coringa/processar-co-agora")
+def coringa_processar_co_agora():
+    """Fase 3: pega 4 items Backlog co='' e preenche CO* em cruz + NARC/NPD adaptado."""
+    res = coringa_distribuidor.processar_co_em_cruz()
+    return res
+
+
+@app.get("/api/coringa/automacao")
+def coringa_automacao_get():
+    """Le flag global da automacao (true=crons processam, false=crons dormem)."""
+    return {"habilitada": coringa_distribuidor.get_automacao_habilitada()}
+
+
+@app.put("/api/coringa/automacao")
+async def coringa_automacao_set(request: Request):
+    """Liga/desliga a automacao (afeta os 2 crons BASE+DIST). Endpoints manuais NAO sao afetados."""
+    body = await request.json()
+    valor = bool(body.get("habilitada", False))
+    ok = coringa_distribuidor.set_automacao_habilitada(valor)
+    return {"ok": ok, "habilitada": coringa_distribuidor.get_automacao_habilitada()}
+
+
+# Inicia crons Coringa em background (idempotente, daemon threads)
+coringa_distribuidor.iniciar_cron_coringa()
+coringa_distribuidor.iniciar_cron_distribuicao()
+
+
+# === API: THUMBNAIL GENERATOR (3 modos: prompt-mixer / agente / imagem_fixa) ===
+
+import lib_thumbnail  # noqa: E402
+
+
+@app.post("/api/thumb/gerar")
+async def thumb_gerar(request: Request):
+    """Gera thumbnail pro canal usando modo apropriado (auto-detectado).
+    Body: {canal, tema?, titulo, thumb, output_dir?}.
+    Returns: {ok, path?, modo, provider_usado?, erro?}."""
+    body = await request.json()
+    canal = (body.get("canal") or "").strip()
+    if not canal:
+        return {"ok": False, "erro": "canal e obrigatorio"}
+    output_dir = body.get("output_dir")
+    if output_dir:
+        output_dir = Path(output_dir)
+    res = lib_thumbnail.gerar_thumbnail(
+        canal=canal,
+        tema=body.get("tema", ""),
+        titulo=body.get("titulo", ""),
+        thumb=body.get("thumb", ""),
+        output_dir=output_dir,
+    )
+    return res
+
+
+@app.get("/api/thumb/templates")
+def thumb_templates_list():
+    """Lista templates de thumbnail (modo prompt-mixer e agente)."""
+    return {
+        "templates": lib_thumbnail._load_thumb_templates(),
+        "co_config": json.loads(lib_thumbnail.THUMB_CO_CONFIG_FILE.read_text(encoding="utf-8"))
+                      if lib_thumbnail.THUMB_CO_CONFIG_FILE.exists() else {},
+    }
+
+
+@app.get("/api/thumb/split")
+def thumb_split(text: str):
+    """Util: testa split_thumb_text(text) → {top, bottom}."""
+    top, bot = lib_thumbnail.split_thumb_text(text)
+    return {"top": top, "bottom": bot}
+
+
+@app.put("/api/thumb/template/{canal}")
+async def thumb_template_atualizar(canal: str, request: Request):
+    """Atualiza template (modo prompt-mixer/agente) de um canal no thumb_templates.json."""
+    body = await request.json()
+    path = lib_thumbnail.THUMB_TEMPLATES_FILE
+    if not path.exists():
+        return {"ok": False, "erro": "thumb_templates.json nao existe"}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    achou = False
+    for i, t in enumerate(data.get("templates", [])):
+        if t.get("canal") == canal:
+            # Permite atualizar campos seletivamente
+            for k in ("modo", "prompt_base", "pools", "placeholders", "split_texto",
+                     "model_id", "aspect_ratio", "resolution"):
+                if k in body:
+                    data["templates"][i][k] = body[k]
+            # Remove flag _PENDENTE se foi preenchido
+            if (data["templates"][i].get("prompt_base", "")
+                    and "_PENDENTE" in data["templates"][i]):
+                data["templates"][i].pop("_PENDENTE", None)
+            achou = True
+            break
+    if not achou:
+        return {"ok": False, "erro": f"Canal '{canal}' nao encontrado em thumb_templates.json"}
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"ok": True, "template": data["templates"][i]}
+
+
+@app.put("/api/thumb/co-config/{canal}")
+async def thumb_co_atualizar(canal: str, request: Request):
+    """Atualiza config CO* (modo imagem_fixa) - escreve em thumb_co_config.json.
+    Body pode incluir: imagem_base, fonte, tamanho_fonte, cor_texto, outline_*,
+    posicao_top, posicao_bottom, split_texto. Use canal='_default' pra editar default."""
+    import re as _re
+    body = await request.json()
+    path = lib_thumbnail.THUMB_CO_CONFIG_FILE
+    if not path.exists():
+        return {"ok": False, "erro": "thumb_co_config.json nao existe"}
+    data = json.loads(path.read_text(encoding="utf-8"))
+
+    if canal == "_default":
+        target = data.setdefault("default", {})
+    elif _re.match(r"^CO\d", canal):
+        target = data.setdefault("canais", {}).setdefault(canal, {})
+    else:
+        return {"ok": False, "erro": f"Canal '{canal}' invalido (use _default ou CO1-4)"}
+
+    permitidos = {"modo", "imagem_base", "fonte", "tamanho_fonte", "cor_texto",
+                  "outline_width", "outline_color", "split_texto",
+                  "posicao_top", "posicao_bottom", "_override"}
+    for k, v in body.items():
+        if k in permitidos:
+            target[k] = v
+    # Remove _PENDENTE se imagem_base foi preenchida
+    if target.get("imagem_base") and "_PENDENTE" in target:
+        target.pop("_PENDENTE", None)
+
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"ok": True, "config": target}
+
+
+@app.get("/api/thumb/agent/{canal}")
+def thumb_agent_get(canal: str):
+    """Le instrucoes do agente de thumbnail (agents/thumbnail-{canal}/CLAUDE.md)."""
+    path = lib_thumbnail.AGENTS_DIR / f"thumbnail-{canal.lower()}" / "CLAUDE.md"
+    if not path.exists():
+        return {"ok": False, "erro": "Agente nao existe", "instrucoes": ""}
+    return {"ok": True, "instrucoes": path.read_text(encoding="utf-8")}
+
+
+@app.put("/api/thumb/agent/{canal}")
+async def thumb_agent_put(canal: str, request: Request):
+    """Atualiza instrucoes do agente de thumbnail."""
+    body = await request.json()
+    instrucoes = body.get("instrucoes", "")
+    if not instrucoes:
+        return {"ok": False, "erro": "instrucoes vazias"}
+    agent_dir = lib_thumbnail.AGENTS_DIR / f"thumbnail-{canal.lower()}"
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / "CLAUDE.md").write_text(instrucoes, encoding="utf-8")
+    return {"ok": True}
+
+
+@app.post("/api/thumb/regenerar")
+async def thumb_regenerar(request: Request):
+    """Forca regeracao de thumb (apaga cache se existir).
+    Body: {canal, tema, titulo, thumb, output_dir?}."""
+    body = await request.json()
+    canal = (body.get("canal") or "").strip()
+    if not canal:
+        return {"ok": False, "erro": "canal obrigatorio"}
+    output_dir = body.get("output_dir")
+    if output_dir:
+        output_dir = Path(output_dir)
+    else:
+        output_dir = lib_thumbnail.TEMP_DIR / "thumbs"
+    # Apaga cache existente
+    cached = Path(output_dir) / f"{canal}.jpg"
+    if cached.exists():
+        cached.unlink()
+    res = lib_thumbnail.gerar_thumbnail(
+        canal=canal,
+        tema=body.get("tema", ""),
+        titulo=body.get("titulo", ""),
+        thumb=body.get("thumb", ""),
+        output_dir=output_dir,
+    )
+    return res
+
+
 # === INTERFACE WEB ===
 
 DASHBOARD_HTML = """<!DOCTYPE html>
@@ -2097,8 +2660,18 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
 .sidebar-backdrop { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.5); z-index:998; }
 .sidebar-backdrop.open { display:block; }
 
+/* Backlog Temas: tabela no desktop, cards no mobile */
+#page-backlog #backlog-tabela-wrap { display:block; }
+#page-backlog #backlog-cards { display:none; }
+
 @media (max-width: 768px) {
   body { font-size: 15px; }
+
+  /* Backlog Temas: troca tabela por cards no mobile */
+  #page-backlog #backlog-tabela-wrap { display:none; }
+  #page-backlog #backlog-cards { display:block; }
+  #page-backlog #backlog-add-form > input { width:100%; }
+  #page-backlog #backlog-add-form > button { width:100%; }
 
   .btn-hamburger { display:flex; }
 
@@ -2189,6 +2762,10 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
     <a data-page="temas" class="active" onclick="showPage('temas')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
       Temas
+    </a>
+    <a data-page="backlog" onclick="showPage('backlog')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11H5a2 2 0 00-2 2v7a2 2 0 002 2h14a2 2 0 002-2v-7a2 2 0 00-2-2h-4"/><polyline points="9 11 9 5 15 5 15 11"/><line x1="12" y1="14" x2="12" y2="18"/></svg>
+      Backlog Temas
     </a>
     <a data-page="roteiros" onclick="showPage('roteiros')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14,2 14,8 20,8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
@@ -2509,12 +3086,24 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
     <div class="page-header">
       <h2>Thumbnail</h2>
       <div style="display:flex;align-items:center;gap:12px">
+        <button class="btn btn-sm" onclick="loadThumbTemplates()">↻ Recarregar templates</button>
+      </div>
+    </div>
+
+    <!-- TEMPLATES POR CANAL (3 modos) -->
+    <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:16px;border-left:3px solid var(--accent)">
+      <h3 style="font-size:14px;margin:0 0 8px 0;color:var(--accent)">Templates por Canal (3 modos)</h3>
+      <p style="font-size:11px;color:var(--text-sec);margin-bottom:12px">
+        <b>prompt-mixer</b>: pools cena/character + ai33.pro · <b>agente</b>: Claude CLI gera prompt em runtime · <b>imagem_fixa</b>: PIL overlay (sem ai33)
+      </p>
+      <div id="thumb-templates-list" style="display:flex;flex-direction:column;gap:8px">
+        <div style="padding:16px;text-align:center;color:var(--text-sec)">Carregando…</div>
       </div>
     </div>
 
     <!-- GERACAO AI -->
     <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:16px;border-left:3px solid var(--accent)">
-      <h3 style="font-size:14px;margin:0 0 12px 0;color:var(--accent)">Gerar Imagem via IA</h3>
+      <h3 style="font-size:14px;margin:0 0 12px 0;color:var(--accent)">Gerar Imagem via IA (legado)</h3>
       <div style="display:grid;grid-template-columns:1fr 200px;gap:12px">
         <div>
           <textarea id="thumb-ai-prompt" rows="3" placeholder="Descreva a imagem da thumbnail..." style="font-size:12px;width:100%;resize:vertical"></textarea>
@@ -2856,6 +3445,99 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
       </div>
     </div>
     <button id="chat-toggle-btn" onclick="toggleChat()" style="display:none;position:fixed;right:16px;bottom:16px;width:50px;height:50px;border-radius:50%;background:var(--accent);border:none;color:#000;font-size:22px;cursor:pointer;box-shadow:0 4px 16px rgba(0,0,0,0.3);z-index:899" title="Abrir assistente">💬</button>
+  </div>
+
+  <!-- PAGE: BACKLOG TEMAS -->
+  <div id="page-backlog" class="page">
+    <div class="page-header">
+      <h2>Backlog Temas</h2>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button class="btn btn-sm" onclick="openCoringaConfig()" title="Config: quais canais recebem da BASE, adaptado, vínculo CO*">⚙ Config BASE</button>
+        <button class="btn btn-sm btn-primary" onclick="processarCoringaAgora(this)" title="Processa Backlog -> coluna BASE no grid Temas">⚡ BASE agora</button>
+        <button class="btn btn-sm" onclick="distribuirCoringaAgora(this)" title="Adapta + distribui BASE pros canais Geral configurados">📤 Distribuir agora</button>
+        <button class="btn btn-sm" onclick="processarCoAgora(this)" title="CO* em cruz: pega 4 itens Backlog co='' e preenche CO1-CO4 em 2 datas + NARC/NPD adaptado">🔄 CO* em cruz</button>
+        <select id="backlog-filtro" onchange="loadBacklog()" class="input" style="max-width:180px">
+          <option value="todos">Todos</option>
+          <option value="pendentes" selected>Pendentes</option>
+          <option value="concluidos">Concluidos</option>
+        </select>
+        <button class="btn btn-sm" onclick="loadBacklog()">Atualizar</button>
+      </div>
+    </div>
+    <div style="display:flex;gap:12px;align-items:stretch;margin-bottom:10px;flex-wrap:wrap">
+      <button id="coringa-automacao-btn" onclick="toggleAutomacao(this)"
+              style="flex:0 0 auto;min-width:240px;padding:10px 16px;border-radius:6px;border:1px solid var(--border);background:var(--panel-2);color:var(--text);font-size:13px;font-weight:600;cursor:pointer;text-align:left">
+        Automação: carregando…
+      </button>
+      <div id="coringa-status" style="flex:1;font-size:11px;color:var(--text-sec);padding:6px 10px;background:var(--panel-2);border-radius:4px;line-height:1.6;min-width:300px">Cron: carregando…</div>
+    </div>
+
+    <!-- Modal Config Coringa -->
+    <div id="coringa-config-modal" class="modal-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:1000;align-items:flex-start;justify-content:center;padding:40px 20px;overflow-y:auto">
+      <div class="modal" style="background:var(--panel);border:1px solid var(--border);border-radius:8px;max-width:760px;width:100%;max-height:90vh;display:flex;flex-direction:column">
+        <div class="modal-header" style="padding:16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+          <h3 style="margin:0">Config BASE - Distribuição por canal</h3>
+          <button class="btn btn-sm" onclick="closeCoringaConfig()">✕</button>
+        </div>
+        <div class="modal-body" style="padding:16px;overflow-y:auto;flex:1">
+          <p style="font-size:12px;color:var(--text-sec);margin-bottom:12px">
+            <b>Recebe</b>: canal recebe distribuição automática da BASE.
+            <b>Adaptado</b>: passa pelo Claude CLI (regras de <code>agents/titulos/CLAUDE.md</code>); senão é cópia direta.
+            <b>Vínculo CO*</b>: pra canais como NARC/NPD que recebem do CO* via cascade — escolha qual CO é a fonte.
+          </p>
+          <table id="coringa-config-table" style="width:100%;border-collapse:collapse;font-size:13px">
+            <thead>
+              <tr style="background:var(--panel-2);border-bottom:1px solid var(--border)">
+                <th style="padding:8px;text-align:left">Canal</th>
+                <th style="padding:8px;text-align:center;width:80px">Recebe</th>
+                <th style="padding:8px;text-align:center;width:80px">Adaptado</th>
+                <th style="padding:8px;text-align:left;width:130px">Casing</th>
+                <th style="padding:8px;text-align:left;width:140px">Vínculo CO*</th>
+              </tr>
+            </thead>
+            <tbody id="coringa-config-tbody">
+              <tr><td colspan="4" style="padding:16px;text-align:center;color:var(--text-sec)">Carregando…</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="modal-footer" style="padding:12px 16px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px">
+          <button class="btn btn-sm" onclick="closeCoringaConfig()">Fechar</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:16px">
+      <h3 style="margin-bottom:12px;font-size:14px;color:var(--text-sec)">Adicionar item</h3>
+      <div id="backlog-add-form" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start">
+        <input type="text" id="backlog-add-link" class="input" placeholder="Cole o link do YouTube (youtube.com/watch?v=... ou youtu.be/...)" style="flex:2;min-width:240px">
+        <input type="text" id="backlog-add-titulo" class="input" placeholder="Titulo (opcional)" style="flex:2;min-width:200px">
+        <input type="text" id="backlog-add-thumb" class="input" placeholder="Texto thumb (opcional)" style="flex:1;min-width:140px">
+        <button class="btn btn-primary" onclick="addBacklogItem()">+ Adicionar</button>
+      </div>
+      <div id="backlog-add-erro" style="color:var(--danger);margin-top:8px;font-size:12px;display:none"></div>
+    </div>
+
+    <div id="backlog-tabela-wrap" class="card" style="overflow-x:auto;padding:0">
+      <table id="backlog-tabela" style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead>
+          <tr style="background:var(--panel-2);border-bottom:1px solid var(--border)">
+            <th style="padding:10px;text-align:left;width:110px">Data</th>
+            <th style="padding:10px;text-align:center;width:70px">Geral</th>
+            <th style="padding:10px;text-align:center;width:70px">CO*</th>
+            <th style="padding:10px;text-align:left">Titulo</th>
+            <th style="padding:10px;text-align:left;width:200px">Texto thumb</th>
+            <th style="padding:10px;text-align:center;width:100px">Link</th>
+            <th style="padding:10px;text-align:center;width:80px"></th>
+          </tr>
+        </thead>
+        <tbody id="backlog-tbody">
+          <tr><td colspan="7" style="padding:24px;text-align:center;color:var(--text-sec)">Carregando...</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Cards mobile (hidden no desktop via CSS) -->
+    <div id="backlog-cards" style="display:none"></div>
   </div>
 
   <!-- PAGE: ROTEIROS -->
@@ -4006,10 +4688,11 @@ function _loadPageData(page) {
   else { document.getElementById('chat-toggle-btn').style.display = 'none'; document.getElementById('chat-panel').style.display = 'none'; document.getElementById('btn-refresh-page').style.bottom = '20px'; }
   if (page === 'roteiros') carregarPipelines();
   if (page === 'config') carregarConfig();
-  if (page === 'thumbnail') { carregarThumbPage(); }
+  if (page === 'thumbnail') { carregarThumbPage(); loadThumbTemplates(); }
   if (page === 'monitor') { refreshMonitor(); startMonitorPolling(); }
   else { stopMonitorPolling(); }
   if (page === 'log') logRefresh();
+  if (page === 'backlog') { loadBacklog(); refreshCoringaStatus(); }
 }
 
 function refreshCurrentPage() {
@@ -8359,8 +9042,633 @@ fetch('/api/health').then(function(r){ return r.json(); }).then(function(d){
   if (d.pid) document.getElementById('server-pid').textContent = d.pid;
 });
 
+// =============================================================
+// BACKLOG TEMAS
+// =============================================================
+let _backlogItens = [];
+
+async function loadBacklog() {
+  const filtro = document.getElementById('backlog-filtro').value;
+  const tbody = document.getElementById('backlog-tbody');
+  const cardsWrap = document.getElementById('backlog-cards');
+  let url = '/api/backlog?';
+  if (filtro === 'pendentes') url += 'incluir_concluidos=false';
+  else if (filtro === 'concluidos') url += 'geral=Ok&co=Ok';
+  // 'todos' nao adiciona filtro
+
+  try {
+    const r = await fetch(url);
+    const d = await r.json();
+    _backlogItens = d.itens || [];
+    renderBacklog();
+  } catch (e) {
+    tbody.innerHTML = '<tr><td colspan="7" style="padding:24px;text-align:center;color:var(--danger)">Erro ao carregar: ' + e + '</td></tr>';
+  }
+}
+
+function renderBacklog() {
+  const tbody = document.getElementById('backlog-tbody');
+  const cardsWrap = document.getElementById('backlog-cards');
+
+  if (!_backlogItens.length) {
+    tbody.innerHTML = '<tr><td colspan="7" style="padding:24px;text-align:center;color:var(--text-sec)">Nenhum item. Cole um link YT acima pra adicionar.</td></tr>';
+    cardsWrap.innerHTML = '<div class="card" style="padding:24px;text-align:center;color:var(--text-sec)">Nenhum item.</div>';
+    return;
+  }
+
+  // Tabela desktop (template literals com backtick)
+  tbody.innerHTML = _backlogItens.map(function(it) {
+    const isGeral = it.geral === 'Ok';
+    const isCoOk = it.co === 'Ok';
+    const rowStyle = (isGeral && isCoOk) ? 'opacity:0.55' : '';
+    const geralStyle = isGeral ? 'background:var(--accent);color:#000' : '';
+    const coStyle = isCoOk ? 'background:var(--accent);color:#000' : '';
+    const linkSafe = (it.link || '').replace(/"/g, '&quot;');
+    const tituloSafe = (it.titulo || '').replace(/"/g, '&quot;');
+    const thumbSafe = (it.texto_thumb || '').replace(/"/g, '&quot;');
+    const dataSafe = (it.data || '').replace(/"/g, '&quot;');
+
+    return `<tr data-id="${it.id}" style="${rowStyle};border-bottom:1px solid var(--border)">
+      <td style="padding:8px"><input type="text" value="${dataSafe}" onblur="updateBacklogField('${it.id}','data',this.value)" class="input" style="font-size:12px;padding:4px;width:100px"></td>
+      <td style="padding:8px;text-align:center"><button class="btn btn-sm" style="${geralStyle}" onclick="toggleBacklogStatus('${it.id}','geral',this)">${isGeral ? 'Ok' : '—'}</button></td>
+      <td style="padding:8px;text-align:center"><button class="btn btn-sm" style="${coStyle}" onclick="toggleBacklogStatus('${it.id}','co',this)">${isCoOk ? 'Ok' : '—'}</button></td>
+      <td style="padding:8px"><input type="text" value="${tituloSafe}" onblur="updateBacklogField('${it.id}','titulo',this.value)" class="input" style="font-size:12px;padding:4px;width:100%"></td>
+      <td style="padding:8px"><input type="text" value="${thumbSafe}" onblur="updateBacklogField('${it.id}','texto_thumb',this.value)" class="input" style="font-size:12px;padding:4px;width:100%" placeholder="—"></td>
+      <td style="padding:8px;text-align:center"><a href="${linkSafe}" target="_blank" rel="noopener" class="btn btn-sm">Abrir ▶</a></td>
+      <td style="padding:8px;text-align:center;white-space:nowrap">
+        <button class="btn btn-sm" onclick="reenriquecerBacklog('${it.id}',this)" title="Re-extrair titulo + texto thumb">↻</button>
+        <button class="btn btn-sm" onclick="deleteBacklogItem('${it.id}')" style="color:var(--danger)" title="Remover">×</button>
+      </td>
+    </tr>`;
+  }).join('');
+
+  // Cards mobile
+  cardsWrap.innerHTML = _backlogItens.map(function(it) {
+    const isGeral = it.geral === 'Ok';
+    const isCoOk = it.co === 'Ok';
+    const cardStyle = (isGeral && isCoOk) ? 'opacity:0.6' : '';
+    const geralStyle = isGeral ? 'background:var(--accent);color:#000' : '';
+    const coStyle = isCoOk ? 'background:var(--accent);color:#000' : '';
+    const linkSafe = (it.link || '').replace(/"/g, '&quot;');
+    const tituloSafe = (it.titulo || '').replace(/"/g, '&quot;');
+    const thumbSafe = (it.texto_thumb || '').replace(/"/g, '&quot;');
+    const dataSafe = (it.data || '').replace(/"/g, '&quot;');
+
+    return `<div class="card" style="margin-bottom:8px;${cardStyle}">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <input type="text" value="${dataSafe}" onblur="updateBacklogField('${it.id}','data',this.value)" class="input" style="font-size:13px;padding:4px 8px;width:110px;font-weight:600">
+        <div style="display:flex;gap:4px">
+          <button class="btn btn-sm" onclick="reenriquecerBacklog('${it.id}',this)" title="Re-extrair">↻</button>
+          <button class="btn btn-sm" onclick="deleteBacklogItem('${it.id}')" style="color:var(--danger)">×</button>
+        </div>
+      </div>
+      <input type="text" value="${tituloSafe}" onblur="updateBacklogField('${it.id}','titulo',this.value)" class="input" style="margin-bottom:6px" placeholder="Titulo">
+      <input type="text" value="${thumbSafe}" onblur="updateBacklogField('${it.id}','texto_thumb',this.value)" class="input" style="margin-bottom:8px" placeholder="Texto thumb">
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
+        <a href="${linkSafe}" target="_blank" rel="noopener" class="btn btn-sm" style="flex:1">Abrir YouTube</a>
+        <button class="btn btn-sm" style="flex:1;${geralStyle}" onclick="toggleBacklogStatus('${it.id}','geral',this)">Geral: ${isGeral ? 'Ok' : '—'}</button>
+        <button class="btn btn-sm" style="flex:1;${coStyle}" onclick="toggleBacklogStatus('${it.id}','co',this)">CO*: ${isCoOk ? 'Ok' : '—'}</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function addBacklogItem() {
+  const linkInp = document.getElementById('backlog-add-link');
+  const tituloInp = document.getElementById('backlog-add-titulo');
+  const thumbInp = document.getElementById('backlog-add-thumb');
+  const erroDiv = document.getElementById('backlog-add-erro');
+  const addBtn = document.querySelector('#backlog-add-form button');
+  const link = linkInp.value.trim();
+  if (!link) { erroDiv.textContent = 'Cole um link primeiro'; erroDiv.style.display = 'block'; return; }
+
+  erroDiv.style.display = 'none';
+  if (addBtn) { addBtn.disabled = true; addBtn.textContent = 'Buscando...'; }
+
+  try {
+    const r = await fetch('/api/backlog', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ link: link, titulo: tituloInp.value, texto_thumb: thumbInp.value })
+    });
+    const d = await r.json();
+    if (!d.ok) { erroDiv.textContent = d.erro || 'Erro ao adicionar'; erroDiv.style.display = 'block'; return; }
+    linkInp.value = ''; tituloInp.value = ''; thumbInp.value = '';
+    let msg = 'Item adicionado: ' + (d.item.data || '');
+    if ((d.enrich_aplicado || []).length) msg += ' (auto: ' + d.enrich_aplicado.join(', ') + ')';
+    toast(msg, 'success');
+    loadBacklog();
+  } catch (e) {
+    erroDiv.textContent = 'Erro: ' + e; erroDiv.style.display = 'block';
+  } finally {
+    if (addBtn) { addBtn.disabled = false; addBtn.textContent = '+ Adicionar'; }
+  }
+}
+
+async function reenriquecerBacklog(itemId, btnEl) {
+  if (btnEl) { btnEl.disabled = true; btnEl.textContent = '...'; }
+  try {
+    const r = await fetch('/api/backlog/' + itemId + '/reenriquecer', { method: 'POST' });
+    const d = await r.json();
+    if (!d.ok) { toast(d.erro || 'Erro', 'error'); return; }
+    toast('Re-extraido: ' + (d.campos || []).join(', '), 'success');
+    loadBacklog();
+  } catch (e) {
+    toast('Erro: ' + e, 'error');
+  } finally {
+    if (btnEl) { btnEl.disabled = false; btnEl.textContent = '↻'; }
+  }
+}
+
+async function updateBacklogField(itemId, campo, valor) {
+  // Otimizar: so envia se valor mudou
+  const item = _backlogItens.find(function(x){ return x.id === itemId; });
+  if (item && (item[campo] || '') === (valor || '')) return;
+
+  const body = {};
+  body[campo] = valor;
+  try {
+    const r = await fetch('/api/backlog/' + itemId, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const d = await r.json();
+    if (!d.ok) { toast(d.erro || 'Erro ao atualizar', 'error'); loadBacklog(); return; }
+    if (item) item[campo] = (d.item && d.item[campo]) || valor;
+  } catch (e) {
+    toast('Erro: ' + e, 'error');
+  }
+}
+
+async function toggleBacklogStatus(itemId, campo, btnEl) {
+  const item = _backlogItens.find(function(x){ return x.id === itemId; });
+  if (!item) return;
+  const novo = (item[campo] === 'Ok') ? '' : 'Ok';
+  const body = {};
+  body[campo] = novo;
+  try {
+    const r = await fetch('/api/backlog/' + itemId, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const d = await r.json();
+    if (!d.ok) { toast(d.erro || 'Erro', 'error'); return; }
+    item[campo] = novo;
+    renderBacklog();
+  } catch (e) {
+    toast('Erro: ' + e, 'error');
+  }
+}
+
+async function deleteBacklogItem(itemId) {
+  if (!confirm('Remover este item do backlog?')) return;
+  try {
+    const r = await fetch('/api/backlog/' + itemId, { method: 'DELETE' });
+    const d = await r.json();
+    if (!d.ok) { toast(d.erro || 'Erro', 'error'); return; }
+    _backlogItens = _backlogItens.filter(function(x){ return x.id !== itemId; });
+    renderBacklog();
+    toast('Item removido', 'success');
+  } catch (e) {
+    toast('Erro: ' + e, 'error');
+  }
+}
+
+// Enter no input de link adiciona direto
+document.addEventListener('DOMContentLoaded', function() {
+  const linkInp = document.getElementById('backlog-add-link');
+  if (linkInp) linkInp.addEventListener('keypress', function(e) {
+    if (e.key === 'Enter') addBacklogItem();
+  });
+});
+
+// =============================================================
+// THUMBNAIL TEMPLATES (3 modos)
+// =============================================================
+let _thumbTemplates = [];
+let _thumbCoConfig = {};
+
+async function loadThumbTemplates() {
+  const list = document.getElementById('thumb-templates-list');
+  if (!list) return;
+  list.innerHTML = '<div style="padding:16px;text-align:center;color:var(--text-sec)">Carregando…</div>';
+  try {
+    const r = await fetch('/api/thumb/templates');
+    const d = await r.json();
+    _thumbTemplates = d.templates || [];
+    _thumbCoConfig = d.co_config || {};
+    renderThumbTemplatesList();
+  } catch (e) {
+    list.innerHTML = `<div style="padding:16px;color:var(--danger)">Erro: ${e}</div>`;
+  }
+}
+
+function renderThumbTemplatesList() {
+  const list = document.getElementById('thumb-templates-list');
+  if (!list) return;
+  // Combinar templates + canais CO
+  const itens = [..._thumbTemplates];
+  const coCanais = Object.keys(_thumbCoConfig.canais || {}).sort();
+  for (const co of coCanais) {
+    itens.push({
+      canal: co,
+      modo: 'imagem_fixa',
+      _isCo: true,
+      _config: _thumbCoConfig.canais[co] || {},
+    });
+  }
+
+  if (!itens.length) {
+    list.innerHTML = '<div style="padding:16px;color:var(--text-sec)">Nenhum template configurado</div>';
+    return;
+  }
+
+  list.innerHTML = itens.map(t => {
+    const pendente = t._PENDENTE || (t._isCo && (t._config._PENDENTE || !t._config.imagem_base && !_thumbCoConfig.default?.imagem_base));
+    const modoLabel = {
+      'prompt-mixer': '🎨 prompt-mixer (ai33+pools)',
+      'agente': '🤖 agente (Claude CLI)',
+      'imagem_fixa': '🖼️ imagem fixa (PIL overlay)',
+    }[t.modo] || t.modo;
+    const cenas = t.pools?.cena?.length || 0;
+    const chars = t.pools?.character?.length || 0;
+    const detalhe = t._isCo
+      ? `imagem: ${t._config.imagem_base || _thumbCoConfig.default?.imagem_base || '(vazio)'}`
+      : t.modo === 'prompt-mixer' ? `pool cena=${cenas} char=${chars}` : 'agente Claude';
+    return `<div style="border:1px solid var(--border);border-radius:6px;padding:10px 12px;display:flex;justify-content:space-between;align-items:center;${pendente ? 'border-left:3px solid #f39c12' : ''}">
+      <div style="flex:1">
+        <div style="font-weight:600;font-size:14px">${t.canal}${pendente ? ' <span style="color:#f39c12;font-size:11px">[PENDENTE]</span>' : ''}</div>
+        <div style="font-size:11px;color:var(--text-sec)">${modoLabel} · ${detalhe}</div>
+      </div>
+      <div style="display:flex;gap:6px">
+        <button class="btn btn-sm" onclick="openThumbEditor('${t.canal}')">Editar</button>
+        <button class="btn btn-sm" onclick="testarThumb('${t.canal}', this)" ${pendente ? 'disabled' : ''}>🧪 Testar</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function testarThumb(canal, btnEl) {
+  if (btnEl) { btnEl.disabled = true; btnEl.textContent = '...'; }
+  try {
+    const r = await fetch('/api/thumb/regenerar', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        canal: canal,
+        tema: 'Teste de tema fictício pra preview da thumbnail',
+        titulo: 'STARSEED, THIS IS A PREVIEW THUMBNAIL TEST | TEST',
+        thumb: 'PREVIEW TEST IMAGE',
+      })
+    });
+    const d = await r.json();
+    if (!d.ok) { toast(`${canal}: ${d.erro || 'Erro'}`, 'error'); return; }
+    toast(`${canal}: thumb gerada (${d.modo}) → ${d.path}`, 'success');
+  } catch (e) {
+    toast('Erro: ' + e, 'error');
+  } finally {
+    if (btnEl) { btnEl.disabled = false; btnEl.textContent = '🧪 Testar'; }
+  }
+}
+
+async function openThumbEditor(canal) {
+  // Modal simples pra editar template/config/agente
+  const t = _thumbTemplates.find(x => x.canal === canal);
+  const isCo = !t && /^CO\\d/.test(canal);
+  const isAgente = t && t.modo === 'agente';
+  let body, title;
+
+  if (isCo) {
+    const cfg = _thumbCoConfig.canais?.[canal] || {};
+    const def = _thumbCoConfig.default || {};
+    title = `Editar ${canal} (modo: imagem_fixa)`;
+    body = `
+      <p style="font-size:11px;color:var(--text-sec);margin-bottom:8px">Campos vazios herdam do default.</p>
+      <label style="font-size:12px">Imagem base (path)</label>
+      <input id="thumb-edit-img" class="input" value="${(cfg.imagem_base||'').replace(/"/g,'&quot;')}" placeholder="${(def.imagem_base||'(vazio)').replace(/"/g,'&quot;')}">
+      <label style="font-size:12px;margin-top:8px">Fonte (.ttf path)</label>
+      <input id="thumb-edit-fonte" class="input" value="${(cfg.fonte||'').replace(/"/g,'&quot;')}" placeholder="${def.fonte||'fonts/Anton-Regular.ttf'}">
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <div style="flex:1">
+          <label style="font-size:12px">Tamanho fonte</label>
+          <input id="thumb-edit-tam" class="input" type="number" value="${cfg.tamanho_fonte||def.tamanho_fonte||110}">
+        </div>
+        <div style="flex:1">
+          <label style="font-size:12px">Cor texto (hex)</label>
+          <input id="thumb-edit-cor" class="input" value="${cfg.cor_texto||def.cor_texto||'#FFFFFF'}">
+        </div>
+        <div style="flex:1">
+          <label style="font-size:12px">Outline width</label>
+          <input id="thumb-edit-ow" class="input" type="number" value="${cfg.outline_width||def.outline_width||6}">
+        </div>
+        <div style="flex:1">
+          <label style="font-size:12px">Outline color</label>
+          <input id="thumb-edit-oc" class="input" value="${cfg.outline_color||def.outline_color||'#000000'}">
+        </div>
+      </div>
+    `;
+  } else if (isAgente) {
+    title = `Editar agente ${canal} (modo: agente)`;
+    let instr = '';
+    try {
+      const r = await fetch('/api/thumb/agent/' + canal);
+      const d = await r.json();
+      instr = d.instrucoes || '';
+    } catch (e) {}
+    body = `
+      <p style="font-size:11px;color:var(--text-sec);margin-bottom:8px">Instruções pro Claude gerar prompts visuais em runtime pra <b>${canal}</b>.</p>
+      <textarea id="thumb-edit-agent" class="input" style="font-family:monospace;font-size:12px;height:400px">${instr.replace(/</g,'&lt;')}</textarea>
+    `;
+  } else if (t) {
+    title = `Editar template ${canal} (modo: ${t.modo})`;
+    body = `
+      <label style="font-size:12px">Prompt base (use [CENA] [CHARACTER] [TEXTO DE CIMA] [TEXTO DE BAIXO])</label>
+      <textarea id="thumb-edit-prompt" class="input" style="font-family:monospace;font-size:11px;height:140px">${(t.prompt_base||'').replace(/</g,'&lt;')}</textarea>
+      <label style="font-size:12px;margin-top:8px">Pool CENA (1 por linha)</label>
+      <textarea id="thumb-edit-cena" class="input" style="font-family:monospace;font-size:11px;height:140px">${(t.pools?.cena||[]).join('\\n').replace(/</g,'&lt;')}</textarea>
+      <label style="font-size:12px;margin-top:8px">Pool CHARACTER (1 por linha)</label>
+      <textarea id="thumb-edit-char" class="input" style="font-family:monospace;font-size:11px;height:120px">${(t.pools?.character||[]).join('\\n').replace(/</g,'&lt;')}</textarea>
+    `;
+  } else {
+    toast('Canal nao encontrado', 'error');
+    return;
+  }
+
+  // Cria modal dinamico
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:1000;display:flex;justify-content:center;align-items:flex-start;padding:40px 20px;overflow-y:auto';
+  overlay.innerHTML = `
+    <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;max-width:760px;width:100%;display:flex;flex-direction:column">
+      <div style="padding:16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between">
+        <h3 style="margin:0">${title}</h3>
+        <button class="btn btn-sm" onclick="this.closest('div[style*=fixed]').remove()">✕</button>
+      </div>
+      <div style="padding:16px;overflow-y:auto;flex:1;max-height:70vh">${body}</div>
+      <div style="padding:12px 16px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px">
+        <button class="btn btn-sm" onclick="this.closest('div[style*=fixed]').remove()">Cancelar</button>
+        <button class="btn btn-primary btn-sm" onclick="saveThumbEditor('${canal}', '${isCo?'co':isAgente?'agente':'template'}', this)">Salvar</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+}
+
+async function saveThumbEditor(canal, tipo, btnEl) {
+  if (btnEl) { btnEl.disabled = true; btnEl.textContent = 'Salvando...'; }
+  try {
+    let url, body;
+    if (tipo === 'co') {
+      url = '/api/thumb/co-config/' + canal;
+      body = {
+        imagem_base: document.getElementById('thumb-edit-img').value.trim(),
+        fonte: document.getElementById('thumb-edit-fonte').value.trim() || undefined,
+        tamanho_fonte: parseInt(document.getElementById('thumb-edit-tam').value) || undefined,
+        cor_texto: document.getElementById('thumb-edit-cor').value.trim() || undefined,
+        outline_width: parseInt(document.getElementById('thumb-edit-ow').value) || undefined,
+        outline_color: document.getElementById('thumb-edit-oc').value.trim() || undefined,
+      };
+      // Filter undefined
+      Object.keys(body).forEach(k => body[k] === undefined && delete body[k]);
+    } else if (tipo === 'agente') {
+      url = '/api/thumb/agent/' + canal;
+      body = { instrucoes: document.getElementById('thumb-edit-agent').value };
+    } else {
+      url = '/api/thumb/template/' + canal;
+      body = {
+        prompt_base: document.getElementById('thumb-edit-prompt').value,
+        pools: {
+          cena: document.getElementById('thumb-edit-cena').value.split('\\n').map(s => s.trim()).filter(s => s),
+          character: document.getElementById('thumb-edit-char').value.split('\\n').map(s => s.trim()).filter(s => s),
+        }
+      };
+    }
+    const r = await fetch(url, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const d = await r.json();
+    if (!d.ok) { toast(d.erro || 'Erro ao salvar', 'error'); return; }
+    toast(`${canal} salvo`, 'success');
+    btnEl.closest('div[style*=fixed]').remove();
+    loadThumbTemplates();
+  } catch (e) {
+    toast('Erro: ' + e, 'error');
+  } finally {
+    if (btnEl) { btnEl.disabled = false; btnEl.textContent = 'Salvar'; }
+  }
+}
+
 // Sempre iniciar polling do Monitor em background
 startMonitorPolling();
+
+// Status dos crons Coringa (BASE + Distribuição) + flag de automação
+async function refreshCoringaStatus() {
+  try {
+    const [r1, r2, ra] = await Promise.all([
+      fetch('/api/coringa/status').then(r => r.json()),
+      fetch('/api/coringa/dist-status').then(r => r.json()),
+      fetch('/api/coringa/automacao').then(r => r.json()),
+    ]);
+
+    // Botão automação
+    const btn = document.getElementById('coringa-automacao-btn');
+    if (btn) {
+      const habilitada = !!ra.habilitada;
+      if (habilitada) {
+        btn.textContent = '🟢 Automação: LIGADA — clique pra desligar';
+        btn.style.background = 'var(--accent-dim)';
+        btn.style.borderColor = 'var(--accent)';
+        btn.style.color = 'var(--accent)';
+      } else {
+        btn.textContent = '🔴 Automação: DESLIGADA — clique pra ligar';
+        btn.style.background = 'var(--panel-2)';
+        btn.style.borderColor = 'var(--border)';
+        btn.style.color = 'var(--text-sec)';
+      }
+    }
+
+    const div = document.getElementById('coringa-status');
+    if (!div) return;
+    const intBase = Math.round((r1.intervalo_seg || 0) / 60);
+    const intDist = Math.round((r2.intervalo_seg || 0) / 60);
+    const lcb = r1.ultimo_ciclo;
+    const lcd = r2.ultimo_ciclo;
+    const auto = ra.habilitada ? '🟢 LIGADA' : '🔴 DESLIGADA (botões manuais ainda funcionam)';
+    let html = `<b>Automação:</b> ${auto}<br>`;
+    html += `<b>BASE:</b> ${r1.rodando ? '🟢' : '🔴'} (${intBase}min)`;
+    if (lcb) html += ` · último: ${lcb.ts.replace('T',' ').slice(0,16)} (${lcb.processados} ok, ${lcb.erros} erros)`;
+    html += `<br><b>DISTRIBUIÇÃO:</b> ${r2.rodando ? '🟢' : '🔴'} (${intDist}min, delay ${r2.delay_min}min)`;
+    if (lcd) html += ` · último: ${lcd.ts.replace('T',' ').slice(0,16)} (${lcd.linhas} linha(s), ${lcd.distribuidos} canais OK, ${lcd.erros} erros)`;
+    div.innerHTML = html;
+  } catch (e) { /* silent */ }
+}
+
+async function toggleAutomacao(btnEl) {
+  if (btnEl) btnEl.disabled = true;
+  try {
+    // Pega estado atual e inverte
+    const r0 = await fetch('/api/coringa/automacao');
+    const d0 = await r0.json();
+    const novo = !d0.habilitada;
+    if (novo && !confirm('Ligar a AUTOMAÇÃO BASE?\\n\\nA cada 15min o sistema vai automaticamente:\\n- Processar items Backlog → coluna BASE no grid Temas\\n- Distribuir BASE pros canais Geral configurados (com adaptação Claude CLI)\\n\\nContinuar?')) {
+      return;
+    }
+    if (!novo && !confirm('DESLIGAR a automação BASE?\\n\\nOs crons param de processar (botões manuais continuam funcionando).')) {
+      return;
+    }
+    const r = await fetch('/api/coringa/automacao', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ habilitada: novo })
+    });
+    const d = await r.json();
+    if (!d.ok) { toast('Erro ao alterar', 'error'); return; }
+    toast(d.habilitada ? '🟢 Automação LIGADA' : '🔴 Automação DESLIGADA', 'success');
+    refreshCoringaStatus();
+  } catch (e) {
+    toast('Erro: ' + e, 'error');
+  } finally {
+    if (btnEl) btnEl.disabled = false;
+  }
+}
+
+async function processarCoAgora(btnEl) {
+  if (!confirm("CO* em cruz: pega 4 itens do Backlog (mais antigos sem co=Ok), preenche CO1/CO2/CO3/CO4 em 2 datas (em cruz) + NARC e NPD adaptado via Claude. Continuar?")) return;
+  if (btnEl) { btnEl.disabled = true; btnEl.textContent = 'Processando...'; }
+  try {
+    const r = await fetch('/api/coringa/processar-co-agora', { method: 'POST' });
+    const d = await r.json();
+    if (!d.ok) { toast(d.erro || 'Erro', 'error'); return; }
+    let msg = `CO* em cruz: Dia X=${d.dia_x}, Dia X+1=${d.dia_x1}, ${d.cascade_ok}/4 cascades OK`;
+    if ((d.cascade_erros || []).length) msg += `, ${d.cascade_erros.length} erro(s)`;
+    toast(msg, (d.cascade_erros || []).length ? 'warning' : 'success');
+    loadBacklog();
+  } catch (e) {
+    toast('Erro: ' + e, 'error');
+  } finally {
+    if (btnEl) { btnEl.disabled = false; btnEl.textContent = '🔄 CO* em cruz'; }
+  }
+}
+
+async function distribuirCoringaAgora(btnEl) {
+  if (!confirm('Distribuir agora (ignora delay)?\\n\\nVai chamar Claude CLI/API pra cada canal Geral configurado de cada BASE pendente. Pode demorar alguns minutos.')) return;
+  if (btnEl) { btnEl.disabled = true; btnEl.textContent = 'Distribuindo...'; }
+  try {
+    const r = await fetch('/api/coringa/distribuir-agora', { method: 'POST' });
+    const d = await r.json();
+    if (!d.ok) { toast(d.erro || 'Erro', 'error'); return; }
+    let msg = `Distribuição: ${d.linhas} linha(s), ${d.distribuidos} canais OK`;
+    if (d.erros) msg += `, ${d.erros} erro(s)`;
+    toast(msg, d.erros ? 'warning' : 'success');
+    refreshCoringaStatus();
+  } catch (e) {
+    toast('Erro: ' + e, 'error');
+  } finally {
+    if (btnEl) { btnEl.disabled = false; btnEl.textContent = '📤 Distribuir agora'; }
+  }
+}
+
+async function processarCoringaAgora(btnEl) {
+  if (btnEl) { btnEl.disabled = true; btnEl.textContent = 'Processando...'; }
+  try {
+    const r = await fetch('/api/coringa/processar-agora', { method: 'POST' });
+    const d = await r.json();
+    if (!d.ok) { toast(d.erro || 'Erro', 'error'); return; }
+    toast(`BASE: ${d.processados} processado(s), ${d.erros} erro(s)`, d.erros ? 'warning' : 'success');
+    loadBacklog();
+    refreshCoringaStatus();
+  } catch (e) {
+    toast('Erro: ' + e, 'error');
+  } finally {
+    if (btnEl) { btnEl.disabled = false; btnEl.textContent = '⚡ Processar agora'; }
+  }
+}
+
+// === MODAL CONFIG CORINGA ===
+let _coringaConfigCanais = [];
+let _coringaCoSlots = [];
+
+async function openCoringaConfig() {
+  const modal = document.getElementById('coringa-config-modal');
+  modal.style.display = 'flex';
+  const tbody = document.getElementById('coringa-config-tbody');
+  tbody.innerHTML = '<tr><td colspan="4" style="padding:16px;text-align:center;color:var(--text-sec)">Carregando…</td></tr>';
+
+  try {
+    const r = await fetch('/api/coringa/config');
+    const d = await r.json();
+    _coringaConfigCanais = d.canais || [];
+    _coringaCoSlots = d.co_slots || [];
+    renderCoringaConfigTable();
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="4" style="padding:16px;text-align:center;color:var(--danger)">Erro: ${e}</td></tr>`;
+  }
+}
+
+function closeCoringaConfig() {
+  document.getElementById('coringa-config-modal').style.display = 'none';
+}
+
+function renderCoringaConfigTable() {
+  const tbody = document.getElementById('coringa-config-tbody');
+  if (!_coringaConfigCanais.length) {
+    tbody.innerHTML = '<tr><td colspan="4" style="padding:16px;text-align:center;color:var(--text-sec)">Nenhum canal cadastrado.</td></tr>';
+    return;
+  }
+  const slotOpts = ['<option value="">— sem vínculo —</option>']
+    .concat(_coringaCoSlots.map(s => `<option value="${s}">${s}</option>`))
+    .join('');
+
+  const casingOpts = [
+    { v: '', label: 'Default (agent decide)' },
+    { v: 'uppercase', label: 'ALL CAPS' },
+    { v: 'titlecase', label: 'Title Case' },
+  ];
+
+  tbody.innerHTML = _coringaConfigCanais.map(c => {
+    const recebeChk = c.recebe ? 'checked' : '';
+    const adaptChk = c.adaptado ? 'checked' : '';
+    const slotSelect = slotOpts.replace(`value="${c.vinculo_co_origem}"`, `value="${c.vinculo_co_origem}" selected`);
+    const isCO = (c.nome || '').match(/^CO\\d/);
+    const adaptDisabled = !c.recebe ? 'disabled' : '';
+    const casingDisabled = (!c.recebe || !c.adaptado) ? 'disabled' : '';
+    const casingHtml = casingOpts.map(o => {
+      const sel = (c.casing || '') === o.v ? ' selected' : '';
+      return `<option value="${o.v}"${sel}>${o.label}</option>`;
+    }).join('');
+    return `<tr data-nome="${c.nome}" style="border-bottom:1px solid var(--border)">
+      <td style="padding:8px"><b>${c.nome}</b>${c.idioma ? ` <span style="color:var(--text-sec);font-size:11px">(${c.idioma})</span>` : ''}</td>
+      <td style="padding:8px;text-align:center"><input type="checkbox" ${recebeChk} onchange="updateCoringaConfig('${c.nome}','recebe',this.checked)"></td>
+      <td style="padding:8px;text-align:center"><input type="checkbox" ${adaptChk} ${adaptDisabled} onchange="updateCoringaConfig('${c.nome}','adaptado',this.checked)"></td>
+      <td style="padding:8px"><select onchange="updateCoringaConfig('${c.nome}','casing',this.value)" class="input" style="font-size:12px;padding:4px;width:100%" ${casingDisabled} title="Force casing override (agent CLAUDE.md is ambiguous about EN US dual format)">${casingHtml}</select></td>
+      <td style="padding:8px"><select onchange="updateCoringaConfig('${c.nome}','vinculo_co_origem',this.value)" class="input" style="font-size:12px;padding:4px;width:100%"${isCO ? ' disabled title="CO* não recebe vínculo de outro CO*"' : ''}>${slotSelect}</select></td>
+    </tr>`;
+  }).join('');
+}
+
+async function updateCoringaConfig(nome, campo, valor) {
+  const body = {};
+  body[campo] = valor;
+  try {
+    const r = await fetch('/api/coringa/config/' + encodeURIComponent(nome), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const d = await r.json();
+    if (!d.ok) { toast(d.erro || 'Erro', 'error'); return; }
+    // Atualiza local
+    const idx = _coringaConfigCanais.findIndex(c => c.nome === nome);
+    if (idx >= 0) _coringaConfigCanais[idx] = d.config;
+    // Re-render se mudou recebe ou adaptado (afeta disabled de outros campos)
+    if (campo === 'recebe' || campo === 'adaptado') renderCoringaConfigTable();
+  } catch (e) {
+    toast('Erro: ' + e, 'error');
+  }
+}
 
 // Mobile: abrir em Monitor por default
 if (window.innerWidth <= 768) {

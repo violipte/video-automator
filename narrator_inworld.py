@@ -166,6 +166,16 @@ def narrar_inworld_chunked(
     total = len(chunks)
     print(f"[INWORLD-SEQ] {nome_saida}: {total} chunks (limit={INWORLD_CHUNK_LIMIT} chars)")
 
+    # Métricas TTS (não-bloqueante)
+    try:
+        import tts_metrics
+        _t_start = time.time()
+        tts_metrics.evento(tag=nome_saida, provider="inworld", event="start",
+                           chars=len(texto), chunks=total, fallback_from="minimax")
+    except Exception:
+        tts_metrics = None
+        _t_start = time.time()
+
     chunk_paths = []
     try:
         for i, chunk_text in enumerate(chunks):
@@ -205,8 +215,18 @@ def narrar_inworld_chunked(
             Path(cp).unlink(missing_ok=True)
 
         print(f"[INWORLD-SEQ] {nome_saida}: Concluido -> {destino}")
+        if tts_metrics:
+            try: tts_metrics.evento(tag=nome_saida, provider="inworld", event="ok",
+                                    duration_s=round(time.time()-_t_start,1),
+                                    chars=len(texto), chunks=total, fallback_from="minimax")
+            except Exception: pass
         return {"ok": True, "audio_local": destino, "erro": "", "chunks": total}
 
     except Exception as e:
+        if tts_metrics:
+            try: tts_metrics.evento(tag=nome_saida, provider="inworld", event="error",
+                                    duration_s=round(time.time()-_t_start,1),
+                                    chars=len(texto), erro=str(e)[:200])
+            except Exception: pass
         print(f"[INWORLD-SEQ] {nome_saida}: Erro ({e}). {len(chunk_paths)} chunks preservados.")
         return {"ok": False, "audio_local": "", "erro": str(e), "chunks": total}

@@ -169,7 +169,46 @@
 
 ========================== TODO (PENDENTE) =====================================
 
+--- MELHORIAS / EXPLORACOES ---
+
+[ ] WHISPER LARGE V3 NO POD 4090 (em vez do v2 atual)
+    Pedido 2026-05-08: agora que o render roda em pod 4090 (24GB VRAM,
+    folga de sobra), testar `large-v3` ao inves de `large-v2` no
+    transcriber.py. Possiveis ganhos: melhor accuracy em sotaques,
+    melhor pontuacao automatica. Custo: model load ~2GB extra de VRAM
+    (tranquilo na 4090) + ~10-20% mais lento por audio. Vale o trade-off?
+    Avaliar com 5-10 narracoes de canais EN/DE/PT.
+    Localizacao: transcriber.py (faster-whisper Whisper(model_size="..."))
+    Prioridade: MEDIA (pos-3-pods estarem rodando estavel)
+
 --- BUGS / CORRECOES ---
+
+[ ] DEPLOY.SH: GUARD CONTRA WORKING TREE DIRTY  [ADICIONADO 2026-05-10]
+    Prioridade: ALTA (sistemico, evita repeticao do incidente 3040 linhas).
+
+    Gatilho: 2026-05-10 PROD encontrou 3040 linhas modificadas no master
+    local sem commit ha 5 dias (codigo legitimo de producao deployado via
+    scp mas nunca commitado). Bloqueou o deploy dos 7 commits do DEV.
+    Detalhes incidente: Notion "PROD -> Maestro: 3040 linhas nao-commitadas"
+      https://www.notion.so/35c770cbb8de81e9a6f6ee2f7e06e591
+
+    Causa raiz sistemica: deploy.sh nao tem guard que force commit antes
+    de scp pro VPS. Funcionou enquanto era 1 Claude. Agora com 4 Claudes
+    + branches separadas, drift quebra fluxo de merge.
+
+    Solucao: deploy.sh checa working tree dos arquivos a deployar; aborta
+    se algum estiver dirty. Bypass via env DEPLOY_ALLOW_DIRTY=1 (uso por
+    sua conta e risco). Aviso adicional se ha commits locais nao pushados.
+
+    Handoff DEV completo: Notion "Guard no deploy.sh - bloquear se
+    working tree dirty"
+      https://www.notion.so/35c770cbb8de81a89e70e280f7b0a75e
+
+    Estimativa: 1-2h. Ordem na fila DEV:
+      1. Rebase develop em master (caso 3040 linhas) - em curso
+      2. Este item (guard deploy.sh)
+      3. Modal Distribuir Coringa (handoff anterior)
+      4. Aguarda Piter liberar custo bench A4000
 
 [ ] NARRACAO: RESUMIR CHUNKS JA BAIXADOS APOS RESTART
     Quando o servidor cai e reinicia, o orchestrator recomeca a narracao
@@ -478,10 +517,1150 @@ ALTERNATIVA SIMPLES (sem multi-servidor):
 Prioridade: BAIXA (reavaliar quando escalar para 30+ videos/dia)
 
 
+========================== INFRAESTRUTURA / ESCALABILIDADE ====================
+
+CONTEXTO 2026-05-07:
+- Producao atual: ~12 videos/dia (5h GPU/dia, 3060 sequencial - OK)
+- META proximos meses: dobrar/triplicar = 24-36 videos/dia
+- Sem paralelismo, 3060 sequencial nao aguenta:
+    24 v/d = 10h GPU/dia (sem margem retries)
+    36 v/d = 15h GPU/dia (no limite, qualquer falha estoura)
+- Filter chain do engine.py eh CPU-BOUND (eq + curves + colorbalance +
+  vignette + Ken Burns + subtitle + moldura + CTA + amix). NVENC nao eh
+  o gargalo individual.
+
+BENCHMARK FEITO 2026-05-07 (RTX A5000 Community $0.27/hr, 5min output):
+- 1 render single (NVENC puro, sem filter): 40s   = 7.5x real-time
+- 3 renders paralelos (NVENC puro):         143s  = 6.3x real-time
+- CONCLUSAO: A5000 NVENC paralelo NAO ajuda (1 encoder fisico, time-shared).
+  3 paralelos (143s) > 3 sequencial (120s). PIORA throughput total.
+- A5000 NAO eh boa escolha pra escalar via paralelismo.
+
+DECISAO ESTRATEGIA EM 3 FASES:
+
+
+[ ] FASE 1 (CURTO PRAZO): PARALELIZAR LOCAL com PATCH NVENC
+    Custo: $0. Resolve escalonamento ate ~24-30 videos/dia.
+
+    Hardware ja existente:
+    - CPU: Ryzen 9 9950X (Zen 5, 16c/32t, boost 5.7GHz - top consumer)
+    - GPU: RTX 3060 12GB
+    - 9950X esta SUBUTILIZADO no pipeline atual (1 worker so)
+
+    Acao:
+    1. Aplicar patch nvenc-restrict-patch (open-source) na 3060:
+       - Remove cap de 2 NVENC sessions consumer
+       - Permite 4-8 NVENC streams concorrentes
+    2. Modificar render_queue.py: WORKERS_CONCURRENT=2 (ou 3)
+    3. Testar com 2-3 jobs paralelos:
+       - Cada FFmpeg pega ~10-12 vCPUs do 9950X (32 threads dispniveis)
+       - NVENC sessions concorrentes na mesma 3060
+    4. Monitorar: VRAM (12GB tem que dar), CPU saturation, qualidade
+
+    Risco:
+    - Patch quebra a cada driver NVIDIA update (~3-6 meses) - reaplicar
+    - Sem suporte oficial NVIDIA
+    - VRAM 12GB pode apertar com Whisper + 2 NVENC + filter buffers
+
+    Implementacao estimada: 2-3h (setup + tuning)
+    Throughput esperado: 2-2.5x atual (nao 3x perfeito por overhead)
+
+
+[ ] FASE 2 (MEDIO PRAZO): MIGRACAO 100% CLOUD-NATIVE (autonomia total)
+    Quando: ao se aproximar de 30+ videos/dia ou querer autonomia 24/7.
+    Custo: ~$60-100/mes (escalavel conforme uso).
+
+    PRINCIPIO: o sistema roda 100% na nuvem, INDEPENDENTE do PC do Piter,
+    da internet residencial e de energia local. Producao continua mesmo
+    se Piter viajar 1 mes sem tocar em nada.
+
+    INTERNET DO PITER eh necessaria APENAS pra:
+    - Acessar o painel via browser (50KB de HTML, funciona em qualquer 4G)
+    - Adicionar links YT no Backlog Temas (~30s/dia, pode ser pelo celular)
+    - Editar configs/templates esporadicamente
+    NUNCA pra producao funcionar.
+
+
+    ARQUITETURA CLOUD-NATIVE PROPOSTA:
+
+    VPS Contabo (ja existe)
+      |- orchestrator + UI + API + fila de jobs (SQLite/Postgres)
+      |- cron auto-scaling (sobe/desliga pods conforme fila)
+      |
+      |---> Pod RunPod #1 (4090 dual NVENC) - Worker A
+      |---> Pod RunPod #2 (4090 dual NVENC) - Worker B (failover)
+      |---> Pod RunPod #3 (4090) - sob demanda quando fila > N
+      |          |
+      |          |- Network volume compartilhado RunPod (~50GB, $3.50/mes)
+      |          |  cache Ken Burns + moldura PNG + fontes + assets
+      |          v
+      |       S3 Wasabi/B2 ($0.005/GB/mes)
+                 outputs MP4 finais (lifecycle: Glacier 30d, delete 90d)
+
+
+    POR QUE 4090 (vs A5000/A4000):
+    - 4090 tem DUAL NVENC FISICO (2 encoders, 8th gen, AV1)
+    - Permite 2 streams paralelos REAIS (nao time-shared como A5000)
+    - Cada render single ~1.8x mais rapido que 3060 (NVENC 8th gen)
+    - 2 paralelos x 1.8x = 3.6x throughput vs 3060 sequencial
+
+    BENCHMARK A5000 FEITO 2026-05-07 PROVOU:
+    - 1 render single A5000: 40s pra 5min output (NVENC puro)
+    - 3 paralelos A5000:    143s (PIOR que 3 sequenciais 120s)
+    - A5000 paralelismo nao compensa - 1 NVENC engine fisico time-shared
+
+
+    POR QUE 2 PODS 1-GPU (vs 1 pod 2-GPUs):
+    - Mesmo custo total ($0.68/hr)
+    - 2 pods independentes: 1 cai, outro continua = FAILOVER REAL
+    - 1 pod 2-GPUs = ponto unico de falha, queda derruba tudo
+
+
+    CUSTOS ESTIMADOS:
+    - 30 v/d: 2 pods rodando ~3h/dia x 30 = ~$60/mes + storage = ~$70/mes
+    - 50 v/d: 2-3 pods, ~5h/dia = ~$80-100/mes total
+    - + Network volume 50GB: $3.50/mes
+    - + S3 Wasabi outputs: ~$5/mes
+    - Total tipico: $70-110/mes (R$370-580/mes)
+
+
+    SETE PILARES DE ROBUSTEZ (criticos pra cloud 100%):
+
+    1. JOB QUEUE PERSISTENTE (nao em memoria)
+       - Migrar render_queue.py pra SQLite/Postgres
+       - Jobs sobrevivem restart da VPS
+       - Status: pending | claimed | rendering | done | error
+       - Job claimed por pod tem heartbeat - se travar 2min volta pra fila
+
+    2. IDEMPOTENCIA TOTAL
+       - Hash de inputs (template + MP3 + config) = key idempotente
+       - Worker checa: ja existe MP4 com esse hash? Skip.
+       - Re-execucao de qualquer job eh safe
+
+    3. HEALTH CHECKS + AUTO-RECOVERY
+       - Pod manda heartbeat a cada 30s
+       - VPS detecta pod sem heartbeat 2min - libera jobs claimados
+       - Cron sobe pod novo automatico se fila > 3 jobs
+
+    4. MONITORAMENTO + ALERTAS
+       - Webhook Telegram/Discord em: pod cai, render falha 2x
+         consecutivos, fila > 10 jobs, custo dia > $X
+       - Dashboard simples na VPS: status pods + jobs
+
+    5. BACKUP S3 VERSIONADO
+       - Outputs MP4 -> S3 com lifecycle (Glacier 30d, delete 90d)
+       - Custo trivial (~R$5/mes pra centenas de videos)
+
+    6. IMAGEM DOCKER PRE-CONFIGURADA
+       - 1x build com Python 3.13 + FFmpeg+NVENC + faster-whisper +
+         opencv-cuda
+       - Push pra DockerHub
+       - Cada pod novo sobe pronto em ~30s (vs 5-10min instalando)
+
+    7. AUTO-SCALE INTELIGENTE
+       - Cron VPS a cada 1min:
+         * fila > 5 AND pods < 3 -> cria pod novo via API RunPod
+         * pod idle > 10min -> desliga pod
+       - Limite N pods (config), alerta se atingir teto
+
+
+    IMPLEMENTACAO FASEADA (5 sub-fases):
+
+    F1 (~8h): Dockerize + 1 pod 4090 fixo
+       - Dockerfile: Python 3.13 + FFmpeg+NVENC + deps
+       - 1 pod fixo rodando 24/7 ($35/mes)
+       - Setup network volume + sync inicial
+       - Modificar render_worker.py pra rodar em container
+
+    F2 (~6h): Job queue persistente + heartbeat
+       - render_queue.py -> SQLite ou Postgres
+       - Idempotencia (hash de inputs)
+       - Heartbeat pod -> VPS (30s)
+       - Recovery: jobs sem heartbeat 2min voltam pra fila
+
+    F3 (~5h): Auto-scale 1-3 pods via RunPod API
+       - Cron na VPS gerenciando pods
+       - Sobe pod quando fila > 5
+       - Desliga pod idle > 10min
+       - Limite max 3 pods
+
+    F4 (~3h): Monitoring + alertas
+       - Webhook Telegram (ou Discord)
+       - Eventos: pod down, render erro 2x, fila gigante, custo alto
+       - Dashboard simples no UI da VPS (status pods)
+
+    F5 (~3h): S3 backup + lifecycle
+       - Wasabi ou Backblaze B2 (~$0.005/GB/mes)
+       - Sync automatico dos MP4 finais
+       - Lifecycle: Glacier 30d, delete 90d
+
+
+    TOTAL FASE 2: ~25h dev pra sistema cloud-native solido
+    PAYBACK: ~3 meses (custo energia + tempo de manutencao do PC local)
+
+
+[ ] FASE 3 (LONGO PRAZO): REFACTOR FILTER CHAIN PRA GPU CUDA
+    Quando: producao estavel, projeto maduro.
+    Custo: ~10-15h dev.
+
+    Migrar filters CPU-bound pra equivalentes CUDA (GPU-accelerated):
+    - eq -> nao tem CUDA equivalente direto, mas pode usar OpenCV CUDA
+    - colorspace -> colorspace_cuda
+    - overlay -> overlay_cuda (ja existe no codebase, esta DESLIGADO)
+    - vignette -> custom CUDA shader ou pre-render como overlay
+    - subtitle burn (libass) -> mantem CPU mas isolar thread
+    - amix -> mantem CPU (audio nao eh gargalo)
+
+    Ganho esperado:
+    - Single render 5-10x mais rapido (filter sai do caminho critico)
+    - GPU pequena passa a aguentar muito mais throughput
+    - Cloud cost cai (menos horas de pod necessarias)
+
+    Risco:
+    - Refactor grande, pode introduzir bugs visuais
+    - filtros CUDA tem comportamento ligeiramente diferente do CPU
+
+
+BENCHMARKS PENDENTES PRA APROFUNDAR DECISAO FASE 2:
+- Testar pipeline REAL (com filter chain do engine.py) no 4090 cloud
+- Comparar 1 vs 2 paralelos no 4090 com filter pesado
+- Validar se dual NVENC mantem ganho com CPU-bound dominante
+- Estimar custo mensal real com base em 24-36 v/d
+
+
+========================== THUMBNAIL GENERATOR =================================
+
+[ ] THUMBNAIL GENERATOR AUTOMATIZADO (3 modos diferentes por canal)
+
+    REFERENCIA: subpagina Notion "Thumbnail Generator AI (ai33 + Gemini)"
+    + drive-to-youtube/lib/thumbnail.py + prompt-mixer-backup.json.
+
+    OBJETIVO: gerar thumbnail automatica durante producao, no orchestrator
+    do video-automator (apos render do MP4, antes do upload YouTube).
+
+    --- 3 MODOS DE GERACAO POR CANAL ---
+
+    MODO A: PROMPT-MIXER (ai33.pro/Gemini com pools de cena/character)
+    Canais: DE, EN, EN2, EN3, ENO2, ENS, NARC, NPD, CON (novo template a criar)
+
+    Como funciona:
+    - Template em thumb_config tem prompt_base com placeholders:
+      [CENA], [CHARACTER], [TEXTO DE CIMA], [TEXTO DE BAIXO]
+    - Pools de cena (~10) e character (~7-11) sao escolhidos aleatorios
+    - split_thumb_text(texto_thumb) divide o texto no espaco MAIS PROXIMO
+      DO MEIO (balanceamento por chars) -> top + bottom
+    - Prompt completo vai pro ai33.pro -> imagem 16:9 2K -> resize 1280x720
+    - Cache em Automator Exports/<data>/Thumbs/<canal>.jpg
+
+    A criar: template CON novo no prompt-mixer-backup.json (pendente Piter
+    definir cenas + character + estilo visual).
+
+    --- MODO B: AGENTE LLM CRIA O PROMPT (ENO) ---
+    Canal: ENO
+
+    Como funciona:
+    - Nao usa template fixo. Um agente Claude (agents/thumbnail-eno/CLAUDE.md)
+      le o tema+titulo+thumb da Coringa e GERA o prompt visual completo na
+      hora, contextualmente relevante pro tema daquele video.
+    - Output do agente: prompt completo pra ai33.pro
+    - Mesma pipeline ai33 -> imagem -> resize que Modo A
+
+    Agente novo a criar: agents/thumbnail-eno/CLAUDE.md
+    Define instruções pra Claude criar prompts visuais variados pra ENO.
+    Custo extra: 1 chamada Claude por thumb (~$0 com Max plan via CLI).
+
+    --- MODO C: IMAGEM FIXA + TEXT OVERLAY (CO*) ---
+    Canais: CO1, CO2, CO3, CO4
+
+    Como funciona:
+    - Cada canal tem UMA imagem base fixa (ja existente)
+    - NAO chama ai33.pro - so abre a imagem com PIL/Pillow e escreve os
+      textos de cima e de baixo com fonte e cor especifica do canal
+    - split_thumb_text aplica igual Modo A pra dividir os 2 textos
+    - Output direto: 1280x720 JPEG
+
+    Config necessaria por canal CO*:
+    - imagem_base: path da imagem (ja existe na pasta de assets do canal)
+    - fonte: caminho do .ttf (ja existe em video-automator/fonts/)
+    - cor_texto: RGB hex
+    - posicao_top:    {x%, y%, max_chars/linha}
+    - posicao_bottom: idem
+    - outline_width + outline_color (geralmente preto pra contraste)
+
+    Ja existe parcialmente: aba "Thumbnail" do automator tem geracao via
+    ai33 + preview. Falta apenas adicionar modo "imagem_fixa" + text overlay.
+
+    --- IMPLEMENTACAO PROPOSTA ---
+
+    1. Estender thumb_config dos templates pra ter campo "modo":
+       - "prompt-mixer": pools + ai33.pro
+       - "agente": chama agents/thumbnail-{canal}/CLAUDE.md, gera prompt, ai33
+       - "imagem_fixa": skip ai33, usa PIL pra escrever textos sobre imagem
+
+    2. Modulo novo lib_thumbnail.py em video-automator (separado do
+       drive-to-youtube pra independencia):
+       - generate_thumbnail(template, tema, titulo, thumb_text)
+       - dispatcher por modo: prompt_mixer / agente / imagem_fixa
+       - split_thumb_text() compartilhado
+       - cache em Automator Exports/<data>/Thumbs/<canal>.jpg
+
+    3. Portar templates do prompt-mixer-backup.json pra thumb_templates.json
+       no video-automator (8 atuais + CON novo quando definido)
+
+    4. Integrar no orchestrator: apos render OK, chama generate_thumbnail()
+       com texto adaptado da celula do canal (titulo + thumb da grid Temas)
+
+    5. UI: aba Thumbnail existente ganha novos modos no editor por template
+
+    PRIORIDADE: ALTA (gargalo manual atual)
+    DEPENDENCIA: definicao de template CON (Modo A) e agente ENO (Modo B)
+    pelo Piter antes de implementar 100%.
+
+
+========================== UI / UX REDESIGN ==================================
+
+[ ] CONTRASTE GLOBAL EM CAMPOS DE INPUT (UX premium) - aguardando OK do Piter
+    Pedido 2026-05-08: TODOS os campos preenchíveis (input, textarea, select, etc)
+    devem ter cor de fundo/borda CLARAMENTE distinta do resto da UI, pra facilitar
+    identificação visual do que é editável vs estático.
+
+    Aplicar em 100% do automator (frontend2 React):
+    - Backlog Temas: form add, edit inline na tabela, modal config
+    - Temas: cell modal (tema/titulo/thumb), replicar modal
+    - Templates: TODAS as 5 subabas (Render, Roteiro, Narracao, Thumbnail, Link)
+    - Monitor: modal Produzir Tudo
+    - Log: filtros (data, canal)
+    - Config: API keys + credenciais
+
+    REFERENCIA visual: automator antigo (UI legada em /) - campos sao MAIS
+    ESCUROS que o panel/modal ao redor. Da sensacao de "depressed/inset",
+    como se fosse um buraco no panel onde voce preenche.
+
+    Ideia de implementacao:
+    - Adicionar token --input-bg = #08090a (== --bg, MAIS ESCURO que --panel)
+      ou --input-bg = #0a0b0e (intermediario)
+    - Atualizar Common/Input.css: background do input fica mais escuro que panel
+    - Adicionar inner shadow sutil pra reforcar a sensacao "inset":
+      box-shadow: inset 0 1px 3px rgba(0,0,0,0.3)
+    - Aplicar em TODOS: <input>, <textarea>, <select>, .cell-input (Backlog),
+      .temas-cell-input (se ainda existe), checkboxes
+    - Manter focus ring esmeralda atual
+    - Aplicar em fundo DOS modais tambem (CellModal, ConfigCoringa, etc)
+
+    Piter vai avisar com "ok" pra implementar.
+
+
+[ ] REFORMULACAO COMPLETA DO UI DO VIDEO-AUTOMATOR (REACT + VITE)
+
+    OBJETIVO: migrar de HTML/JS inline em string Python pra React + Vite +
+    CSS puro, alinhado com a stack do Link Tracker 2.0 (referencia visual).
+
+    PROBLEMA STACK ATUAL:
+    - app.py tem ~10k linhas (2k Python + 8k HTML/CSS/JS inline)
+    - JS dentro de string Python = bug-prone (escapes \\n, \\\\d, etc)
+    - Zero reuso de componente (cards, modais, tabelas duplicados)
+    - Estado disperso em variaveis globais JS
+    - Sem hot-reload, sem build, sem typecheck
+    - Pra mudar 1 cor = procurar em 20+ lugares
+
+    STACK ALVO:
+    - Backend: FastAPI (mantido, so endpoints REST)
+    - Frontend novo: React 19 + Vite + CSS puro (sem Tailwind, igual
+      Link Tracker que ja esta migrando pro mesmo stack)
+    - Build: vite build -> dist/ servido pelo FastAPI como static
+    - Dev: vite porta 3000 + proxy /api pro FastAPI
+
+    ESTRUTURA PROPOSTA:
+        video-automator/
+        |- app.py                   # backend (so endpoints, sem HTML)
+        |- frontend2/
+           |- src/
+           |  |- pages/              # Temas, Templates, Monitor, Log, Config, Backlog
+           |  |- components/         # Card, Modal, Table, Badge, Toast, Button
+           |  |- api.js              # cliente HTTP centralizado
+           |  |- store.js            # estado global (zustand ou context)
+           |  +- App.jsx
+           |- vite.config.js
+           +- package.json
+
+    AUDITORIA POR ABA (briefing Piter 2026-05-07):
+
+    Temas:        REFORMAR. Manter grid + modal. REMOVER:
+                  - Sync Supabase
+                  - Campo Roteiro no modal
+                  - Dropdown Pipeline no modal
+                  - Botao Produzir Tudo abaixo da tabela
+                  - Botao Gerar Roteiros
+
+    Roteiros:     REMOVER. Vira subaba "Roteiro" em Templates
+                  (cada canal tem 1 pipeline associada, agrupa).
+
+    Narracao:     REMOVER. Tudo via comando.
+
+    Thumbnail:    REMOVER. Vira subaba "Thumbnail" em Templates
+                  (3 modos: prompt-mixer, agente, imagem_fixa).
+
+    Templates:    CORACAO DO REDESIGN. Cards + modal com 5 subabas:
+                  - Render (resolution, NVENC, ajustes Lumetri)
+                  - Roteiro (pipeline LLM atual da aba Roteiros)
+                  - Narracao (voz + provider + fallback Inworld)
+                  - Thumbnail (modo + config)
+                  - Link Tracker (URL + slug + comentario - por canal!)
+
+    Producao:     REMOVER. Producao manual nao acontece mais.
+
+    Monitor:      REFORMAR. Receber botao "Produzir Tudo" (unico
+                  lugar de comando manual). Dashboard atual tem dados
+                  ruins/desnecessarios - reformular.
+
+    Log:          + Coluna Thumbnail (path + modo gerado, pra rastrear
+                  qual canal usou ai33 vs fallback).
+
+    Config:       ENXUGAR. So API keys + credenciais. REMOVER:
+                  - Sync (Supabase, Sheets) - sem risco em servidor
+                  - Link Tracker (URL/slug/auth) - vai pra Templates
+
+    Backlog Temas: MANTER, ja redesenhado.
+
+    SIDEBAR FINAL (9 -> 6 abas):
+        1. Temas
+        2. Backlog Temas
+        3. Templates (TUDO de canal: render, roteiro, narracao, thumb, link tracker)
+        4. Monitor (acompanhar + Produzir Tudo)
+        5. Log
+        6. Config
+
+    IMPLEMENTACAO FASEADA (~29h total):
+
+    F-A (4h): Auditoria + wireframes
+        - Mapear feature por feature: vai/fica/migra
+        - Wireframes Excalidraw/Figma das 6 abas
+        - Definir paleta + tipografia (alinhar Link Tracker)
+        - APROVACAO Piter antes de codar
+
+    F-B (6h): Setup React + Vite + base
+        - npm create vite@latest
+        - Router, layout shell, tema dark
+        - Componentes base reutilizaveis
+        - api.js cliente HTTP
+
+    F-C (12h): Migrar abas mantidas
+        - Templates (5 subabas): 5h
+        - Monitor reformulado: 3h
+        - Temas grid+modal limpo: 3h
+        - Backlog Temas: 1h
+
+    F-D (4h): Simples + remover obsoleto
+        - Log com coluna Thumbnail
+        - Config enxuto
+        - Remover endpoints obsoletos do backend
+
+    F-E (3h): Deploy + paridade visual com Link Tracker
+        - Build + servir via FastAPI static
+        - Polimento + mobile
+
+    PRIORIDADE: ALTA quando producao estiver estavel (apos ligar
+    automacao Coringa + thumbnail completo). Nao bloqueia producao.
+
+
+[ ] REDUNDANCIA DE IAs (criar 2 backups pra continuidade do ciclo produtivo)
+
+    PROBLEMA: hoje toda operacao do automator depende exclusivamente
+    de 1 sessao Claude (Code) coordenando. Se essa sessao tiver problema
+    (rate limit, modelo offline, downtime Anthropic, etc), producao
+    pode parar.
+
+    OBJETIVO: ter 2-3 IAs alternativas capazes de iniciar/operar o ciclo
+    produtivo de forma independente.
+
+    OPCOES DE IAs PRA AVALIAR:
+    1. GPT (Codex CLI ou ChatGPT com plugins) - via OpenAI key existente
+    2. Gemini (gemini-cli) - free tier ja em uso, ja conhece o projeto
+    3. Cursor / Aider - editores com IA integrada (Sonnet/GPT/Gemini)
+
+    REQUISITOS PRA OUTRA IA OPERAR:
+    1. CLAUDE.md (ja existe) deve ser auto-explicativo - sem lacunas
+       que dependam de contexto historico de sessao Claude
+    2. Slash commands padrao documentados:
+       - /play-loop YYYY-MM-DD: dispara orchestrator a partir da data
+       - /process-coringa: chama /api/coringa/processar-agora
+       - /distribute-now: chama /api/coringa/distribuir-agora
+       - /co-cross: chama /api/coringa/processar-co-agora
+       - /backlog-add <link>: adiciona link YT no backlog
+       - /status: pega health + estado da producao
+       - /restart-prod: ssh + systemctl restart video-automator
+    3. README operacional pra IAs:
+       - "Como dar play no ciclo produtivo" em 1 pagina
+       - Comandos curl/ssh prontos pra copiar-colar
+       - Diagnostico comum (ai33 lento, Gemini 503, NVENC OOM)
+    4. Endpoints REST bem documentados (OpenAPI ja vem free com FastAPI)
+       - Auto-publicar /docs em prod
+    5. Memoria persistente no Notion (Hub Canal Dark) - subpagina
+       "Operacao Diaria" com runbook de comandos comuns
+
+    IMPLEMENTACAO ESTIMADA (~6h):
+    - Documentar slash commands + runbook em CLAUDE.md: 2h
+    - Criar pagina Notion "Operacao Diaria - Runbook": 1h
+    - Testar com Gemini CLI rodando comandos basicos: 1h
+    - Testar com Codex CLI rodando comandos basicos: 1h
+    - Documentar caveats descobertos durante testes: 1h
+
+    PRIORIDADE: MEDIA. Importante mas nao bloqueia.
+    Ideal: implementar JUNTO com UI redesign (forca documentacao
+    explicita, beneficiando ambos os esforcos).
+
+
 ================================================================================
   Legenda:  [x] Concluido   [ ] Pendente   [-] Cancelado
-  Ultima atualizacao: 2026-04-10
+  Ultima atualizacao: 2026-05-07
 ================================================================================
-  Legenda:  [x] Concluido   [ ] Pendente   [-] Cancelado
-  Ultima atualizacao: 2026-04-10
+
+
+================================================================================
+                      RUNPOD CLOUD RENDER - PENDÊNCIAS CRÍTICAS
+                                 (parado em 2026-05-09)
+================================================================================
+
+CONTEXTO: Tentativa de migrar render pro cloud (RunPod, 3 pods PRO 4500) deu vários
+problemas. Pausado pra retomar local. Retomar quando tiver tempo de investigação.
+
+VÍDEOS PENDENTES NO 09/05/2026:
+  - CON, DE, EN2, NARC, CO3, CO4 — apagados do PC, no volume estão corrompidos
+    ou parciais. Re-renderizar localmente quando o sistema estabilizar.
+  - DE: o user reportou que "DE estava certo" mas ffprobe deu falha. Verificar
+    se foi false-positive ou se realmente corrompeu.
+
+BUGS RECORRENTES IDENTIFICADOS (precisa investigar):
+
+[ ] 1. WORKER SKIP-EXISTING VALIDA SÓ SIZE, NÃO MOOV ATOM
+    Em render_worker.py:
+        if Path(video_path).exists() and Path(video_path).stat().st_size > 1000:
+            return True (skip)
+    Problema: arquivos corrompidos (sem moov) com size > 1KB passam como "OK".
+    Solução: validar via ffprobe duration > 0 OU procurar marker 'moov' nos
+    primeiros 64 bytes (se +faststart) ou últimos 4MB.
+
+[ ] 2. ARQUIVOS CORROMPIDOS NO VOLUME APÓS RE-RENDER
+    Mesmo após re-render legítimo, alguns arquivos saem sem moov atom.
+    Possível causa: workers paralelos (2/pod) competindo por NVENC/IO?
+    Causa: kill de pod no meio do FFmpeg final (faststart precisa do final).
+    Solução: garantir só 1 worker/pod OU verificar/extender stall_timeout.
+
+[ ] 3. ORQUESTRADOR CONFIA NO DB (status="ok") MESMO COM ARQUIVO CORROMPIDO
+    Se DB diz status="ok" + path, orchestrator skipa via skip-existing.
+    Não revalida o arquivo. Precisa: ffprobe periódico ou flag de "verified".
+
+[ ] 4. cel.done=True NO TEMAS PERMANECE MESMO SE ARQUIVO CORROMPIDO
+    Quando worker reporta complete (mesmo com .mp4 sem moov), orchestrator
+    seta cel.done=True. Reset agressivo precisa zerar 3 fontes:
+      - video_log_db.render.status + path
+      - temas.celulas[k].done + done_type
+      - arquivo no volume + arquivo no PC
+    Solução: criar função `reset_canal_render(canal, data)` que limpa tudo.
+
+[ ] 5. POOLS DUPLICADOS NA CONTA RUNPOD (43 EXITED)
+    Cada disparo cria pods novos. Acumulou 43 EXITED.
+    Solução: cleanup script que deleta EXITED com idade > X horas.
+
+[ ] 6. AUTO-DOWNLOAD PARA QUANDO ÚLTIMO POD DESLIGA
+    auto-download.py polla pra encontrar pod RUNNING; se 0 pods, fica vazio.
+    Mas tem MP4s no volume que precisam ser baixados. Fix: usar S3 direto do
+    Network Volume (RunPod tem S3-compat API), não SSH no pod.
+
+[ ] 7. RENDER LOCAL VS REMOTO — DECISÃO ESTRATÉGICA
+    Local (RTX 3060): ~25min/render, 1 paralelo, sem corrompidos, MP4 direto no PC
+    RunPod (3 pods PRO 4500 × 2 workers): 6 paralelos, ~10min cada, mas:
+      - Custo $1.92/hr ligado
+      - Bugs recorrentes (corrompidos)
+      - Precisa baixar MP4 (volume → PC)
+      - Watchdog/scale-down/lifecycle complexos
+    Decisão: voltar pra LOCAL até bugs RunPod estarem resolvidos.
+
+[ ] 8. WATCHDOG MUITO AGRESSIVO + SHIP-CYCLE
+    Threshold de 300s em pods_manager.watchdog_check pode matar pods que
+    estão legitimamente bootando. Bootstrap pode demorar 4min+ em alguns
+    cenários (apt mirror lento, pip recompila).
+    Solução: usar `last_started_at` do pod como referência ao invés de
+    "primeiro poll". Tolera 7min após start.
+
+[ ] 9. PODS_MANAGER.START_PODS COM RESUME ÀS VEZES FALHA
+    podResume retorna "Not enough free GPUs on the host" quando RunPod
+    realocou. Resume cai pra create. OK, mas múltiplas chamadas concorrentes
+    podem criar pods redundantes. Garantir lock global.
+
+================================================================================
+
+
+================================================================================
+                     ROADMAP PRODUÇÃO 2.0 — após sessão 09/05
+                              (anotado 2026-05-09)
+================================================================================
+
+==================== 1. PROBLEMAS DE RENDER VIA RUNPOD ====================
+
+[ ] 1.1 RENDER WORKERS NÃO INICIANDO AUTO COM POD LIGADO
+    Ocorrência: pod sobe, mas workers (render_worker.py) não conectam.
+    Sintoma: pod RUNNING + 0 polls em /api/render-worker/next-job.
+    Causas identificadas e fixadas na sessão:
+      - .env file sem aspas em valores com espaco (FIXED)
+      - Public key faltando (FIXED com runpod_public_key combinada user+VPS)
+    Pendentes:
+      - bash respawn loop nao detecta workers (pgrep -f errado)
+      - Worker validation no startup: se WORKER_TOKEN invalido, retry
+      - Health endpoint no worker que confirma status pollable
+
+[ ] 1.2 PODS OCIOSOS GASTANDO DINHEIRO SEM NECESSIDADE
+    Ocorrência: produção termina, pods ficam ligados.
+    Causas:
+      - Hook auto-shutdown só atua após 5min idle
+      - auto_scale_down só desliga pod sem job processing — race
+      - Watchdog mata após 2 violações (10min total) — antes disso, idle
+    Solução pendente:
+      - Hook STOP imediato ao final do produzir_loop / produzir_data
+      - Garantir que pods_manager.stop_all_pods() é chamado antes do return
+      - Cron de housekeeping a cada 10min: lista pods RUNNING sem produção
+        ativa nos últimos 15min, STOP forçado
+
+[ ] 1.3 VIDEO RENDERIZADO INCORRETO (imagem trava no meio)
+    Ocorrência: produção com Ken Burns (imagens) — frame congela no meio.
+    Vídeos com fundo de footage NAO tiveram esse problema.
+    Hipóteses:
+      - Pre-concatenation dos clips Ken Burns no /workspace/temp (MooseFS
+        do Network Volume) tem latencia de I/O. FFmpeg pode timeout
+      - Cache dos clips em /workspace/cache (volume) — conflito de escrita
+        simultanea entre pods?
+    Pendente investigar:
+      - Mover temp_dir e cache_dir do worker pra disco LOCAL do pod
+        (containerDisk) ao invés do Network Volume
+      - Comparar checksum dos clips Ken Burns local vs remoto
+      - Adicionar logging de progresso FFmpeg detalhado
+
+[ ] 1.4 AUTO-DOWNLOAD NÃO FUNCIONA CORRETAMENTE
+    Ocorrências:
+      - Para de baixar quando ultimo pod desliga (depende de SSH)
+      - Race com FFmpeg em escrita: baixou MP4 sem moov atom
+      - Em paralelo (5 scp), pegou alguns ainda em escrita
+    Solução pendente:
+      - Usar S3-compat API do RunPod Network Volume (sem dep de pod)
+      - Validar moov atom no destino apos download (ffprobe duration)
+      - Lock file no remoto (FFmpeg cria *.tmp, renomeia ao terminar)
+
+[ ] 1.5 ARQUIVOS CORROMPIDOS NO VOLUME (RETRABALHO + GASTO)
+    Workers reportam complete() mas MP4 fica sem moov atom.
+    Causa raiz: kill prematuro de pods (manual ou watchdog) enquanto
+    FFmpeg estava no faststart final (move moov pro inicio).
+    Solução pendente:
+      - render_worker.py: validar ffprobe pos-render, se duration=0
+        nao reportar complete (marcar erro)
+      - Skip-existing do worker: validar moov atom (nao so size > 1KB)
+      - Orquestrador: re-validar arquivo no volume antes de marcar
+        cel.done=True
+
+[ ] 1.6 TESTES INSUFICIENTES PRA VALIDAR PARALELISMO POR POD
+    Nao conseguimos validar se 1 pod consegue rodar 2-3 renders
+    simultaneos de forma estavel (NVENC + I/O + CPU + VRAM concorrencia).
+    Plano de teste necessario:
+      a. Pod unico, 1 worker, 1 render — baseline tempo
+      b. Pod unico, 2 workers, 2 renders simultaneos — medir tempo
+      c. Pod unico, 3 workers, 3 renders — medir tempo + falhas
+      d. Comparar com placa local (RTX 3060)
+      e. Considerar GPUs mais fortes: PRO 6000 (96GB), L40S (48GB) se
+         PRO 4500 (32GB) for o gargalo. Avaliar custo-beneficio.
+
+==================== 2. FLUXO DE SALVAMENTO DO VIDEO FINAL ====================
+
+[ ] FLUXO ATUAL: RunPod Network Volume -> SCP -> Local (fragil)
+[ ] FLUXO DESEJADO: RunPod Storage -> Google Drive -> Pasta Local
+    Vantagens:
+      - Backup em nuvem (Drive) automatico
+      - Acessivel de qualquer maquina
+      - Historico de versoes
+      - Pasta Local sincroniza via Drive client
+    Implementacao:
+      - Worker, ao concluir, faz upload pro Drive via API (rclone ou
+        pydrive2)
+      - Service account Google Drive (pra evitar OAuth manual)
+      - Worker deleta MP4 do Network Volume apos upload OK
+      - Drive client no PC sincroniza pasta automaticamente
+    Custos: Drive 2TB (~R$50/mes) cobre ~2000 videos de 1GB
+
+==================== 3. FALLBACK PRODUTIVO PRA RTX 3060 LOCAL ====================
+
+[ ] AUTO-FALLBACK QUANDO RUNPOD PRODUZ ARQUIVOS CORROMPIDOS
+    Trigger automatico:
+      - Worker reporta complete mas ffprobe valida duration=0
+      - Pod travado por > 30min sem progresso
+      - 2 retries no mesmo canal todos com erro
+    Acao automatica:
+      - PAUSAR o pod responsavel IMEDIATAMENTE (preserva config + assets)
+      - Re-enqueue o job com flag local_only=True
+      - Worker LOCAL (3060) na fila pega — so 1 ou 2 paralelos pra nao
+        saturar a placa (limite NVENC 2 sessoes consumer)
+      - Se >5 jobs caem no fallback, alerta visual no Monitor
+    Worker config separados:
+      - worker_remote_config.json (pods)
+      - worker_local_config.json (3060 sequencial)
+
+==================== 4. FALLBACK GERADOR DE IMAGEM (THUMBNAIL) ====================
+
+[ ] AI33.PRO COMO PRIMARIO + FALLBACKS  [PRIORIDADE SUBIU 2026-05-09]
+    De MEDIA -> MEDIA-ALTA apos incidente de thumbnail na producao 10/05.
+
+    GATILHO: 3 falhas distintas em 3 canais consecutivos:
+      - CON: prompt_base vazio (config template)
+      - DE: prompt > 4000 chars (limit ai33.pro bytedance-seedream-4.5)
+      - EN: 403 Forbidden (anomalia ai33.pro, possivel incidente plataforma)
+    Detalhes: Notion "Falhas de thumbnail - producao 10/05"
+      https://www.notion.so/35b770cbb8de815d8617d6b341b11910
+
+    CONSTRAINT CRITICO confirmado pelo Piter:
+      - Prompts NAO podem ser reduzidos (qualidade/precisão visual)
+      - Logo: provider alternativo PRECISA aceitar prompts >= 6000 chars
+
+    Quando ai33.pro /v1i falha (rate limit, timeout, 5xx, 4xx):
+
+    Provedores em ordem (verificar limits + qualidade):
+      1. ai33.pro (Bytedance Seedream 4.5, GPT-Image-1.5) — atual, 4000 chars max
+      2. fal.ai — Flux 1.1 Pro Ultra, Imagen 4, Recraft V3
+      3. Replicate — biblioteca enorme (Flux Pro, Ideogram V2)
+      4. OpenAI direto — DALL-E 3 / gpt-image-1 (~4000 chars, mesma limitação)
+      5. Google Imagen 4 via Vertex AI (RISCO: ~2500 chars, talvez NAO serve)
+      6. Runware — preco competitivo
+      7. Midjourney via API (limit ~6000, mas API ainda restrita)
+
+    PESQUISA ESTRUTURADA EM ANDAMENTO (OBS):
+      Notion: "Image Gen Providers - Pesquisa & Testes"
+      https://www.notion.so/35b770cbb8de811bbe83db7ea33029b8
+      Etapas: descoberta -> qualidade visual -> escolha -> handoff DEV
+
+    Modelos a verificar:
+      - Nano Banana 2 (Google Gemini 2.5 Flash Image)
+      - Gemini 3 (Google) — geracao de imagens (multimodal)
+
+    Alternativas se Tier 1 todo falhar limit >= 6000 chars:
+      - Self-host Flux em RunPod (custo manutencao, sem limit)
+      - Pre-processar prompt com LLM (compressao semantica mantendo precisao)
+        - Experimental, requer testes A/B
+
+    Implementacao (DEV, depois OBS+Piter escolherem cadeia):
+      - lib_thumbnail.py com cadeia de providers + retry
+      - Cada provider tem config (api_key, model_id, params, max_chars)
+      - Validacao fail-fast de prompt size ANTES do POST
+      - Telemetria: taxa de sucesso por provider (igual tts_metrics)
+      - Cost tracking por provider em videos_meta.py ou novo image_metrics.py
+
+==================== 5. ANALISE CONSTANTE DO FLUXO PRODUTIVO ====================
+
+[ ] CLAUDE MONITOR — agente dedicado pra observabilidade
+    Roda em background (cron a cada 5-10min) e verifica:
+
+    Health checks:
+      a. Renders REALMENTE renderizando? (FFmpeg ativo, GPU usage > 0,
+         disk write rate > 0)
+      b. Threads do orchestrator vivas? (nao morreram silenciosamente)
+      c. Pods ligados sem trabalho? (RUNNING + 0 polls + 0 jobs)
+      d. Watchdog VPS funcional? (cron rodando, logging)
+      e. Auto-download progredindo? (PC PID alive, scp ativo)
+      f. Network Volume size crescendo razoavelmente? (sem corrompidos)
+
+    Acoes automaticas:
+      - Mata pods ligados sem trabalho > 10min
+      - Reinicia thread do orchestrator se morta
+      - Alerta visual no Monitor v2 (badge piscando)
+      - Notifica via Telegram/Discord se critico
+
+    Implementacao:
+      - claude_monitor.py rodando como systemd service
+      - Pode ser API endpoint /api/monitor/health-check chamado por
+        cron externo a cada 5min
+      - Historico em logs/monitor-YYYY-MM-DD.jsonl pra analisar trends
+      - Dashboard no Monitor v2 com timeline de eventos
+
+    Metricas a trackear:
+      - tempo_medio_render por canal por dia
+      - taxa_corrupcao por dia
+      - custo_pod por canal renderizado
+      - throughput (canais/hora)
+
+================================================================================
+
+================================================================================
+                       [OBS] OBSERVABILIDADE - Discussao posterior
+================================================================================
+  Itens acrescentados por Claude OBS apos onboarding de 2026-05-09.
+  Evidencia: snapshot em logs/monitor-2026-05-09.jsonl
+  Status: a discutir prioridade com Maestro/Piter
+
+[OBS] Health-check automatico da VPS (porta 8500)
+    Hoje OBS so descobre que a VPS caiu quando alguem pergunta. Em 2026-05-09
+    a VPS estava ECONNREFUSED durante onboarding e o render_worker local
+    continuou pollando em loop sem erro visivel pra Piter.
+
+    Proposta:
+      - Cron leve (1x/min) que faz GET /api/health e grava status em
+        logs/monitor-YYYY-MM-DD.jsonl
+      - Apos N falhas consecutivas (ex: 3), sinalizar via desktop
+        notification ou Telegram/Discord
+      - Mostrar badge "VPS DOWN" no Monitor v2
+
+    Beneficio:
+      - OBS pode reportar incidentes sem precisar Piter perguntar
+      - Render worker pode auto-pausar (ver item separado)
+
+[OBS] Copia local periodica do video_log_db.json (rsync da VPS)
+    Quando VPS cai, OBS perde acesso ao video_log_db.json (fonte canonica
+    de status por data/canal). Resultado: relatorios ficam limitados a
+    "verdade fisica" da pasta Exports/, sem dados de provider TTS,
+    retries, fallback ou tempo de roteiro/narracao.
+
+    Proposta:
+      - rsync (ou scp) periodico (ex: a cada 15min) da VPS pro local:
+          ssh root@85.239.243.215 cat /opt/video-automator/video_log_db.json
+            > F:\...\video-automator\cache\video_log_db.snapshot.json
+      - OBS le snapshot quando VPS down (com aviso de "snapshot de HH:MM,
+        nao tempo real")
+
+    Beneficio:
+      - Relatorios de OBS continuam ricos mesmo durante outage VPS
+      - Diagnostico de incidente: ultimo estado conhecido fica salvo
+
+[OBS] Auto-pause do render_worker.py quando VPS retorna ECONNREFUSED
+    Em 2026-05-09 11:58:55 o render_worker reiniciou e ficou pollando uma
+    VPS offline. Vai gastar ciclo CPU sem entregar nada e suja log com
+    timeouts.
+
+    Proposta:
+      - Apos N (ex: 5) ECONNREFUSED consecutivos, dormir 5min
+      - Apos M (ex: 12) ciclos de sleep sem sucesso, sair do processo com
+        exit code != 0
+      - watchdog.bat respeita exit code != 0 (nao reinicia em loop)
+      - Log claro: "VPS unreachable, worker paused"
+
+    Beneficio:
+      - Para de queimar CPU e poluir log
+      - Piter ve no console que worker parou (vs continuar parecendo "ok")
+
+[OBS] Sincronizar (ou arquivar) temas.json local <-> VPS
+    temas.json local nao foi modificado desde 2026-04-14 (25 dias). Mas
+    a producao continuou rodando pela VPS (e agora tambem local). Risco:
+    se alguem clicar "Produzir Tudo" no front-end local, vai usar grid
+    desatualizado.
+
+    Proposta:
+      - Decidir: o grid mestre vive na VPS ou local?
+      - Se VPS: pull periodico (com rsync) pro local apenas leitura
+      - Se local: push periodico pro VPS via API
+      - Se descontinuado: mover temas.json pra arquivo (ex:
+        temas.archive.2026-04-14.json) e remover da pasta ativa
+
+    Beneficio:
+      - Elimina divergencia silenciosa local vs producao real
+      - OBS pode usar grid como fonte confiavel de "canais esperados"
+
+================================================================================
+
+[OBS] Monitor: tempo total de producao do ciclo (start -> fim)
+    Pedido por Piter em 2026-05-09 — regressao do Automator v1.
+    No v1, ao iniciar um ciclo de producao (Produzir Tudo / Produzir em Loop),
+    o Monitor exibia um cronometro com o tempo total decorrido desde o start
+    ate o fim do ciclo. Esse contador sumiu na versao atual.
+
+    Comportamento esperado:
+      - Ao iniciar Produzir Tudo (data unica) ou Produzir em Loop (multi-data),
+        registrar timestamp ciclo_inicio em production_state.json
+      - Monitor exibe contador HH:MM:SS rodando em tempo real
+      - Ao terminar (sucesso ou cancelamento), congelar o valor final e
+        exibir "Tempo total: HH:MM:SS"
+      - Persistir ciclo_inicio + ciclo_fim em historico do ciclo (pra OBS
+        poder calcular tempo medio por ciclo nos relatorios diarios)
+
+    Onde mexer (refs do CLAUDE.md):
+      - production_log.py: campos novos no estado (ciclo_inicio, ciclo_fim)
+      - orchestrator.py: setar ciclo_inicio em produzir_data_completa() e
+        produzir_loop(); ciclo_fim no return
+      - app.py DASHBOARD_HTML aba Monitor: render do cronometro
+      - GET /api/production-log: retornar ciclo_inicio/ciclo_fim
+
+    Beneficio direto:
+      - Operador ve duracao real do ciclo (vs adivinhar pelo log)
+      - OBS consegue calcular "tempo medio de ciclo por dia" no relatorio
+      - Identifica regressoes de performance ao longo do tempo
+
+    Prioridade sugerida: MEDIA (qualidade de vida, nao bloqueia producao)
+    Esforco estimado: ~2h (estado + UI cronometro + persistencia)
+
+================================================================================
+
+[OBS] Distribuir do Backlog Temas: nao sobrescrever celulas + marcador DONE por data
+    Pedido por Piter em 2026-05-09 — PRIORIDADE ALTA (corrupcao de dados em
+    producao real).
+
+    BUG ATUAL:
+      Quando o "Distribuir" do Backlog Temas joga temas pro grid Temas,
+      ele sobrescreve campos ja preenchidos da celula destino (tema, titulo,
+      thumb, roteiro, etc). Isso destroi trabalho ja feito pelo Piter ou
+      pela producao automatica em datas que ja tem dados.
+
+    COMPORTAMENTO ESPERADO:
+
+    1. Marker DONE por data (na BASE, nao so na UI):
+       - Quando todos os canais de uma data terminam producao (status="ok"
+         em video_log_db.json + arquivos fisicos em Automator Exports/<data>/),
+         marcar a linha da data com flag done=true
+       - Persistencia: campo novo em temas.json -> linhas[i].done = true
+                      OU em video_log_db.json -> sumario por data
+       - Setado automaticamente pelo orchestrator ao final de cada
+         produzir_data_completa() quando _data_teve_erro() retorna False
+       - UI Temas: linha com done=true ganha indicador visual (badge verde,
+         icone check, ou row dimmed) — sinaliza "data fechada, nao mexer"
+
+    2. Distribuir respeita o DONE:
+       - Ao iterar sobre linhas do grid no fluxo Distribuir, pular toda
+         linha com done=true (continue)
+       - Se TODAS as datas estao DONE, mostrar mensagem clara: "Todas as
+         datas alvo estao DONE. Nenhuma celula foi modificada."
+
+    3. Distribuir nao sobrescreve celulas com dados (defesa em profundidade):
+       - Mesmo em datas nao-DONE, antes de gravar a celula, checar se ja
+         tem tema/titulo/thumb preenchidos
+       - Se tem dado: 3 modos selecionaveis no UI do Distribuir
+         a. SKIP: pula celula com dados (default seguro)
+         b. MERGE: preenche apenas campos vazios da celula
+         c. OVERWRITE: comportamento atual (com confirmacao explicita)
+
+    PORQUE marcar na BASE (nao so UI):
+      - OBS pode usar pra reportar progresso por data nos relatorios diarios
+      - Outros agentes (DEV, PROD, futuros monitores) podem ler o flag sem
+        depender do estado do front-end
+      - Sobrevive a F5, restart e novas sessoes
+
+    ONDE MEXER (refs do CLAUDE.md):
+      - temas.json: schema -> linhas[i] ganha campo opcional done (bool)
+                    + done_marked_at (ISO datetime)
+      - orchestrator.py: produzir_data_completa() seta done=true ao terminar
+        sem erros (e nao seta se algum canal ficou em erro)
+      - app.py endpoint POST /api/temas/distribuir: filtra linhas com
+        done=true antes de iterar
+      - DASHBOARD_HTML aba Temas: render do badge DONE na linha de data
+      - DASHBOARD_HTML aba Backlog Temas modal Distribuir: opcao de modo
+        (skip/merge/overwrite) + preview "X datas serao puladas (DONE)"
+
+    CRITERIO DE DONE (definir com Piter):
+      - Opcao A: arquivo .mp4 existe em Automator Exports/<data>/Videos/
+        para todos canais com tema preenchido
+      - Opcao B: video_log_db.json tem render.status="ok" para todos canais
+      - Opcao C: ambos (mais robusto, exige sync VPS<->local)
+      Sugestao: Opcao A (verdade fisica, sem dependencia da VPS estar up)
+
+    EVIDENCIA / CONTEXTO RELACIONADO:
+      - 2026-05-09: 14 videos entregues fisicamente em Automator Exports/
+        2026-05-09/Videos/. Se Distribuir for acionado em 09/05 hoje, vai
+        sobrescrever celulas com producao ja entregue.
+      - Anomalia ja registrada em logs/monitor-2026-05-09.jsonl (temas.json
+        nao atualizado desde 14/04 — distribuir agora seria especialmente
+        perigoso pois grid local diverge da realidade fisica).
+
+    Prioridade: ALTA (bug ativo de corrupcao de dados)
+    Esforco estimado: ~4h (schema + orchestrator + endpoint + UI badge +
+                            modal de modo + testes em data DONE real)
+
+================================================================================
+
+[OBS] Dashboard de producao baseado no Historico do Monitor
+    Pedido por Piter em 2026-05-09. Eleva e detalha o item existente
+    "DASHBOARD WITH PRODUCTION STATS" (linha 420, prioridade BAIXA) —
+    sugerimos repriorizar pra MEDIA-ALTA quando os outros itens [OBS]
+    desta sessao forem entregues (DONE marker + ciclo_inicio/fim +
+    health-check VPS).
+
+    FONTE DE DADOS: production_log (Historico do Monitor, hoje em
+    production_state.json com max 500 entradas) consolidado com:
+      - video_log_db.json (status por data/canal — VPS)
+      - logs/monitor-YYYY-MM-DD.jsonl (snapshots OBS)
+      - Automator Exports/<data>/Videos/ (verdade fisica)
+      - tts_metrics (taxa fallback Inworld vs Minimax)
+
+    AGREGACOES MINIMAS (cards no topo):
+      - Videos produzidos hoje / 7 dias / 30 dias
+      - Taxa de sucesso (% concluidos vs erro)
+      - Tempo medio de ciclo (start->fim de Produzir Tudo / Loop)
+      - Tempo medio por canal por etapa (roteiro / narracao / render)
+      - Taxa de fallback TTS (Minimax -> Inworld)
+      - Custo do dia / mes (RunPod + ai33 + LLMs) quando coletavel
+
+    GRAFICOS (timeseries, ultimos 30 dias):
+      - Videos produzidos por dia (barra)
+      - Tempo medio render por dia (linha) — detecta regressoes
+      - Erros por etapa por dia (stacked bar: roteiro / narracao / render)
+      - Custo acumulado mes (linha cumulativa)
+
+    BREAKDOWNS:
+      - Por canal: contagem total, tempo medio, taxa erro, ultima producao
+      - Por etapa: distribuicao de tempo (boxplot ou apenas p50/p95)
+      - Por provider TTS: % uso, % fallback, tempo medio
+
+    FILTROS:
+      - Range de data (hoje, 7d, 30d, custom)
+      - Canal (ou subset)
+      - Modo (auto / manual)
+      - Status (ok / erro / cancelado)
+
+    DEPENDENCIAS (tem que vir antes ou junto):
+      1. ciclo_inicio + ciclo_fim no production_state.json
+         (item [OBS] ja registrado nesta sessao)
+      2. Historico do Monitor PERSISTENTE em arquivo (hoje so 500 entradas
+         em RAM/state). Sugestao: append em logs/monitor-history.jsonl
+         a cada evento, com retencao por data
+      3. tts_metrics agregavel por dia (provavelmente ja existe via
+         /api/tts/health, validar com PROD)
+      4. Cost tracker — campo de custo $ por job (orchestrator soma
+         input_chars * preco LLM + duracao_segundos * preco_pod RunPod
+         + creditos ai33 consumidos). Hoje so existe em logs esparsos.
+
+    ONDE MEXER:
+      - production_log.py: emit eventos com timestamp + duracao + custo
+        em arquivo append-only logs/monitor-history.jsonl
+      - app.py: novo endpoint GET /api/dashboard/stats?range=7d com
+        agregacoes pre-computadas (cache 5min pra nao re-ler tudo)
+      - DASHBOARD_HTML: nova aba "Dashboard" entre Monitor e Log
+        (ou substituir cards atuais do Monitor que Piter ja sinalizou
+        como ruins/desnecessarios — vide UI redesign sec linha 885)
+      - Reuso visual: cards dark + Chart.js / uPlot pra timeseries
+        (uPlot eh leve e dark-mode-friendly)
+
+    BENEFICIOS DIRETOS:
+      - OBS gera relatorios diarios/semanais sem precisar consultar VPS
+        (le do mesmo arquivo append-only que alimenta o dashboard)
+      - Detecta tendencias: "tempo render subiu 25% nos ultimos 7 dias"
+      - Suporta tomada de decisao em escala (Fase 2 cloud-native): saber
+        quanto custou X canal vai informar qual canal compensa pod 4090
+      - Substitui parte do que o Claude Monitor (roadmap secao 5) vai
+        fazer — DASHBOARD = visualizacao, MONITOR = detector ativo
+
+    OVERLAP CONHECIDO COM ITENS EXISTENTES:
+      - Linha 420 "DASHBOARD WITH PRODUCTION STATS" (prio BAIXA): este
+        item supera e detalha aquele. Pode ser fundido.
+      - Linha 1198+ "CLAUDE MONITOR" (roadmap sec 5): complementar.
+        Claude Monitor escreve em logs/monitor-YYYY-MM-DD.jsonl;
+        Dashboard le e visualiza.
+      - Linha 884+ "Monitor: Reformar...dashboard atual tem dados ruins":
+        este item proporciona o "dashboard novo" que aquela reformulacao
+        cita. Pode ser implementado junto.
+
+    Prioridade sugerida: MEDIA-ALTA (depende dos pre-requisitos acima)
+    Esforco estimado: ~10-14h
+      - Persistencia historico append-only: ~2h
+      - Endpoint agregador + cache: ~3h
+      - UI dashboard + grafico simples (1 chart lib leve): ~5h
+      - Cost tracker em production_log: ~3h
+      - Testes com dados reais (precisa 30d de historico): ~1h
+
+================================================================================
+
+[OBS] BUG: coluna TOTAL no Historico de Producao nao bate com soma de roteiro+narracao+render
+    Reportado por Piter em 2026-05-10 com screenshot do Historico data=2026-05-11.
+    PRIORIDADE: ALTA (telemetria errada ja em producao, distorce metricas).
+
+    EVIDENCIA NUMERICA (7 canais visiveis no screenshot):
+      canal   r+n+rd (sum)   TOTAL exibido      diff
+      CO1     1h29m41s       1h59m00s          +29m19s
+      CO2     1h56m20s       2h26m00s          +29m40s
+      CO3     3h19m49s       3h52m00s          +32m11s
+      CO4     2h55m08s       3h33m00s          +37m52s
+      CON       18m32s         33m40s          +15m08s
+      DE        32m59s         50m05s          +17m06s
+      EN        44m08s       1h02m00s          +17m52s
+      -----
+      gap medio por canal: +25m35s
+      gap acumulado nos 7: +2h59m08s
+
+    PADRAO observado:
+      - Quanto mais longo o render, maior o gap (CO* 29-38min, demais 15-18min)
+      - Sugere que o TOTAL inclui tempo de FILA / espera / paralelismo bloqueado,
+        nao apenas o tempo de processamento do canal
+
+    HIPOTESE DA CAUSA:
+      Provavelmente o TOTAL esta sendo medido como:
+        TOTAL = timestamp_canal_terminou - timestamp_canal_entrou_no_ciclo
+      em vez de:
+        TOTAL = duracao_roteiro + duracao_narracao + duracao_render
+
+      O gap = tempo que o canal ficou esperando o render worker liberar (1 worker
+      sequencial na RTX 3060 atende 1 canal por vez), ou tempo gasto em outras
+      etapas paralelas que nao deveriam contar pra esse canal especifico.
+
+    COMPORTAMENTO ESPERADO (pedido Piter, literal):
+      "Precisamos comecar a contar o tempo quando o render inicia naquele canal.
+       Depois precisa aparecer a soma dos 3 processos."
+
+      Interpretacao OBS:
+        a) Cada timer individual (roteiro / narracao / render) deve marcar o
+           tempo REAL daquele processo, do start ao fim, sem incluir wait queue
+        b) A coluna TOTAL deve ser estritamente a soma dos 3 timers individuais
+
+      Ou seja: TOTAL = duracao_roteiro + duracao_narracao + duracao_render
+                       (sem incluir tempo de espera entre etapas)
+
+    ONDE MEXER (refs do CLAUDE.md):
+      - production_log.py: garantir que cada etapa registra start_ts + end_ts
+        proprios (nao reusa start_ts global do canal)
+      - orchestrator.py: ao mover canal de uma fase pra outra, criar novo timer
+        (nao continuar contando do anterior)
+      - app.py endpoint /api/historico ou /api/production-log/historico:
+        retornar duracao_roteiro_s + duracao_narracao_s + duracao_render_s
+        como campos separados (em segundos)
+      - DASHBOARD_HTML aba Historico de Producao: TOTAL = soma front-end dos
+        3 campos (formatar HH:MM ou MMmSSs conforme magnitude)
+
+    BENEFICIO:
+      - Telemetria fiel pra calcular tempo medio por canal/etapa
+      - Comparacao entre dias fica valida (hoje, dia com mais canais infla TOTAL)
+      - OBS pode usar a metrica nos relatorios diarios e na pagina Dashboard
+        (item [OBS] ja registrado: Dashboard baseado no Historico do Monitor)
+
+    OBSERVACOES SECUNDARIAS DO MESMO SCREENSHOT (nao bloqueiam mas valem nota):
+      - 14/14 narracoes foram fallback Inworld (Minimax falhou ou foi pulado em
+        100% dos canais). Analisar tts_metrics no proximo relatorio diario.
+      - 1 roteiro fallback (provider primario falhou). Identificar qual canal.
+      - Header diz "total 30h19m" pro batch inteiro de 14 canais. Se confirmado
+        que esse total batch tambem usa wall-clock (e nao soma), reusar mesma fix.
+
+    Prioridade: ALTA
+    Esforco estimado: ~2-3h (instrumentar timers individuais + ajustar endpoint
+                              + ajustar render no front-end)
+
+================================================================================
+
+[OBS] VINCULO ENTRE ITENS — bug timer Historico + Dashboard producao
+    Anotado por OBS em 2026-05-10. NAO eh um item novo de trabalho — eh uma
+    dependencia explicita entre 2 itens [OBS] ja existentes neste BACKLOG:
+
+    DEPENDENCIA:
+      [OBS] BUG: coluna TOTAL no Historico de Producao  (acrescentado 2026-05-10)
+                              |
+                              v  precisa estar resolvido ANTES de
+      [OBS] Dashboard de producao baseado no Historico do Monitor (acrescentado 2026-05-09)
+
+    POR QUE:
+      O Dashboard vai consumir os mesmos campos de duracao por etapa que hoje
+      estao errados no Historico (TOTAL inflado por wait queue ~25min/canal).
+      Construir o Dashboard sobre dados errados = visualizacao bonita + numeros
+      enganosos = pior que nao ter dashboard.
+
+    SUGESTAO DE ORDEM PRO DEV:
+      1) Fixar bug do TOTAL (~2-3h)  — entrega telemetria correta
+      2) Persistir historico append-only em logs/monitor-history.jsonl (~2h)
+         (ja listado como pre-requisito do Dashboard)
+      3) Implementar Dashboard (~10-14h) — agora com dados confiaveis
+
+    OBSERVACAO:
+      Quando o item do Dashboard for tocado, validar tambem que o calculo de
+      "tempo medio de ciclo" do item [OBS] Monitor: tempo total de producao do
+      ciclo (start -> fim) (acrescentado 2026-05-09 por pedido Piter) vai usar
+      o mesmo modelo de timer corrigido — caso contrario rola divergencia entre
+      "tempo de ciclo" mostrado no Monitor vs soma das linhas do Historico.
+
+    Prioridade: nao se aplica (eh metadado de dependencia, nao trabalho)
+    Acao requerida: nenhuma direta — DEV/Maestro usa essa nota ao priorizar fila
+
 ================================================================================

@@ -28,6 +28,12 @@ import narrator
 import render_queue
 import video_log_db
 
+try:
+    import lib_thumbnail  # noqa: E402
+except Exception as _e_thumb_import:
+    lib_thumbnail = None
+    print(f"[orchestrator] lib_thumbnail nao carregado: {_e_thumb_import}")
+
 # Imports GPU — so necessarios em modo local (render_queue.REMOTE_MODE=False)
 if not render_queue.REMOTE_MODE:
     import transcriber
@@ -144,6 +150,14 @@ def _gerar_roteiro_para_canal(job_index, job, cel, data_ref, pasta_roteiros=None
 
     production_log.atualizar_canal(job_index, etapa="roteiro", etapa_detalhe="Gerando...")
     production_log.adicionar_log(f"{tag}: Gerando roteiro...")
+
+    # Marca inicio de etapa em video_log_db (pra calcular duracao depois)
+    try:
+        video_log_db.iniciar_etapa(data_ref, tag, "roteiro",
+                                    template=tmpl.get("nome", ""),
+                                    template_id=job.get("template_id", ""))
+    except Exception:
+        pass
 
     contexto = {
         "tema": cel.get("tema", ""),
@@ -350,10 +364,39 @@ def _renderizar_canal(i, job, narr_path, data_formatada, data_ymd, data_pasta):
                 production_log.adicionar_log(f"{tag}: Video OK -> {video_nome}")
 
                 temas_data = _carregar_temas()
+                cel_done = None
                 if key in temas_data.get("celulas", {}):
                     temas_data["celulas"][key]["done"] = True
                     temas_data["celulas"][key]["done_type"] = "auto"
+                    cel_done = temas_data["celulas"][key]
                     _salvar_temas(temas_data)
+
+                # === Thumbnail generation (best-effort, nao bloqueia render OK) ===
+                if lib_thumbnail and cel_done:
+                    try:
+                        thumb_pasta = EXPORT_BASE / data_pasta / "Thumbs"
+                        thumb_pasta.mkdir(parents=True, exist_ok=True)
+                        thumb_path = thumb_pasta / f"{tag}.jpg"
+                        if thumb_path.exists() and thumb_path.stat().st_size > 1000:
+                            production_log.adicionar_log(f"{tag}: Thumb existe, pulando geracao")
+                            production_log.atualizar_canal(i, thumb_path=str(thumb_path))
+                        else:
+                            production_log.adicionar_log(f"{tag}: Gerando thumbnail...")
+                            res = lib_thumbnail.gerar_thumbnail(
+                                canal=tag,
+                                tema=cel_done.get("tema", ""),
+                                titulo=cel_done.get("titulo", ""),
+                                thumb=cel_done.get("thumb", ""),
+                                output_dir=thumb_pasta,
+                            )
+                            if res.get("ok"):
+                                production_log.adicionar_log(f"{tag}: Thumb OK ({res.get('modo')}) -> {res.get('path')}")
+                                production_log.atualizar_canal(i, thumb_path=res.get("path"))
+                            else:
+                                production_log.adicionar_log(f"{tag}: AVISO thumb falhou ({res.get('modo')}): {res.get('erro','?')[:120]}")
+                    except Exception as _et:
+                        production_log.adicionar_log(f"{tag}: AVISO thumb exception: {str(_et)[:120]}")
+
                 return True
             else:
                 raise RuntimeError("Video nao gerado ou vazio")
@@ -502,17 +545,20 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
             job["cel"] = cel
 
             # Verificar roteiro: .txt na pasta de data e a UNICA fonte da verdade
+            # Skip robusto: precisa existir E ter size minimo (evita .txt vazio/corrompido).
             txt_path = pasta_roteiros / f"{tag}.txt"
+            MIN_ROTEIRO_BYTES = 5000  # ~5KB = ~5min de narracao razoavel
 
-            if txt_path.exists():
-                # .txt existe = roteiro aprovado
+            if txt_path.exists() and txt_path.stat().st_size >= MIN_ROTEIRO_BYTES:
                 chars = txt_path.stat().st_size
-                production_log.atualizar_canal(i, etapa="roteiro", etapa_detalhe=f"Existe ({chars} chars)", roteiro_chars=chars)
-                production_log.adicionar_log(f"{tag}: Roteiro existe ({chars} chars)")
+                production_log.atualizar_canal(i, etapa="roteiro", etapa_detalhe=f"REAPROVEITANDO ({chars} chars)", roteiro_chars=chars)
+                production_log.adicionar_log(f"{tag}: SKIP roteiro — reaproveitando {txt_path.name} ({chars} chars)")
                 cel["roteiro"] = txt_path.read_text(encoding="utf-8")
                 job["cel"] = cel
                 roteiro_ok[i] = True
             else:
+                if txt_path.exists():
+                    production_log.adicionar_log(f"{tag}: roteiro {txt_path.name} muito pequeno ({txt_path.stat().st_size}B < {MIN_ROTEIRO_BYTES}B), regenerando")
                 roteiro_para_gerar[i] = (job, cel)
 
         if roteiro_para_gerar and not estado["cancelado"]:
@@ -544,20 +590,54 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
         _render_pendentes = []
 
         def _encontrar_narracao(tag):
-            """Busca MP3 na pasta nova (Automator Exports) e na antiga (narracoes/)."""
+            """Busca MP3 na pasta nova (Automator Exports) e na antiga (narracoes/).
+            Skip robusto: arquivo precisa existir E ter size minimo (>100KB = ~10s audio).
+            """
+            MIN_MP3_BYTES = 100_000
             # Pasta nova: Automator Exports/YYYY-MM-DD/Narracoes/TAG.mp3
             novo = pasta_narracoes / f"{tag}.mp3"
-            if novo.exists():
+            if novo.exists() and novo.stat().st_size >= MIN_MP3_BYTES:
                 return novo
             # Pasta antiga: narracoes/YYYY-MM-DD/TAG DD-MM.mp3
             antigo = NARRACOES_DIR / data_pasta / f"{tag} {data_formatada}.mp3"
-            if antigo.exists():
+            if antigo.exists() and antigo.stat().st_size >= MIN_MP3_BYTES:
                 return antigo
             return None
 
         def _enfileirar_render(i, job, narr_path_val):
             """Enfileira render na fila compartilhada."""
-            job_id = f"{job['tag']}_{data_ymd}"
+            tag = job["tag"]
+
+            # SKIP se ja tem render OK no DB (evita re-renderizar em modo REMOTE,
+            # que nao tem acesso direto ao filesystem do pod pra checar o MP4).
+            try:
+                db_v = video_log_db.obter_video(data_ref, tag) or {}
+                db_render = db_v.get("render", {}) or {}
+                if db_render.get("status") == "ok" and db_render.get("path"):
+                    db_path = db_render["path"]
+                    production_log.atualizar_canal(
+                        i, etapa="concluido",
+                        etapa_detalhe=f"Ja renderizado ({Path(db_path).name})",
+                        video_path=db_path, progresso=100, fim=time.time(),
+                    )
+                    production_log.adicionar_log(
+                        f"{tag}: SKIP render — ja existe (DB: {db_path})"
+                    )
+                    # Marca cell como done no temas
+                    try:
+                        temas_data_local = _carregar_temas()
+                        if job["key"] in temas_data_local.get("celulas", {}):
+                            temas_data_local["celulas"][job["key"]]["done"] = True
+                            temas_data_local["celulas"][job["key"]]["done_type"] = "auto"
+                            _salvar_temas(temas_data_local)
+                    except Exception:
+                        pass
+                    return  # NAO enfileira — economia de pod time
+            except Exception as e:
+                # Em caso de erro lendo DB, prossegue normal (rerendera, mas nao bloqueia)
+                production_log.adicionar_log(f"{tag}: AVISO - check DB falhou ({e}), prosseguindo render")
+
+            job_id = f"{tag}_{data_ymd}"
             evt = threading.Event()
             _render_pendentes.append(evt)
 
@@ -567,10 +647,39 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
                     production_log.atualizar_canal(i, etapa="concluido", etapa_detalhe=f"OK ({video_path.split('/')[-1] if video_path else 'render remoto'})", video_path=video_path, progresso=100, fim=time.time())
                     production_log.adicionar_log(f"{job['tag']}: Video OK -> {video_path or '(render remoto)'}")
                     temas_data_local = _carregar_temas()
+                    cel_done_remoto = None
                     if job["key"] in temas_data_local.get("celulas", {}):
                         temas_data_local["celulas"][job["key"]]["done"] = True
                         temas_data_local["celulas"][job["key"]]["done_type"] = "auto"
+                        cel_done_remoto = temas_data_local["celulas"][job["key"]]
                         _salvar_temas(temas_data_local)
+
+                    # Thumbnail no fluxo remoto tambem (best-effort)
+                    if lib_thumbnail and cel_done_remoto:
+                        try:
+                            EXPORT_BASE_T = _export_base()
+                            thumb_pasta_r = EXPORT_BASE_T / data_pasta / "Thumbs"
+                            thumb_pasta_r.mkdir(parents=True, exist_ok=True)
+                            thumb_path_r = thumb_pasta_r / f"{job['tag']}.jpg"
+                            if thumb_path_r.exists() and thumb_path_r.stat().st_size > 1000:
+                                production_log.adicionar_log(f"{job['tag']}: Thumb existe, pulando")
+                                production_log.atualizar_canal(i, thumb_path=str(thumb_path_r))
+                            else:
+                                production_log.adicionar_log(f"{job['tag']}: Gerando thumbnail (remoto)...")
+                                res_t = lib_thumbnail.gerar_thumbnail(
+                                    canal=job['tag'],
+                                    tema=cel_done_remoto.get("tema", ""),
+                                    titulo=cel_done_remoto.get("titulo", ""),
+                                    thumb=cel_done_remoto.get("thumb", ""),
+                                    output_dir=thumb_pasta_r,
+                                )
+                                if res_t.get("ok"):
+                                    production_log.adicionar_log(f"{job['tag']}: Thumb OK ({res_t.get('modo')}) -> {res_t.get('path')}")
+                                    production_log.atualizar_canal(i, thumb_path=res_t.get("path"))
+                                else:
+                                    production_log.adicionar_log(f"{job['tag']}: AVISO thumb falhou: {res_t.get('erro','?')[:120]}")
+                        except Exception as _et2:
+                            production_log.adicionar_log(f"{job['tag']}: AVISO thumb exception: {str(_et2)[:120]}")
                 try:
                     video_log_db.registrar_render(
                         data_ref, job["tag"], "ok",
@@ -598,6 +707,14 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
                 except Exception:
                     pass
                 evt.set()
+
+            # Marca inicio de etapa render em video_log_db (1ª vez)
+            try:
+                video_log_db.iniciar_etapa(data_ref, tag, "render",
+                                            template=job.get("template", {}).get("nome", ""),
+                                            template_id=job.get("template_id", ""))
+            except Exception:
+                pass
 
             if render_queue.REMOTE_MODE:
                 # Modo remoto: enviar dados serializaveis pro worker externo
@@ -660,6 +777,13 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
         production_log.adicionar_log(f"Render: {len(_render_pendentes)} canais enfileirados | Narracao: {len(canais_sem_narracao)} canais pendentes")
 
         # --- DEPOIS: narrar os que faltam (sequencial) ---
+        # Heuristica anti-timeout: se 2 canais consecutivos cairem em fallback Inworld
+        # (Minimax via ai33.pro engasgando), os canais subsequentes da MESMA DATA
+        # pulam Minimax e vao direto pro Inworld, economizando ~20min/canal.
+        # Resetada a cada nova data (essa funcao roda 1x por data).
+        fallbacks_consecutivos = 0
+        forcar_inworld_resto_data = False
+
         for i, job in canais_sem_narracao:
             if estado["cancelado"]:
                 break
@@ -685,7 +809,20 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
 
             MAX_NARR_RETRIES = 2
 
-            for narr_attempt in range(MAX_NARR_RETRIES):
+            # Decisao: pular Minimax e ir direto pro Inworld?
+            if forcar_inworld_resto_data:
+                production_log.adicionar_log(f"{tag}: Pulando Minimax direto pra Inworld (2 fallbacks consecutivos detectados na data)")
+
+            narr_succeeded = False
+            # Marca inicio de etapa narracao em video_log_db (1ª vez apenas)
+            try:
+                video_log_db.iniciar_etapa(data_ref, tag, "narracao",
+                                            template=job.get("template", {}).get("nome", ""),
+                                            template_id=job.get("template_id", ""))
+            except Exception:
+                pass
+
+            for narr_attempt in range(MAX_NARR_RETRIES if not forcar_inworld_resto_data else 0):
                 production_log.atualizar_canal(i, etapa="narracao", etapa_detalhe=f"Gerando...{' (retry ' + str(narr_attempt) + ')' if narr_attempt > 0 else ''}", inicio=time.time())
                 if narr_attempt == 0:
                     production_log.adicionar_log(f"{tag}: Gerando narracao ({len(cel.get('roteiro', ''))} chars)...")
@@ -701,7 +838,6 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
                 narrator.estado_narracao_auto["ativo"] = False
                 narrator.estado_narracao_auto["status"] = "idle"
 
-                narr_succeeded = False
                 try:
                     result = narrator.iniciar_narracao(
                         api_key, job["voice_provider"], voice_id,
@@ -741,6 +877,8 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
                                 pass
                             _enfileirar_render(i, job, narr_result_path)
                             narr_succeeded = True
+                            # Minimax voltou — reseta contador de fallbacks consecutivos
+                            fallbacks_consecutivos = 0
                             break
                         else:
                             production_log.adicionar_log(f"{tag}: ERRO - audio chunked nao encontrado")
@@ -816,6 +954,8 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
                             pass
                         _enfileirar_render(i, job, narr_path)
                         narr_succeeded = True
+                        # Minimax voltou — reseta contador de fallbacks consecutivos
+                        fallbacks_consecutivos = 0
                         break
                     else:
                         # Narration failed, retry
@@ -874,6 +1014,11 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
                             except Exception:
                                 pass
                             _enfileirar_render(i, job, fb_path)
+                            # Conta como fallback consecutivo (heuristica anti-timeout pra resto da data)
+                            fallbacks_consecutivos += 1
+                            if fallbacks_consecutivos >= 2 and not forcar_inworld_resto_data:
+                                forcar_inworld_resto_data = True
+                                production_log.adicionar_log(f"!!! 2 fallbacks consecutivos detectados — proximos canais da data {data_ref} pulam Minimax (vao direto pro Inworld). Economiza ~20min/canal de timeout.")
                             continue
                         else:
                             production_log.adicionar_log(f"{tag}: Fallback Inworld falhou - {fb_result.get('erro', '')}")
@@ -941,6 +1086,23 @@ def _produzir_loop(data_idx_inicio: int, ordem_colunas: list = None):
     estado["loop_data_atual"] = data_idx_inicio
     estado["loop_total"] = total_datas - data_idx_inicio
 
+    # Auto-management: subir pods se nao tiver nenhum rodando
+    if render_queue.REMOTE_MODE:
+        try:
+            import pods_manager
+            atuais = [p for p in pods_manager.listar_pods() if p.get("status") == "RUNNING"]
+            if not atuais:
+                production_log.adicionar_log("LIFECYCLE: Nenhum pod ativo. Subindo 3 pods (boot ~3min)...")
+                r = pods_manager.start_pods(n=3, aguardar_polls=True)
+                production_log.adicionar_log(f"LIFECYCLE: {r.get('pods_prontos',0)}/{r.get('pods_criados',0)} pods bootstrapping. Aguardando workers conectarem (~3min adicional)...")
+                # Espera workers reportarem polls
+                time.sleep(180)  # buffer pra apt+pip+worker bundle terminar
+            else:
+                production_log.adicionar_log(f"LIFECYCLE: {len(atuais)} pods ja rodando, reaproveitando")
+            pods_manager.marcar_atividade()
+        except Exception as e:
+            production_log.adicionar_log(f"LIFECYCLE: AVISO subir pods falhou ({e}); produzindo mesmo assim (workers podem nao existir)")
+
     for data_idx in range(data_idx_inicio, total_datas):
         if estado["cancelado"]:
             production_log.adicionar_log(f"LOOP: Cancelado pelo usuario na data {data_idx + 1}/{total_datas}")
@@ -1005,6 +1167,52 @@ def _produzir_loop(data_idx_inicio: int, ordem_colunas: list = None):
     estado["loop"] = False
     estado["ativo"] = False
 
+    # Auto-management: parar pods quando produção terminar (loop completo ou cancelada)
+    if render_queue.REMOTE_MODE:
+        try:
+            import pods_manager
+            production_log.adicionar_log("LIFECYCLE: Produção encerrada. Parando todos os pods...")
+            r = pods_manager.stop_all_pods()
+            production_log.adicionar_log(f"LIFECYCLE: {r.get('parados', 0)} pods parados (custo GPU=$0)")
+        except Exception as e:
+            production_log.adicionar_log(f"LIFECYCLE: AVISO parar pods falhou ({e}); pare manualmente via /api/pods/stop")
+
+
+def _iniciar_pods_se_necessario():
+    """Hook universal: sobe pods se nao tem worker pollando, em modo REMOTE.
+    Chamado pelo iniciar_producao (cobre tanto loop=true quanto false).
+
+    NOVA LÓGICA: se há worker pollando o VPS recentemente (< 30s), assume
+    que tem worker local rodando e NÃO sobe pods (evita competição).
+    """
+    if not render_queue.REMOTE_MODE:
+        return
+    try:
+        import pods_manager
+        # CHECA se já tem worker pollando (local ou remoto). Se sim, não sobe pods.
+        try:
+            workers_seen = getattr(render_queue, "_workers_seen", {}) or {}
+            now = time.time()
+            polls_recentes = [w for w, ts in workers_seen.items() if (now - ts) < 30]
+            if polls_recentes:
+                production_log.adicionar_log(f"LIFECYCLE: {len(polls_recentes)} worker(s) ja pollando ({list(polls_recentes)[:3]}), NAO subindo pods")
+                pods_manager.marcar_atividade()
+                return
+        except Exception:
+            pass
+
+        atuais = [p for p in pods_manager.listar_pods() if p.get("status") == "RUNNING"]
+        if atuais:
+            production_log.adicionar_log(f"LIFECYCLE: {len(atuais)} pods ja rodando, reaproveitando")
+            pods_manager.marcar_atividade()
+            return
+        production_log.adicionar_log("LIFECYCLE: Nenhum pod ativo nem worker local. Subindo 3 pods (boot ~3min)...")
+        r = pods_manager.start_pods(n=3, aguardar_polls=True)
+        production_log.adicionar_log(f"LIFECYCLE: {r.get('pods_prontos',0)}/{r.get('pods_criados',0)} pods bootstrapping. Workers conectam em ~3min.")
+        pods_manager.marcar_atividade()
+    except Exception as e:
+        production_log.adicionar_log(f"LIFECYCLE: AVISO subir pods falhou ({e})")
+
 
 def iniciar_producao(data_idx: int, temas_data: dict = None, ordem_colunas: list = None, loop: bool = False):
     """Inicia producao em thread separada. loop=True avanca pras proximas datas."""
@@ -1021,13 +1229,31 @@ def iniciar_producao(data_idx: int, temas_data: dict = None, ordem_colunas: list
     }
     production_log._salvar()
 
+    # Wrapper que sobe pods antes da função real (em background pra não atrasar API response)
+    def _wrap_loop(*args):
+        _iniciar_pods_se_necessario()
+        _produzir_loop(*args)
+
+    def _wrap_data(*args):
+        _iniciar_pods_se_necessario()
+        produzir_data_completa(*args)
+        # Quando termina (loop=false single data), parar pods também
+        if render_queue.REMOTE_MODE:
+            try:
+                import pods_manager
+                production_log.adicionar_log("LIFECYCLE: Produção encerrada. Parando pods...")
+                r = pods_manager.stop_all_pods()
+                production_log.adicionar_log(f"LIFECYCLE: {r.get('parados',0)} pods parados (custo GPU=$0)")
+            except Exception as e:
+                production_log.adicionar_log(f"LIFECYCLE: AVISO parar pods falhou ({e})")
+
     if loop:
         _thread_producao = threading.Thread(
-            target=_produzir_loop, args=(data_idx, ordem_colunas), daemon=True
+            target=_wrap_loop, args=(data_idx, ordem_colunas), daemon=True
         )
     else:
         _thread_producao = threading.Thread(
-            target=produzir_data_completa, args=(data_idx, temas_data, ordem_colunas), daemon=True
+            target=_wrap_data, args=(data_idx, temas_data, ordem_colunas), daemon=True
         )
     _thread_producao.start()
     return {"ok": True, "loop": loop}

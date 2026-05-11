@@ -377,6 +377,15 @@ def narrar_chunked_sequencial(api_key: str, provider: str, voice_id: str, texto:
     global ultimo_creditos
     estado = _get_estado(modo)
 
+    # Métricas TTS (não-bloqueante; falha de log nunca quebra produção)
+    try:
+        import tts_metrics
+        _t_start = time.time()
+        tts_metrics.evento(tag=nome_saida, provider="minimax", event="start", chars=len(texto))
+    except Exception:
+        tts_metrics = None
+        _t_start = time.time()
+
     output_dir = Path(pasta) if pasta else NARRACOES_DIR
     if not output_dir.is_absolute():
         output_dir = BASE_DIR / output_dir
@@ -470,6 +479,11 @@ def narrar_chunked_sequencial(api_key: str, provider: str, voice_id: str, texto:
             estado["credit_cost"] = total_cost
             estado["ativo"] = False
             _limpar_pending_tasks(nome_saida)
+            if tts_metrics:
+                try: tts_metrics.evento(tag=nome_saida, provider="minimax", event="ok",
+                                        duration_s=round(time.time()-_t_start,1),
+                                        chars=len(texto), chunks=total_chunks)
+                except Exception: pass
             print(f"[NARRACAO-SEQ] {nome_saida}: Concluido -> {destino}")
             return {"ok": True, "audio_local": destino, "erro": "", "chunks": total_chunks}
         else:
@@ -479,6 +493,13 @@ def narrar_chunked_sequencial(api_key: str, provider: str, voice_id: str, texto:
         estado["status"] = "error"
         estado["erro"] = str(e)
         estado["ativo"] = False
+        if tts_metrics:
+            try:
+                ev = "timeout" if "timeout" in str(e).lower() else "error"
+                tts_metrics.evento(tag=nome_saida, provider="minimax", event=ev,
+                                   duration_s=round(time.time()-_t_start,1),
+                                   chars=len(texto), erro=str(e)[:200])
+            except Exception: pass
         # NAO deletar chunks — permite resume na proxima tentativa
         print(f"[NARRACAO-SEQ] {nome_saida}: Erro ({e}). {len(chunk_paths)} chunks preservados para resume.")
         return {"ok": False, "audio_local": "", "erro": str(e), "chunks": total_chunks}

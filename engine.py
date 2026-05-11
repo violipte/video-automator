@@ -75,9 +75,75 @@ def _cache_key(img_path, dur, w, h, fps, zoom_ratio, efeito="zoom_in"):
     return hashlib.md5(dados.encode()).hexdigest()[:12]
 
 
+def _aplicar_assets_remap(path: str) -> str:
+    """Aplica ASSETS_BASE_REMAP env var pra remapear paths.
+    Format: ASSETS_BASE_REMAP="prefix1=newprefix1|prefix2=newprefix2"
+    Default: nenhuma mudanca (paths usados como-sao).
+
+    Use case: rodar render_worker em pod RunPod onde imagens estao em
+    /workspace/assets/Imagens/... mas templates.json aponta pra
+    F:/Canal Dark/Imagens/... (paths Windows do operador).
+
+    Exemplo:
+      export ASSETS_BASE_REMAP="F:/Canal Dark=/workspace/assets"
+      "F:/Canal Dark/Imagens/CO" -> "/workspace/assets/Imagens/CO"
+    """
+    import os as _os
+    if not path or not isinstance(path, str):
+        return path
+    remap = _os.environ.get("ASSETS_BASE_REMAP", "").strip()
+    if not remap:
+        return path
+    for entry in remap.split("|"):
+        if "=" not in entry:
+            continue
+        src, dst = entry.split("=", 1)
+        src, dst = src.strip(), dst.strip()
+        if not src:
+            continue
+        # Tenta match com / e \\
+        for src_variant in (src, src.replace("/", "\\"), src.replace("\\", "/")):
+            if path.startswith(src_variant):
+                return dst + path[len(src_variant):].replace("\\", "/")
+    return path
+
+
+def _remap_template_paths(template: dict) -> dict:
+    """Aplica _aplicar_assets_remap em todos paths conhecidos do template.
+    Retorna nova dict (nao muta original)."""
+    if not template:
+        return template
+    import copy
+    t = copy.deepcopy(template)
+    # pasta_imagens
+    if t.get("pasta_imagens"):
+        t["pasta_imagens"] = _aplicar_assets_remap(t["pasta_imagens"])
+    # moldura.arquivo
+    if t.get("moldura", {}).get("arquivo"):
+        t["moldura"]["arquivo"] = _aplicar_assets_remap(t["moldura"]["arquivo"])
+    # cta.arquivo
+    if t.get("cta", {}).get("arquivo"):
+        t["cta"]["arquivo"] = _aplicar_assets_remap(t["cta"]["arquivo"])
+    # overlays[].arquivo / .caminho
+    for ov in t.get("overlays", []) or []:
+        if ov.get("arquivo"):
+            ov["arquivo"] = _aplicar_assets_remap(ov["arquivo"])
+        if ov.get("caminho"):
+            ov["caminho"] = _aplicar_assets_remap(ov["caminho"])
+    # trilha_sonora (musica de fundo)
+    if t.get("trilha_sonora"):
+        t["trilha_sonora"] = _aplicar_assets_remap(t["trilha_sonora"])
+    # legenda_config.fonte (se path absoluto)
+    fonte = t.get("legenda_config", {}).get("fonte", "")
+    if fonte and ("/" in fonte or "\\" in fonte):
+        t["legenda_config"]["fonte"] = _aplicar_assets_remap(fonte)
+    return t
+
+
 class VideoEngine:
     def __init__(self, template: dict, narracao_path: str, output_path: str):
-        self.template = template
+        # Aplica remap de paths (idempotente: se ASSETS_BASE_REMAP nao setado, nada muda)
+        self.template = _remap_template_paths(template)
         self.narracao_path = narracao_path
         self.output_path = output_path
         self.processo = None

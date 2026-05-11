@@ -9,6 +9,7 @@ Config: worker_config.json (na mesma pasta)
 
 import json
 import os
+import subprocess
 import sys
 import time
 import traceback
@@ -33,16 +34,34 @@ DEFAULT_CONFIG = {
 
 
 def load_config() -> dict:
-    """Carrega worker_config.json."""
+    """Carrega config: env vars > worker_config.json > defaults.
+
+    Env vars (uso em pod cloud sem worker_config.json):
+      VPS_URL, WORKER_TOKEN, POLL_INTERVAL, TEMP_DIR, CACHE_DIR, EXPORT_BASE
+    """
+    cfg = dict(DEFAULT_CONFIG)
+    # 1. Tenta carregar JSON file (uso local)
     if CONFIG_FILE.exists():
-        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            cfg = json.load(f)
-        # Merge com defaults
-        for k, v in DEFAULT_CONFIG.items():
-            if k not in cfg:
-                cfg[k] = v
-        return cfg
-    return dict(DEFAULT_CONFIG)
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                file_cfg = json.load(f)
+            cfg.update(file_cfg)
+        except Exception as e:
+            print(f"[worker] erro lendo {CONFIG_FILE}: {e}")
+    # 2. Override por env vars (uso cloud/Docker)
+    env_map = {
+        "VPS_URL": "vps_url",
+        "WORKER_TOKEN": "worker_token",
+        "POLL_INTERVAL": "poll_interval",
+        "TEMP_DIR": "temp_dir",
+        "CACHE_DIR": "cache_dir",
+        "EXPORT_BASE": "export_base",
+    }
+    for env_key, cfg_key in env_map.items():
+        v = os.environ.get(env_key)
+        if v:
+            cfg[cfg_key] = int(v) if cfg_key == "poll_interval" else v
+    return cfg
 
 
 def log(msg: str):
@@ -212,12 +231,31 @@ def process_job(config: dict, job: dict) -> bool:
                 regras_template=tmpl.get("regras")
             )
 
-            # 5. Renderizar (FFmpeg NVENC GPU)
+            # 5. Renderizar (FFmpeg NVENC GPU) — passa callback pra reportar
+            # progresso real (Ken Burns 0-60%, montagem final 60-100% mapeado pra 30-100)
             retry_msg = f" (retry {attempt})" if attempt > 0 else ""
-            report_progress(config, canal_idx, f"Renderizando{retry_msg}...", 30)
+            report_progress(config, canal_idx, f"Renderizando{retry_msg}... 30%", 30)
             log(f"  Renderizando{retry_msg}...")
             engine = VideoEngine(tmpl, narr_local, video_path)
-            engine.montar(srt_path=srt_corrigido)
+
+            _last_pct = [30]
+            _last_report_ts = [time.time()]
+            def _progress_cb(pct):
+                # Mapeia 0-100 do engine pra 30-100 do worker (deixa 30% pra Whisper+legendas)
+                new_pct = int(30 + (pct or 0) * 0.70)
+                if new_pct < 30: new_pct = 30
+                if new_pct > 100: new_pct = 100
+                # Throttle: report a cada 3% OU a cada 8s OU sempre quando >=99
+                now = time.time()
+                if (new_pct - _last_pct[0] >= 3) or (now - _last_report_ts[0] >= 8) or new_pct >= 99:
+                    _last_pct[0] = new_pct
+                    _last_report_ts[0] = now
+                    try:
+                        report_progress(config, canal_idx, f"Renderizando{retry_msg}... {new_pct}%", new_pct)
+                    except Exception:
+                        pass
+
+            engine.montar(srt_path=srt_corrigido, callback_progresso=_progress_cb)
 
             if Path(video_path).exists() and Path(video_path).stat().st_size > 1000:
                 size_mb = Path(video_path).stat().st_size / (1024 * 1024)
@@ -271,7 +309,14 @@ def main():
 
     while True:
         try:
-            job = api_request(config, "GET", "/api/render-worker/next-job")
+            # worker_id identifica unicamente esse worker pro watchdog do VPS
+            wid = os.environ.get("WORKER_ID", "default")
+            try:
+                hostname = subprocess.check_output(["hostname"], timeout=2).decode().strip()
+            except Exception:
+                hostname = "unknown"
+            worker_full_id = f"{hostname}-w{wid}"
+            job = api_request(config, "GET", f"/api/render-worker/next-job?worker_id={urllib.request.quote(worker_full_id)}")
 
             if job:
                 consecutive_errors = 0

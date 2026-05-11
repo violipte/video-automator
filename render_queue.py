@@ -26,6 +26,14 @@ _running = False
 # Jobs remotos: job_id -> job_data (para o render worker buscar)
 _remote_jobs = []  # lista ordenada de jobs pendentes
 _remote_jobs_lock = threading.Lock()
+_workers_seen = {}  # worker_id -> last_seen_ts (atualizado a cada poll)
+_workers_seen_lock = threading.Lock()
+
+
+def marcar_worker_visto(worker_id: str = "default"):
+    """Trackeia que um worker fez poll. Usado pelo watchdog pra detectar pods sem trabalhar."""
+    with _workers_seen_lock:
+        _workers_seen[worker_id or "default"] = time.time()
 _remote_current = None  # job sendo processado pelo worker remoto
 
 # Callbacks registrados por quem enfileirou
@@ -166,9 +174,12 @@ def _recuperar_jobs_travados():
                     job.pop("started_at", None)
 
 
-def proximo_job_remoto() -> dict | None:
-    """Retorna o proximo job pendente para o render worker. Marca como 'processing'."""
+def proximo_job_remoto(worker_id: str = "default") -> dict | None:
+    """Retorna o proximo job pendente para o render worker. Marca como 'processing'.
+    Trackeia worker_id pro watchdog (detecta pods sem trabalhar)."""
     global _remote_current
+    # Trackeia que esse worker tá vivo e pollando (pro watchdog)
+    marcar_worker_visto(worker_id)
     # Primeiro, recuperar jobs que ficaram travados (worker morreu)
     _recuperar_jobs_travados()
     with _remote_jobs_lock:

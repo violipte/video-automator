@@ -88,10 +88,19 @@ def iniciar(data_ref: str, canais: list, data_idx: int = None, ordem_colunas: li
 
 
 def atualizar_canal(index: int, **kwargs):
-    """Atualiza estado de um canal específico. Thread-safe."""
+    """Atualiza estado de um canal específico. Thread-safe.
+
+    NOTA: 'inicio' é PRESERVADO depois de setado pela primeira vez.
+    Isso garante que `fim - inicio` = tempo total do canal, não da última etapa.
+    Se quiser resetar (ex: retry), passe explicitamente inicio=None.
+    """
     with _lock:
         if 0 <= index < len(_state.get("canais", [])):
-            _state["canais"][index].update(kwargs)
+            cel = _state["canais"][index]
+            # Preserva inicio original se já foi setado (a menos que explicitamente None)
+            if "inicio" in kwargs and kwargs["inicio"] is not None and cel.get("inicio"):
+                kwargs.pop("inicio")
+            cel.update(kwargs)
             _state["canal_atual"] = index
             _salvar()
 
