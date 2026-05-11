@@ -833,6 +833,11 @@ class VideoEngine:
             "-c:a", "aac",
             "-b:a", "192k",
             "-movflags", "+faststart",
+            # HOTFIX2 2026-05-11: -f mp4 explicito obrigatorio.
+            # Output path tem ".tmp" no final (atomic rename pattern) e
+            # FFmpeg olha so a ULTIMA extensao (.tmp) -> nao infere muxer ->
+            # "Unable to choose an output format" + EINVAL. Forca muxer mp4.
+            "-f", "mp4",
             "-t", f"{self.duracao_total:.2f}",
             output_tmp
         ])
@@ -928,6 +933,9 @@ class VideoEngine:
                 "-fflags", "+bitexact",
                 "-flags:v", "+bitexact",
                 "-flags:a", "+bitexact",
+                # HOTFIX2 2026-05-11: -f mp4 explicito (mesma razao do cmd principal:
+                # clean_tmp termina em ".tmp" e FFmpeg nao infere muxer)
+                "-f", "mp4",
                 clean_tmp
             ]
             ret = subprocess.run(clean_cmd, capture_output=True, timeout=60)
