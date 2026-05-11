@@ -140,8 +140,18 @@ def enfileirar(job_id: str, render_fn=None, fonte: str = "manual",
             **(job_data or {}),
         }
         with _remote_jobs_lock:
+            # Dedupe: se job_id ja esta na fila (pending ou processing), NAO
+            # adicionar duplicata. Resolve double-enqueue de orchestrator
+            # repass-loop / resume / retry. Sem isso, worker processava o
+            # primeiro e o segundo ficava preso como pending forever.
+            existing = next((j for j in _remote_jobs if j["id"] == job_id), None)
+            if existing is not None:
+                # Atualiza callbacks (callbacks novos sobrepoem antigos)
+                print(f"[RENDER_QUEUE] enfileirar({job_id}): ja existe (status={existing.get('status')}), atualizando callbacks")
+                estado["fila_tamanho"] = sum(1 for j in _remote_jobs if j["status"] == "pending")
+                return
             _remote_jobs.append(job_entry)
-        estado["fila_tamanho"] = len(_remote_jobs)
+        estado["fila_tamanho"] = sum(1 for j in _remote_jobs if j["status"] == "pending")
         estado["ativo"] = True
     else:
         # Modo local: enfileirar com callable
@@ -157,11 +167,18 @@ def enfileirar(job_id: str, render_fn=None, fonte: str = "manual",
 
 # === API REMOTA (para render_worker.py buscar jobs) ===
 
-WORKER_JOB_TIMEOUT = 7200  # 2h — folga pra render maximo (~30min) + transcricao + retries.
-# IMPORTANTE: o worker manda heartbeat via /api/render-worker/progress a cada
-# ~30s, e cada chamada chama tocar_job_remoto() resetando started_at. Entao
-# este timeout so dispara quando o worker REALMENTE morreu (sem heartbeat).
-# Antes era 300s (5min) e re-enfileirava jobs vivos -> double-render -> MP4 corrompido.
+WORKER_JOB_TIMEOUT = 300  # 5min — janela curta porque worker manda heartbeat via
+# /api/render-worker/progress no MAXIMO a cada 30s (Whisper) ou 15s (render).
+# Cada heartbeat chama tocar_job_remoto() resetando started_at.
+# 300s = 10x folga sobre o intervalo de heartbeat. Se worker morreu de verdade,
+# job re-enfileira em 5min em vez dos 7200s (2h) antigos.
+# Voltou de 7200 -> 300 em 2026-05-11 apos producao 12/05 ter 3 jobs travados
+# que ficariam parados ate 18h sem essa correcao.
+#
+# Por que NAO ficamos com 7200: heartbeat throttling agressivo (a cada 8s no
+# render, 30s no Whisper) garante que worker vivo nunca passa de 300s sem
+# tocar_job_remoto. Antes era 300s e re-enfileirava jobs VIVOS quando o
+# heartbeat falhava. Fix definitivo: garantir heartbeat estavel + timeout curto.
 
 
 def _recuperar_jobs_travados():

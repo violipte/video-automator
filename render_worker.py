@@ -186,6 +186,31 @@ def report_complete(config: dict, job_id: str, sucesso: bool, erro: str = "", vi
     })
 
 
+def _validar_mp4_integro(path: str) -> tuple[bool, float]:
+    """Valida se MP4 tem moov atom (ffprobe duration > 0).
+
+    Retorna (ok, duracao_segundos). ok=False se arquivo corrompido,
+    sem moov atom, ou ffprobe falhar.
+
+    Usado pra evitar skip-existing de MP4 corrompido (size > 1KB mas
+    sem moov atom = lixo). Bug historico do RunPod: workers reportavam
+    complete em MP4 sem moov por kill prematuro de pod no faststart final.
+    """
+    try:
+        out = subprocess.check_output(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "csv=p=0", str(path)],
+            timeout=15, stderr=subprocess.DEVNULL
+        ).decode().strip()
+        if not out:
+            return False, 0.0
+        dur = float(out)
+        return dur > 0, dur
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError,
+            ValueError, FileNotFoundError, OSError):
+        return False, 0.0
+
+
 def process_job(config: dict, job: dict) -> bool:
     """Processa um job de render completo: transcricao + legendas + render."""
     import transcriber
@@ -238,12 +263,22 @@ def process_job(config: dict, job: dict) -> bool:
     output_dir.mkdir(parents=True, exist_ok=True)
     video_path = str(output_dir / video_nome)
 
-    # Verificar se video ja existe
+    # Skip-existing: video ja gerado E integro (moov atom presente).
+    # Antes: so checava size > 1KB - falso-positivo com MP4 sem moov atom
+    # (lixo do RunPod por kill prematuro de pod no faststart final).
     if Path(video_path).exists() and Path(video_path).stat().st_size > 1000:
-        log(f"  Video ja existe: {video_nome}")
-        report_progress(config, canal_idx, f"Video existe ({video_nome})", 100, job_id=job_id)
-        report_complete(config, job_id, True, video_path=video_path)
-        return True
+        ok, dur = _validar_mp4_integro(video_path)
+        if ok:
+            log(f"  Video ja existe (integro, {dur:.0f}s): {video_nome}")
+            report_progress(config, canal_idx, f"Video existe ({video_nome})", 100, job_id=job_id)
+            report_complete(config, job_id, True, video_path=video_path)
+            return True
+        else:
+            log(f"  Video existe mas CORROMPIDO (sem moov atom). Deletando e re-renderizando.")
+            try:
+                Path(video_path).unlink(missing_ok=True)
+            except OSError:
+                pass
 
     max_retries = 2
     for attempt in range(max_retries + 1):
@@ -294,9 +329,12 @@ def process_job(config: dict, job: dict) -> bool:
                 new_pct = int(30 + (pct or 0) * 0.70)
                 if new_pct < 30: new_pct = 30
                 if new_pct > 100: new_pct = 100
-                # Throttle: report a cada 3% OU a cada 8s OU sempre quando >=99
+                # Throttle: report a cada 5% OU a cada 15s OU sempre quando >=99.
+                # Reduzido de 3%/8s -> 5%/15s em 2026-05-11 pois saturava VPS
+                # com progress requests (curl externo timeoutava por concorrencia).
+                # WORKER_JOB_TIMEOUT=300s comporta heartbeat a cada 15s com 20x folga.
                 now = time.time()
-                if (new_pct - _last_pct[0] >= 3) or (now - _last_report_ts[0] >= 8) or new_pct >= 99:
+                if (new_pct - _last_pct[0] >= 5) or (now - _last_report_ts[0] >= 15) or new_pct >= 99:
                     _last_pct[0] = new_pct
                     _last_report_ts[0] = now
                     try:
@@ -307,8 +345,20 @@ def process_job(config: dict, job: dict) -> bool:
             engine.montar(srt_path=srt_corrigido, callback_progresso=_progress_cb)
 
             if Path(video_path).exists() and Path(video_path).stat().st_size > 1000:
+                # Valida moov atom ANTES de reportar complete. Sem isso,
+                # MP4 sem moov passava como sucesso e contaminava o volume
+                # RunPod / pasta Exports com lixo. (Bug historico de corrupcao)
+                ok, dur = _validar_mp4_integro(video_path)
+                if not ok:
+                    log(f"  ERRO: video gerado mas SEM moov atom (corrompido). Deletando.")
+                    try:
+                        Path(video_path).unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    raise RuntimeError("Video gerado sem moov atom (corrompido)")
+
                 size_mb = Path(video_path).stat().st_size / (1024 * 1024)
-                log(f"  OK: {video_nome} ({size_mb:.1f} MB)")
+                log(f"  OK: {video_nome} ({size_mb:.1f} MB, {dur:.0f}s)")
                 report_complete(config, job_id, True, video_path=video_path)
                 return True
             else:
