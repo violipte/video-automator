@@ -74,9 +74,8 @@ export function TabsRender({ info }) {
             onChange={(e) => set('resolucao', [t.resolucao?.[0] || 1920, parseInt(e.target.value)])} />
           <Input label="FPS" type="number" value={t.fps || 30}
             onChange={(e) => set('fps', parseInt(e.target.value))} />
-          <Input label="Pasta de saída" value={t.pasta_saida || ''}
-            onChange={(e) => set('pasta_saida', e.target.value)} />
         </div>
+        <OutputDestination t={t} set={set} setNested={setNested} />
       </Section>
 
       <Section title="Fundo" open={open.fundo} onToggle={() => toggle('fundo')}>
@@ -320,6 +319,94 @@ function Section({ title, children, open, onToggle }) {
         {title}
       </button>
       {open && <div className="render-section-body">{children}</div>}
+    </div>
+  )
+}
+
+
+function OutputDestination({ t, set, setNested }) {
+  const [testing, setTesting] = useState(false)
+  const [oauth, setOauth] = useState({ valid: false, email: null, erro: null })
+
+  const dest = t.output_destination || 'local'
+  const folderId = t.drive_config?.folder_id || ''
+  const deleteLocal = !!(t.drive_config?.delete_local_after_upload)
+
+  useEffect(() => {
+    if (dest === 'google_drive') {
+      api.get('/api/drive/oauth-status').then(setOauth).catch(() => {})
+    }
+  }, [dest])
+
+  async function testar() {
+    if (!folderId.trim()) { toast.error('Preencha o folder ID antes'); return }
+    setTesting(true)
+    try {
+      const r = await api.post('/api/drive/test', { folder_id: folderId.trim() })
+      if (r.ok) toast.success(r.msg)
+      else toast.error(r.msg)
+    } catch (e) {
+      toast.error('Erro: ' + e.message)
+    } finally { setTesting(false) }
+  }
+
+  return (
+    <div style={{ marginTop: 16, padding: 12, background: 'var(--panel-2)', borderRadius: 6, borderLeft: '3px solid var(--accent)' }}>
+      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10, color: 'var(--text-pri)' }}>
+        Destino do MP4 final
+      </div>
+      <div style={{ display: 'flex', gap: 20, marginBottom: 12 }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+          <input type="radio" checked={dest === 'local'}
+            onChange={() => set('output_destination', 'local')} />
+          <span>Local (pasta de saída)</span>
+        </label>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+          <input type="radio" checked={dest === 'google_drive'}
+            onChange={() => set('output_destination', 'google_drive')} />
+          <span>Google Drive</span>
+        </label>
+      </div>
+
+      {dest === 'local' && (
+        <Input label="Pasta de saída local" value={t.pasta_saida || ''}
+          onChange={(e) => set('pasta_saida', e.target.value)}
+          hint="Ex: F:/Canal Dark/Automator Exports. Cria subpasta YYYY-MM-DD/Videos/ dentro." />
+      )}
+
+      {dest === 'google_drive' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {/* OAuth status */}
+          <div style={{ fontSize: 12, padding: '6px 10px', borderRadius: 4,
+                        background: oauth.valid ? 'rgba(40,167,69,0.15)' : 'rgba(220,53,69,0.15)',
+                        color: oauth.valid ? '#5cb85c' : '#dc3545' }}>
+            {oauth.valid
+              ? `✓ Conectado: ${oauth.email || '?'}`
+              : `✗ OAuth não configurado: ${oauth.erro || 'rode python auth_drive.py'}`}
+          </div>
+
+          <Input label="ID da pasta raiz no Drive" value={folderId}
+            onChange={(e) => setNested('drive_config.folder_id', e.target.value)}
+            hint='Pasta onde subpastas YYYY-MM-DD serão criadas. ID da URL: drive.google.com/drive/folders/[ID]' />
+
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 13 }}>
+            <input type="checkbox" checked={deleteLocal}
+              onChange={(e) => setNested('drive_config.delete_local_after_upload', e.target.checked)} />
+            <span>Deletar arquivo local após upload OK (economiza espaço)</span>
+          </label>
+
+          <div>
+            <Button variant="ghost" onClick={testar} disabled={testing || !folderId.trim()}>
+              {testing ? 'Testando...' : 'Testar conexão'}
+            </Button>
+          </div>
+
+          {/* Fallback: pasta local ainda usada se Drive falhar */}
+          <Input label="Pasta local (fallback / cache)" value={t.pasta_saida || ''}
+            onChange={(e) => set('pasta_saida', e.target.value)}
+            hint="Caminho usado durante o render. Após upload Drive OK e checkbox marcado, é deletado." />
+        </div>
+      )}
     </div>
   )
 }

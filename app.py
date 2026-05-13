@@ -2066,6 +2066,36 @@ async def chat_api(request: Request):
     return {"resposta": resposta}
 
 
+# === API: GOOGLE DRIVE (upload de output) ===
+
+@app.get("/api/drive/oauth-status")
+def drive_oauth_status():
+    """Status do OAuth: token existe, valido, qual conta esta autenticada."""
+    try:
+        import drive_uploader
+        return drive_uploader.oauth_status()
+    except Exception as e:
+        return {"configured": False, "valid": False, "email": None, "erro": str(e)}
+
+
+@app.post("/api/drive/test")
+async def drive_test_folder(request: Request):
+    """Testa se uma folder_id eh acessivel. Body: {folder_id: str}."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    folder_id = (body.get("folder_id") or "").strip()
+    if not folder_id:
+        return {"ok": False, "msg": "folder_id obrigatorio"}
+    try:
+        import drive_uploader
+        ok, msg = drive_uploader.test_connection(folder_id)
+        return {"ok": ok, "msg": msg}
+    except Exception as e:
+        return {"ok": False, "msg": str(e)}
+
+
 # === API: CONFIG ===
 
 @app.get("/api/config")

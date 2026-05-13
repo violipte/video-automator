@@ -176,13 +176,20 @@ class _HeartbeatThread(threading.Thread):
         self.stop_event.set()
 
 
-def report_complete(config: dict, job_id: str, sucesso: bool, erro: str = "", video_path: str = ""):
-    """Reporta conclusao do job ao VPS."""
+def report_complete(config: dict, job_id: str, sucesso: bool, erro: str = "", video_path: str = "",
+                    local_storage: str = "local", tamanho_mb: float = 0):
+    """Reporta conclusao do job ao VPS.
+
+    local_storage: 'local' ou 'google_drive' (registro de onde o MP4 final ficou)
+    tamanho_mb: tamanho do MP4 final em MB
+    """
     return api_request(config, "POST", "/api/render-worker/complete", {
         "job_id": job_id,
         "sucesso": sucesso,
         "erro": erro,
         "video_path": video_path,
+        "local_storage": local_storage,
+        "tamanho_mb": tamanho_mb,
     })
 
 
@@ -359,7 +366,49 @@ def process_job(config: dict, job: dict) -> bool:
 
                 size_mb = Path(video_path).stat().st_size / (1024 * 1024)
                 log(f"  OK: {video_nome} ({size_mb:.1f} MB, {dur:.0f}s)")
-                report_complete(config, job_id, True, video_path=video_path)
+
+                # === UPLOAD GOOGLE DRIVE (opcional, por template) ===
+                # Template define output_destination = "local" (default) ou "google_drive".
+                # Se Drive: faz upload, cria subpasta YYYY-MM-DD automaticamente,
+                # opcionalmente deleta local apos upload OK (drive_config.delete_local_after_upload).
+                drive_storage = "local"  # default
+                dest = tmpl.get("output_destination", "local")
+                if dest == "google_drive":
+                    drive_cfg = tmpl.get("drive_config", {}) or {}
+                    folder_id_raiz = (drive_cfg.get("folder_id") or "").strip()
+                    delete_local = bool(drive_cfg.get("delete_local_after_upload", False))
+                    if not folder_id_raiz:
+                        log(f"  AVISO Drive: output_destination=google_drive mas drive_config.folder_id vazio. Mantendo local.")
+                    else:
+                        try:
+                            import drive_uploader
+                            report_progress(config, canal_idx, "Upload Drive...", 99, job_id=job_id)
+                            log(f"  Upload Drive: pasta_raiz={folder_id_raiz[:20]}..., data={data_pasta}")
+                            res = drive_uploader.upload_video(
+                                local_path=video_path,
+                                folder_id_raiz=folder_id_raiz,
+                                data_pasta=data_pasta,
+                            )
+                            if res.get("ok"):
+                                drive_storage = "google_drive"
+                                file_id = res.get("file_id")
+                                log(f"  Drive OK: file_id={file_id} ({res.get('tamanho_mb',0):.1f}MB)"
+                                    f"{' SKIP (ja existia)' if res.get('skip') else ''}")
+                                # Deleta local se configurado E upload foi sucesso real (nao skip-existing)
+                                if delete_local and not res.get("skip"):
+                                    try:
+                                        Path(video_path).unlink(missing_ok=True)
+                                        log(f"  Local deletado (delete_local_after_upload=True)")
+                                    except OSError as _de:
+                                        log(f"  AVISO: falha ao deletar local: {_de}")
+                            else:
+                                log(f"  AVISO Drive upload falhou: {res.get('erro')}. Mantendo local.")
+                        except Exception as _eup:
+                            log(f"  AVISO Drive upload exception: {_eup}. Mantendo local.")
+
+                report_complete(config, job_id, True, video_path=video_path,
+                                local_storage=drive_storage,
+                                tamanho_mb=size_mb)
                 return True
             else:
                 raise RuntimeError("Video nao gerado ou vazio")
