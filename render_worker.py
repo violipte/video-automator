@@ -19,16 +19,40 @@ import urllib.error
 from pathlib import Path
 from datetime import datetime
 
+# === ANTI-FLICKER (Windows) ===========================================
+# Monkeypatch subprocess.Popen pra SEMPRE usar CREATE_NO_WINDOW quando o
+# worker roda sob pythonw (sem console proprio). Sem isso, cada FFmpeg do
+# engine (~139 clips/video), ffprobe, whisper e chatterbox abre uma janela
+# de console que "pisca" e rouba o foco de teclado/mouse do operador.
+# Cobre todos os subprocess.Popen/run/call deste processo (engine, transcriber,
+# narrator_chatterbox). Subprocessos em OUTROS processos (ex: chatterbox_runner
+# que roda no venv 3.12) sao tratados separadamente la dentro.
+if os.name == "nt":
+    _CNW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+    _orig_popen_init = subprocess.Popen.__init__
+    def _popen_no_window(self, *args, **kwargs):
+        kwargs["creationflags"] = kwargs.get("creationflags", 0) | _CNW
+        return _orig_popen_init(self, *args, **kwargs)
+    subprocess.Popen.__init__ = _popen_no_window
+# ======================================================================
+
 BASE_DIR = Path(__file__).parent
 CONFIG_FILE = BASE_DIR / "worker_config.json"
-LOG_FILE = BASE_DIR / "logs" / "render_worker.log"
+# Log separado por worker (mesmo padrao temp_w{WID})
+_WID_LOG = os.environ.get("WORKER_ID", "").strip()
+LOG_FILE = BASE_DIR / "logs" / (f"render_worker_w{_WID_LOG}.log" if _WID_LOG else "render_worker.log")
+
+# temp_dir isolado por WORKER_ID pra suportar 2+ workers paralelos
+# (mesmo padrao usado em engine.py e transcriber.py).
+_WID_DEF = os.environ.get("WORKER_ID", "").strip()
+_TEMP_NAME_DEF = f"temp_w{_WID_DEF}" if _WID_DEF else "temp"
 
 # Defaults
 DEFAULT_CONFIG = {
     "vps_url": "http://127.0.0.1:8500",
     "worker_token": "",
     "poll_interval": 5,
-    "temp_dir": str(BASE_DIR / "temp"),
+    "temp_dir": str(BASE_DIR / _TEMP_NAME_DEF),
     "cache_dir": str(BASE_DIR / "cache"),
     "export_base": "F:/Canal Dark/Automator Exports",
 }
@@ -83,12 +107,120 @@ def log(msg: str):
         pass
 
 
+def _worker_id_header() -> str:
+    """Worker id consistente entre polls + heartbeats (X-Worker-Id)."""
+    try:
+        hostname = subprocess.check_output(["hostname"], timeout=2).decode().strip()
+    except Exception:
+        hostname = "unknown"
+    wid = os.environ.get("WORKER_ID", "default")
+    return f"{hostname}-w{wid}"
+
+
+def _coletar_telemetria() -> dict:
+    """Coleta GPU temp/util/mem (via nvidia-smi) + CPU util (psutil).
+
+    CPU temp NAO disponivel no Windows por padrao (precisa LibreHardwareMonitor).
+    Retorna dict com chaves: gpu_temp_c, gpu_util_pct, gpu_mem_used_mb, gpu_mem_total_mb,
+    cpu_util_pct, gpu_name.
+    """
+    t = {}
+    try:
+        out = subprocess.check_output(
+            ["nvidia-smi",
+             "--query-gpu=temperature.gpu,utilization.gpu,memory.used,memory.total,name",
+             "--format=csv,noheader,nounits"],
+            timeout=5,
+        ).decode().strip()
+        # Ex: "31, 0, 301, 16303, NVIDIA GeForce RTX 5070 Ti"
+        parts = [p.strip() for p in out.split(",")]
+        if len(parts) >= 5:
+            t["gpu_temp_c"] = int(parts[0])
+            t["gpu_util_pct"] = int(parts[1])
+            t["gpu_mem_used_mb"] = int(parts[2])
+            t["gpu_mem_total_mb"] = int(parts[3])
+            t["gpu_name"] = parts[4]
+    except Exception:
+        pass
+    try:
+        import psutil
+        t["cpu_util_pct"] = round(psutil.cpu_percent(interval=None), 1)
+        t["ram_used_gb"] = round(psutil.virtual_memory().used / 1e9, 1)
+        t["ram_total_gb"] = round(psutil.virtual_memory().total / 1e9, 1)
+    except Exception:
+        pass
+    # CPU temp via LibreHardwareMonitor (HTTP server localhost:8085)
+    try:
+        import json as _json
+        with urllib.request.urlopen("http://localhost:8085/data.json", timeout=2) as r:
+            lhm = _json.loads(r.read())
+
+        def _find_temp(node, predicates):
+            """Busca primeiro sensor Temperature que match qualquer predicate."""
+            if node.get("Type") == "Temperature":
+                sid = (node.get("SensorId") or "").lower()
+                name = (node.get("Text") or "").lower()
+                for pred in predicates:
+                    if pred in sid or pred in name:
+                        v = (node.get("Value") or "").replace(",", ".").replace("°C", "").strip()
+                        try: return float(v)
+                        except: pass
+            for c in node.get("Children", []):
+                r = _find_temp(c, predicates)
+                if r is not None:
+                    return r
+            return None
+
+        # CPU principal: Tctl/Tdie (AMD) ou Package (Intel)
+        cpu_t = _find_temp(lhm, ["tctl", "tdie", "package", "core (t"])
+        if cpu_t is not None:
+            t["cpu_temp_c"] = round(cpu_t, 1)
+        # Motherboard socket
+        socket_t = _find_temp(lhm, ["cpu socket", "vrm mos"])
+        if socket_t is not None:
+            t["motherboard_temp_c"] = round(socket_t, 1)
+        # NVMe principal (primeiro)
+        nvme_t = _find_temp(lhm, ["/nvme/0/temperature/0", "/nvme/0/temperature/1"])
+        if nvme_t is not None:
+            t["nvme_temp_c"] = round(nvme_t, 1)
+    except Exception:
+        pass  # LHM nao instalado/rodando — ignora silencioso
+    return t
+
+
+def _telemetria_loop(config: dict):
+    """Background thread que reporta telemetria pra VPS a cada 10s."""
+    wid = _worker_id_header()
+    url = config["vps_url"].rstrip("/") + "/api/system-telemetry"
+    headers = {
+        "Authorization": f"Bearer {config['worker_token']}",
+        "Content-Type": "application/json",
+        "X-Worker-Id": wid,
+    }
+    while True:
+        try:
+            data = _coletar_telemetria()
+            data["worker_id"] = wid
+            data["ts"] = time.time()
+            body = json.dumps(data).encode()
+            req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    resp.read()
+            except Exception:
+                pass  # nao falhar se VPS indisponivel
+        except Exception:
+            pass
+        time.sleep(10)
+
+
 def api_request(config: dict, method: str, path: str, data: dict = None) -> dict | None:
     """Faz request autenticado ao VPS."""
     url = config["vps_url"].rstrip("/") + path
     headers = {
         "Authorization": f"Bearer {config['worker_token']}",
         "Content-Type": "application/json",
+        "X-Worker-Id": _worker_id_header(),
     }
     body = json.dumps(data).encode() if data else None
 
@@ -193,6 +325,200 @@ def report_complete(config: dict, job_id: str, sucesso: bool, erro: str = "", vi
     })
 
 
+# === NARRATION (Chatterbox local) ===
+
+def report_narration_progress(config: dict, job_id: str, canal_idx: int = None,
+                              etapa_detalhe: str = "", progresso: int = 0):
+    """Heartbeat opcional pra narration jobs."""
+    try:
+        payload = {"job_id": job_id, "etapa_detalhe": etapa_detalhe, "progresso": progresso}
+        if canal_idx is not None:
+            payload["canal_idx"] = canal_idx
+        api_request(config, "POST", "/api/narration-worker/progress", payload)
+    except Exception:
+        pass
+
+
+def report_narration_complete(config: dict, job_id: str, sucesso: bool, erro: str = "",
+                              audio_local: str = "", duracao_seg: float = 0,
+                              chunks: int = 0, tempo_geracao_seg: float = 0):
+    """Reporta conclusao de narration job."""
+    return api_request(config, "POST", "/api/narration-worker/complete", {
+        "job_id": job_id,
+        "sucesso": sucesso,
+        "erro": erro,
+        "audio_local": audio_local,
+        "duracao_seg": duracao_seg,
+        "chunks": chunks,
+        "tempo_geracao_seg": tempo_geracao_seg,
+    })
+
+
+def upload_mp3_multipart(config: dict, job_id: str, local_mp3: str) -> bool:
+    """Faz POST multipart/form-data pra /api/narration-worker/upload-mp3.
+
+    Sem usar libs externas (urllib stdlib + boundary manual).
+    """
+    import uuid as _uuid
+    boundary = f"----worker-{_uuid.uuid4().hex}"
+    url = config["vps_url"].rstrip("/") + "/api/narration-worker/upload-mp3"
+
+    try:
+        with open(local_mp3, "rb") as f:
+            mp3_bytes = f.read()
+    except Exception as e:
+        log(f"  Erro lendo MP3 pra upload: {e}")
+        return False
+
+    # Monta body multipart manualmente
+    lines = []
+    lines.append(f"--{boundary}".encode())
+    lines.append(b'Content-Disposition: form-data; name="job_id"')
+    lines.append(b"")
+    lines.append(job_id.encode())
+    lines.append(f"--{boundary}".encode())
+    fname = Path(local_mp3).name
+    lines.append(f'Content-Disposition: form-data; name="file"; filename="{fname}"'.encode())
+    lines.append(b"Content-Type: audio/mpeg")
+    lines.append(b"")
+    lines.append(mp3_bytes)
+    lines.append(f"--{boundary}--".encode())
+    lines.append(b"")
+    body = b"\r\n".join(lines)
+
+    headers = {
+        "Authorization": f"Bearer {config['worker_token']}",
+        "Content-Type": f"multipart/form-data; boundary={boundary}",
+        "X-Worker-Id": _worker_id_header(),
+    }
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    try:
+        # Timeout generoso pra MP3 grandes (50MB+ em link lento)
+        with urllib.request.urlopen(req, timeout=600) as resp:
+            payload = json.loads(resp.read())
+            return bool(payload.get("ok"))
+    except urllib.error.HTTPError as e:
+        log(f"  Upload HTTP {e.code}: {e.read().decode('utf-8', errors='replace')[:200]}")
+        return False
+    except Exception as e:
+        log(f"  Upload error: {e}")
+        return False
+
+
+def process_narration_job(config: dict, job: dict) -> bool:
+    """Processa um job de narracao Chatterbox local. Upload MP3 -> complete.
+
+    job traz: id, texto, voice_ref, nome_saida, destino_remoto, exaggeration,
+    cfg_weight, chunk_max_chars.
+    """
+    import narrator_chatterbox
+
+    job_id = job.get("id", "?")
+    texto = job.get("texto", "")
+    voice_ref = job.get("voice_ref", "")
+    nome_saida = job.get("nome_saida", job_id)
+    exaggeration = float(job.get("exaggeration", 0.5))
+    cfg_weight = float(job.get("cfg_weight", 0.5))
+    chunk_max_chars = int(job.get("chunk_max_chars", 300))
+    model_variant = (job.get("model_variant") or "base").lower()
+
+    log(f"=== Narracao Chatterbox: {job_id} ===")
+    log(f"  texto={len(texto)} chars, voice_ref={Path(voice_ref).name if voice_ref else '(vazio)'}, variant={model_variant}")
+
+    if not narrator_chatterbox.disponivel():
+        msg = f"venv Chatterbox indisponivel em {narrator_chatterbox.CHATTERBOX_DIR}"
+        log(f"  ERRO: {msg}")
+        report_narration_complete(config, job_id, False, erro=msg)
+        return False
+
+    if not Path(voice_ref).exists():
+        msg = f"voice_ref nao existe no worker local: {voice_ref}"
+        log(f"  ERRO: {msg}")
+        report_narration_complete(config, job_id, False, erro=msg)
+        return False
+
+    # MP3 gerado em pasta temp local antes do upload
+    local_tmp = Path(config.get("temp_dir", "temp")) / "chatterbox_out"
+    local_tmp.mkdir(parents=True, exist_ok=True)
+    local_mp3 = str(local_tmp / f"{nome_saida}.mp3")
+
+    canal_idx_narr = job.get("canal_idx")
+    report_narration_progress(config, job_id, canal_idx=canal_idx_narr,
+                              etapa_detalhe="Chatterbox iniciando...", progresso=1)
+
+    # Callback de progresso REAL por chunk. Mapeia chunks 0-N pra progresso 5-95%
+    # (reserva 0-5 pra init/upload e 95-100 pra concat/conv/upload).
+    def _on_chatterbox_progress(chunk_n, chunk_total):
+        if chunk_total <= 0:
+            return
+        # 5% inicial + 90% durante chunks + 5% final (concat+upload)
+        pct = 5 + int(90 * chunk_n / chunk_total)
+        if pct < 5: pct = 5
+        if pct > 95: pct = 95
+        detalhe = f"Chatterbox {chunk_n}/{chunk_total}"
+        report_narration_progress(config, job_id, canal_idx=canal_idx_narr,
+                                  etapa_detalhe=detalhe, progresso=pct)
+
+    # Heartbeat de seguranca (se nenhum chunk reportar progresso por muito tempo,
+    # ainda mantemos VPS sabendo que o worker esta vivo)
+    hb_stop = threading.Event()
+    def _hb_loop():
+        while not hb_stop.wait(120):  # 2min
+            report_narration_progress(config, job_id, canal_idx=canal_idx_narr,
+                                      etapa_detalhe="Chatterbox em andamento...", progresso=-1)
+    hb_thread = threading.Thread(target=_hb_loop, daemon=True)
+    hb_thread.start()
+
+    try:
+        result = narrator_chatterbox.narrar_chatterbox(
+            texto=texto,
+            voice_ref=voice_ref,
+            nome_saida=nome_saida,
+            destino_final=local_mp3,
+            exaggeration=exaggeration,
+            cfg_weight=cfg_weight,
+            chunk_max_chars=chunk_max_chars,
+            model_variant=model_variant,
+            on_progress=_on_chatterbox_progress,
+        )
+    finally:
+        hb_stop.set()
+
+    if not result.get("ok"):
+        erro = result.get("erro", "Chatterbox falhou")
+        log(f"  ERRO Chatterbox: {erro[:200]}")
+        report_narration_complete(config, job_id, False, erro=erro)
+        return False
+
+    duracao = result.get("duracao_seg", 0)
+    chunks = result.get("chunks", 0)
+    tempo_gen = result.get("tempo_geracao_seg", 0)
+    log(f"  Chatterbox OK: {duracao:.0f}s audio, {chunks} chunks, {tempo_gen/60:.1f}min")
+
+    # Upload do MP3 pro VPS
+    report_narration_progress(config, job_id, etapa_detalhe="Upload MP3...", progresso=95)
+    log(f"  Uploading {local_mp3} ({Path(local_mp3).stat().st_size/1024/1024:.1f}MB)...")
+    if not upload_mp3_multipart(config, job_id, local_mp3):
+        log(f"  ERRO upload MP3 falhou")
+        report_narration_complete(config, job_id, False, erro="upload MP3 falhou")
+        return False
+
+    # Marca complete (audio_local = destino_remoto do job; VPS ja sabe)
+    audio_final_path = job.get("destino_remoto", "")
+    report_narration_complete(
+        config, job_id, True,
+        audio_local=audio_final_path,
+        duracao_seg=duracao, chunks=chunks, tempo_geracao_seg=tempo_gen,
+    )
+    log(f"  Concluido: {job_id}")
+    # Limpa MP3 local apos upload OK (libera espaco)
+    try:
+        Path(local_mp3).unlink(missing_ok=True)
+    except OSError:
+        pass
+    return True
+
+
 def _validar_mp4_integro(path: str) -> tuple[bool, float]:
     """Valida se MP4 tem moov atom (ffprobe duration > 0).
 
@@ -288,33 +614,44 @@ def process_job(config: dict, job: dict) -> bool:
                 pass
 
     max_retries = 2
+    # Template pode desabilitar legenda (ex: DE com transcricao ruim).
+    # Pulamos Whisper + subtitle_fixer + ASS burn quando legenda_ativa=False.
+    _legenda_ativa = tmpl.get("legenda_ativa", True)
     for attempt in range(max_retries + 1):
         heartbeat = None
         try:
-            # 3. Transcrever (Whisper GPU)
-            report_progress(config, canal_idx, "Transcrevendo...", 10, job_id=job_id)
-            log(f"  Transcrevendo...")
-            # Heartbeat durante transcricao (pode demorar 1-3min)
-            heartbeat = _HeartbeatThread(config, job_id, canal_idx, "Transcrevendo...", 10)
-            heartbeat.start()
-            try:
-                srt_path = transcriber.transcrever(narr_local, idioma)
-            finally:
-                heartbeat.stop()
-                heartbeat.join(timeout=5)
-                heartbeat = None
+            srt_corrigido = None
+            if _legenda_ativa:
+                # 3. Transcrever (Whisper GPU)
+                report_progress(config, canal_idx, "Transcrevendo...", 10, job_id=job_id)
+                log(f"  Transcrevendo...")
+                # Heartbeat durante transcricao (pode demorar 1-3min)
+                heartbeat = _HeartbeatThread(config, job_id, canal_idx, "Transcrevendo...", 10)
+                heartbeat.start()
+                try:
+                    # Permite override do modelo Whisper via template (default medium).
+                    # Ex: "large-v3", "large-v3-turbo", "small", etc.
+                    whisper_modelo = (tmpl.get("whisper_model") or "medium").strip()
+                    srt_path = transcriber.transcrever(narr_local, idioma, modelo=whisper_modelo)
+                finally:
+                    heartbeat.stop()
+                    heartbeat.join(timeout=5)
+                    heartbeat = None
 
-            # 4. Corrigir legendas
-            report_progress(config, canal_idx, "Corrigindo legendas...", 20, job_id=job_id)
-            log(f"  Corrigindo legendas...")
-            lc = tmpl.get("legenda_config", {})
-            maiuscula = lc.get("maiuscula", tmpl.get("estilo_legenda") == 2)
-            srt_corrigido = subtitle_fixer.corrigir_srt(
-                srt_path, idioma, job.get("template_id", ""), maiuscula,
-                max_linhas=lc.get("max_linhas", 2),
-                max_chars=lc.get("max_chars", 30),
-                regras_template=tmpl.get("regras")
-            )
+                # 4. Corrigir legendas
+                report_progress(config, canal_idx, "Corrigindo legendas...", 20, job_id=job_id)
+                log(f"  Corrigindo legendas...")
+                lc = tmpl.get("legenda_config", {})
+                maiuscula = lc.get("maiuscula", tmpl.get("estilo_legenda") == 2)
+                srt_corrigido = subtitle_fixer.corrigir_srt(
+                    srt_path, idioma, job.get("template_id", ""), maiuscula,
+                    max_linhas=lc.get("max_linhas", 2),
+                    max_chars=lc.get("max_chars", 30),
+                    regras_template=tmpl.get("regras")
+                )
+            else:
+                report_progress(config, canal_idx, "Legenda desativada (skip Whisper)", 20, job_id=job_id)
+                log(f"  Legenda desativada no template - skip Whisper + fix")
 
             # 5. Renderizar (FFmpeg NVENC GPU) — passa callback pra reportar
             # progresso real (Ken Burns 0-60%, montagem final 60-100% mapeado pra 30-100)
@@ -461,6 +798,12 @@ def main():
     except Exception:
         pass
 
+    # Inicia thread de telemetria (GPU temp/util/mem + CPU util)
+    _telem_thread = threading.Thread(target=_telemetria_loop, args=(config,),
+                                      daemon=True, name="telemetria")
+    _telem_thread.start()
+    log("Telemetria thread iniciada (GPU/CPU a cada 10s)")
+
     consecutive_errors = 0
 
     while True:
@@ -472,8 +815,21 @@ def main():
             except Exception:
                 hostname = "unknown"
             worker_full_id = f"{hostname}-w{wid}"
-            job = api_request(config, "GET", f"/api/render-worker/next-job?worker_id={urllib.request.quote(worker_full_id)}")
+            worker_qs = urllib.request.quote(worker_full_id)
 
+            # Prioridade: narracao Chatterbox > render. Narracao deve ir primeiro
+            # pra liberar o pipeline (proximo passo eh render desse canal). Se
+            # narracao 15-25min e render 25-30min, fazer narracao antes destrava
+            # render mais cedo do que se a gente renderasse primeiro outro canal.
+            narr_job = api_request(config, "GET",
+                f"/api/narration-worker/next-job?worker_id={worker_qs}")
+            if narr_job:
+                consecutive_errors = 0
+                process_narration_job(config, narr_job)
+                continue  # imediato proximo poll (pode ter mais narracao)
+
+            job = api_request(config, "GET",
+                f"/api/render-worker/next-job?worker_id={worker_qs}")
             if job:
                 consecutive_errors = 0
                 process_job(config, job)

@@ -13,6 +13,7 @@ RESILIENCIA:
 """
 
 import json
+import queue
 import sys
 import time
 import threading
@@ -515,77 +516,18 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
 
     try:
         # ============================================================
-        # FASE 1: ROTEIROS (paralelo, 3 workers)
+        # PIPELINE CONTINUO: Roteiro -> Narracao -> Render encadeado.
+        # Antes: Fase 1 (todos roteiros) bloqueava Fase 2 (narracoes).
+        # Agora: roteiros sao gerados em thread BG; loop de narracao consome
+        #        uma fila (roteiro_pronto_q) e narra cada canal ASSIM QUE seu
+        #        roteiro fica pronto, em ordem de conclusao (nao de indice).
         # ============================================================
-        production_log.adicionar_log("=== FASE 1: Roteiros (paralelo) ===")
+        production_log.adicionar_log("=== PIPELINE: Roteiro (BG) -> Narracao -> Render ===")
 
         roteiro_ok = {}  # job_index -> True
+        roteiro_pronto_q = queue.Queue()  # (i, job, cel) ao roteiro ficar pronto
 
-        roteiro_para_gerar = {}
-        for i, job in enumerate(jobs):
-            if estado["cancelado"]:
-                break
-
-            if is_resume:
-                existing_canais = existing_state.get("canais", [])
-                if i < len(existing_canais):
-                    existing_etapa = existing_canais[i].get("etapa", "")
-                    if existing_etapa in ("concluido", "erro", "pulado"):
-                        production_log.adicionar_log(f"{job['tag']}: Pulando (estado anterior: {existing_etapa})")
-                        if existing_etapa == "concluido":
-                            roteiro_ok[i] = True
-                        continue
-
-            tag = job["tag"]
-            key = job["key"]
-            production_log.atualizar_canal(i, etapa="iniciando")
-
-            temas_data = _carregar_temas()
-            cel = temas_data.get("celulas", {}).get(key, {})
-            job["cel"] = cel
-
-            # Verificar roteiro: .txt na pasta de data e a UNICA fonte da verdade
-            # Skip robusto: precisa existir E ter size minimo (evita .txt vazio/corrompido).
-            txt_path = pasta_roteiros / f"{tag}.txt"
-            MIN_ROTEIRO_BYTES = 5000  # ~5KB = ~5min de narracao razoavel
-
-            if txt_path.exists() and txt_path.stat().st_size >= MIN_ROTEIRO_BYTES:
-                chars = txt_path.stat().st_size
-                production_log.atualizar_canal(i, etapa="roteiro", etapa_detalhe=f"REAPROVEITANDO ({chars} chars)", roteiro_chars=chars)
-                production_log.adicionar_log(f"{tag}: SKIP roteiro — reaproveitando {txt_path.name} ({chars} chars)")
-                cel["roteiro"] = txt_path.read_text(encoding="utf-8")
-                job["cel"] = cel
-                roteiro_ok[i] = True
-            else:
-                if txt_path.exists():
-                    production_log.adicionar_log(f"{tag}: roteiro {txt_path.name} muito pequeno ({txt_path.stat().st_size}B < {MIN_ROTEIRO_BYTES}B), regenerando")
-                roteiro_para_gerar[i] = (job, cel)
-
-        if roteiro_para_gerar and not estado["cancelado"]:
-            with ThreadPoolExecutor(max_workers=3, thread_name_prefix="roteiro") as executor:
-                futures = {}
-                for i, (job, cel) in roteiro_para_gerar.items():
-                    f = executor.submit(_gerar_roteiro_para_canal, i, job, cel, data_ref, pasta_roteiros)
-                    futures[f] = i
-
-                for future in as_completed(futures):
-                    idx = futures[future]
-                    try:
-                        job_idx, resultado, erro = future.result(timeout=TIMEOUT_ROTEIRO)
-                        if resultado:
-                            roteiro_ok[job_idx] = True
-                            jobs[job_idx]["cel"]["roteiro"] = resultado
-                    except Exception as e:
-                        production_log.atualizar_canal(idx, etapa="erro", erro=str(e))
-                        production_log.adicionar_log(f"{jobs[idx]['tag']}: ERRO roteiro - {e}")
-
-        # ============================================================
-        # FASE 2+3: NARRACAO + RENDER EM PIPELINE CONTINUA
-        # Narracao sequencial alimenta fila de render.
-        # Render consome da fila (1 por vez), comeca imediatamente.
-        # ============================================================
-        production_log.adicionar_log("=== FASE 2+3: Narracao -> Render (pipeline) ===")
-
+        # Setup Fase 2+3 (definido aqui pra ficar acessivel ao consumer e _enfileirar_render)
         render_queue.iniciar_worker()
         _render_pendentes = []
 
@@ -594,15 +536,98 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
             Skip robusto: arquivo precisa existir E ter size minimo (>100KB = ~10s audio).
             """
             MIN_MP3_BYTES = 100_000
-            # Pasta nova: Automator Exports/YYYY-MM-DD/Narracoes/TAG.mp3
             novo = pasta_narracoes / f"{tag}.mp3"
             if novo.exists() and novo.stat().st_size >= MIN_MP3_BYTES:
                 return novo
-            # Pasta antiga: narracoes/YYYY-MM-DD/TAG DD-MM.mp3
             antigo = NARRACOES_DIR / data_pasta / f"{tag} {data_formatada}.mp3"
             if antigo.exists() and antigo.stat().st_size >= MIN_MP3_BYTES:
                 return antigo
             return None
+
+        def _phase1_gerar_roteiros():
+            """Roda Phase 1 em thread BG. A cada roteiro pronto (reuso OU gerado),
+            faz put em roteiro_pronto_q -> consumer pode comecar narrar enquanto
+            outros roteiros ainda sao gerados.
+            """
+            try:
+                roteiro_para_gerar_local = {}
+                for i, job in enumerate(jobs):
+                    if estado["cancelado"]:
+                        break
+
+                    if is_resume:
+                        existing_canais = existing_state.get("canais", [])
+                        if i < len(existing_canais):
+                            existing_etapa = existing_canais[i].get("etapa", "")
+                            if existing_etapa in ("concluido", "erro", "pulado"):
+                                production_log.adicionar_log(f"{job['tag']}: Pulando (estado anterior: {existing_etapa})")
+                                if existing_etapa == "concluido":
+                                    roteiro_ok[i] = True
+                                    # Resume: dispatcha pro consumer (pode ter narracao faltando)
+                                    cel_resume = (_carregar_temas().get("celulas", {}) or {}).get(job["key"], {})
+                                    job["cel"] = cel_resume
+                                    roteiro_pronto_q.put((i, job, cel_resume))
+                                continue
+
+                    tag = job["tag"]
+                    key = job["key"]
+                    production_log.atualizar_canal(i, etapa="iniciando")
+
+                    temas_data_local = _carregar_temas()
+                    cel = temas_data_local.get("celulas", {}).get(key, {})
+                    job["cel"] = cel
+
+                    txt_path = pasta_roteiros / f"{tag}.txt"
+                    MIN_ROTEIRO_BYTES = 5000
+
+                    if txt_path.exists() and txt_path.stat().st_size >= MIN_ROTEIRO_BYTES:
+                        chars = txt_path.stat().st_size
+                        production_log.atualizar_canal(i, etapa="roteiro", etapa_detalhe=f"REAPROVEITANDO ({chars} chars)", roteiro_chars=chars)
+                        production_log.adicionar_log(f"{tag}: SKIP roteiro — reaproveitando {txt_path.name} ({chars} chars)")
+                        cel["roteiro"] = txt_path.read_text(encoding="utf-8")
+                        job["cel"] = cel
+                        roteiro_ok[i] = True
+                        # DISPATCH IMEDIATO pro consumer
+                        roteiro_pronto_q.put((i, job, cel))
+                    else:
+                        if txt_path.exists():
+                            production_log.adicionar_log(f"{tag}: roteiro {txt_path.name} muito pequeno ({txt_path.stat().st_size}B < {MIN_ROTEIRO_BYTES}B), regenerando")
+                        roteiro_para_gerar_local[i] = (job, cel)
+
+                if roteiro_para_gerar_local and not estado["cancelado"]:
+                    with ThreadPoolExecutor(max_workers=3, thread_name_prefix="roteiro") as executor:
+                        futures = {}
+                        for i, (job, cel) in roteiro_para_gerar_local.items():
+                            f = executor.submit(_gerar_roteiro_para_canal, i, job, cel, data_ref, pasta_roteiros)
+                            futures[f] = i
+
+                        for future in as_completed(futures):
+                            idx = futures[future]
+                            try:
+                                job_idx, resultado, erro = future.result(timeout=TIMEOUT_ROTEIRO)
+                                if resultado:
+                                    roteiro_ok[job_idx] = True
+                                    jobs[job_idx]["cel"]["roteiro"] = resultado
+                                    # DISPATCH IMEDIATO pro consumer
+                                    roteiro_pronto_q.put((job_idx, jobs[job_idx], jobs[job_idx]["cel"]))
+                            except Exception as e:
+                                production_log.atualizar_canal(idx, etapa="erro", erro=str(e))
+                                production_log.adicionar_log(f"{jobs[idx]['tag']}: ERRO roteiro - {e}")
+
+                production_log.adicionar_log("[PIPELINE] Phase 1 (roteiros) concluida")
+            except Exception as _e:
+                production_log.adicionar_log(f"[PIPELINE] ERRO FATAL Phase 1: {_e}")
+                traceback.print_exc()
+            finally:
+                # Sentinel: avisa consumer pra encerrar apos processar a fila
+                roteiro_pronto_q.put(None)
+
+        _roteiro_thread = threading.Thread(target=_phase1_gerar_roteiros, daemon=True, name="phase1-roteiros")
+        _roteiro_thread.start()
+
+        # ============================================================
+        # FASE 2+3 helpers (consumer rodara apos Phase 1 dispatchar canais)
+        # ============================================================
 
         def _enfileirar_render(i, job, narr_path_val):
             """Enfileira render na fila compartilhada."""
@@ -717,6 +742,10 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
                 pass
 
             if render_queue.REMOTE_MODE:
+                # POD MANAGEMENT DESABILITADO (2026-05-13 por decisao Piter):
+                # Worker local (RTX 3060/5070Ti) processa tudo. RunPod nao eh usado.
+                # _iniciar_pods_se_necessario()  # <- DESABILITADO
+
                 # Modo remoto: enviar dados serializaveis pro worker externo
                 EXPORT_BASE = _export_base()
                 video_pasta = EXPORT_BASE / data_pasta / "Videos"
@@ -745,58 +774,24 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
                     _renderizar_canal(i, job, narr_path_val, data_formatada, data_ymd, data_pasta)
                 render_queue.enfileirar(job_id, _do_render, fonte="auto", on_done=_on_done, on_error=_on_error)
 
-        # --- PRIMEIRO: enfileirar render dos que JA TEM MP3 ---
-        canais_sem_narracao = []
-        for i, job in enumerate(jobs):
-            if estado["cancelado"]:
-                break
-            if i not in roteiro_ok:
-                continue
-
-            # Skip resume
-            if is_resume:
-                existing_canais = existing_state.get("canais", [])
-                if i < len(existing_canais):
-                    existing_etapa = existing_canais[i].get("etapa", "")
-                    if existing_etapa in ("concluido", "pulado"):
-                        narr_path = _encontrar_narracao(job['tag'])
-                        if narr_path:
-                            _enfileirar_render(i, job, narr_path)
-                        continue
-
-            tag = job["tag"]
-            narr_path = _encontrar_narracao(tag)
-
-            if narr_path:
-                production_log.atualizar_canal(i, etapa="narracao", etapa_detalhe=f"Existe ({narr_path.name})", narracao_path=str(narr_path))
-                production_log.adicionar_log(f"{tag}: Narracao existe ({narr_path.name})")
-                _enfileirar_render(i, job, narr_path)
-            else:
-                canais_sem_narracao.append((i, job))
-
-        production_log.adicionar_log(f"Render: {len(_render_pendentes)} canais enfileirados | Narracao: {len(canais_sem_narracao)} canais pendentes")
-
-        # === SKIP PRIMARIO APOS N FALHAS CONSECUTIVAS ===
-        # Se 2+ canais consecutivos cairem em fallback (sinal de outage do
-        # ai33.pro), pula totalmente o primario nos canais subsequentes que
-        # tem fallback Inworld configurado. Reseta quando o primario sucede
-        # em algum canal. Escopo: apenas esta execucao de produzir_data_completa.
-        falhas_consec_primario = 0
+        # === ESTADO ANTI-OUTAGE (compartilhado entre canais do consumer sequencial) ===
         SKIP_PRIMARIO_THRESHOLD = 2
+        falhas_consec_primario = 0
+        fallbacks_consecutivos = 0
+        forcar_inworld_resto_data = False
 
-        # === PROBE INICIAL DO ai33.pro ===
-        # Antes de iniciar narracao, manda 1 chunk de 8000 chars com a voz
-        # do primeiro canal pendente. Se ambas tentativas falharem (300s
-        # primeira, 180s retry), considera primario OUT e ja ativa o gate
-        # de skip para todos os canais subsequentes (mandatorio: todos os
-        # canais tem fallback Inworld configurado).
-        # Salta o probe se nao ha canal pendente (todos ja tem MP3).
-        if canais_sem_narracao and api_key:
-            _probe_job = canais_sem_narracao[0][1]
+        # === PROBE INICIAL ai33.pro ===
+        # Detecta outage de cara, antes do consumer pegar o primeiro canal.
+        # Pega qualquer voz Minimax pra teste (so canais NAO chatterbox).
+        _probe_jobs = [
+            j for j in jobs
+            if j.get("voice_id") and (((j.get("template") or {}).get("narracao_voz") or {}).get("provider") != "chatterbox")
+        ]
+        if api_key and _probe_jobs:
+            _probe_job = _probe_jobs[0]
             _probe_voice_id_short = (_probe_job.get("voice_id", "") or "")[:12]
             production_log.adicionar_log(
-                f"PROBE ai33.pro: testando voz {_probe_job.get('voice_provider', '')}/{_probe_voice_id_short} "
-                f"(chunk 8k chars, 300s+180s)..."
+                f"PROBE ai33.pro: testando voz {_probe_job.get('voice_provider', '')}/{_probe_voice_id_short} (chunk 8k chars, 300s+180s)..."
             )
             try:
                 probe_result = narrator.testar_ai33pro(
@@ -807,46 +802,348 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
                     voice_pitch=_probe_job.get("voice_pitch", 0),
                 )
                 if probe_result.get("ok"):
-                    production_log.adicionar_log(
-                        f"PROBE ai33.pro: OK em {probe_result.get('elapsed_s', 0):.1f}s. Producao normal."
-                    )
+                    production_log.adicionar_log(f"PROBE ai33.pro: OK em {probe_result.get('elapsed_s', 0):.1f}s. Producao normal.")
                 else:
                     production_log.adicionar_log(
-                        f"PROBE ai33.pro: FALHOU - {probe_result.get('erro', '')}. "
-                        f"Ativando skip primario para canais com Inworld."
+                        f"PROBE ai33.pro: FALHOU - {probe_result.get('erro', '')}. Ativando skip primario para canais com Inworld."
                     )
-                    # Forca o gate skip a partir do primeiro canal
                     falhas_consec_primario = SKIP_PRIMARIO_THRESHOLD
             except Exception as _e:
-                production_log.adicionar_log(
-                    f"PROBE ai33.pro: exception inesperada - {_e}. Producao segue sem skip forcado."
-                )
+                production_log.adicionar_log(f"PROBE ai33.pro: exception inesperada - {_e}. Producao segue sem skip forcado.")
 
-        # --- DEPOIS: narrar os que faltam (sequencial) ---
-        # Heuristica anti-timeout: se 2 canais consecutivos cairem em fallback Inworld
-        # (Minimax via ai33.pro engasgando), os canais subsequentes da MESMA DATA
-        # pulam Minimax e vao direto pro Inworld, economizando ~20min/canal.
-        # Resetada a cada nova data (essa funcao roda 1x por data).
-        fallbacks_consecutivos = 0
-        forcar_inworld_resto_data = False
+        # === CONSUMER LOOP: narra cada canal ASSIM QUE seu roteiro fica pronto ===
+        # roteiro_pronto_q recebe (i, job, cel) da thread BG (Phase 1) a cada roteiro
+        # pronto - reaproveitado OU recem-gerado. Sentinel None marca fim.
+        production_log.adicionar_log("=== Consumer narracao: aguardando primeiro roteiro pronto ===")
+        while True:
+            if estado["cancelado"]:
+                break
+            try:
+                _q_item = roteiro_pronto_q.get(timeout=TIMEOUT_ROTEIRO)
+            except queue.Empty:
+                production_log.adicionar_log("[PIPELINE] Consumer: timeout aguardando roteiros, encerrando.")
+                break
+            if _q_item is None:
+                production_log.adicionar_log("[PIPELINE] Consumer: sentinel recebida (Phase 1 finalizada)")
+                break
 
-        for i, job in canais_sem_narracao:
+            i, job, cel = _q_item
             if estado["cancelado"]:
                 break
 
             tag = job["tag"]
-            cel = job.get("cel") or {}
             if not cel.get("roteiro"):
-                temas_data = _carregar_temas()
-                cel = temas_data.get("celulas", {}).get(job["key"], {})
+                temas_data_local = _carregar_temas()
+                cel = temas_data_local.get("celulas", {}).get(job["key"], {})
+
+            # Skip se MP3 ja existe -> enfileira render direto
+            _narr_path_exist = _encontrar_narracao(tag)
+            if _narr_path_exist:
+                production_log.atualizar_canal(i, etapa="narracao", etapa_detalhe=f"Existe ({_narr_path_exist.name})", narracao_path=str(_narr_path_exist))
+                production_log.adicionar_log(f"{tag}: Narracao existe ({_narr_path_exist.name})")
+                _enfileirar_render(i, job, _narr_path_exist)
+                continue
+
+            # Resume: canal ja concluido na execucao anterior
+            if is_resume:
+                existing_canais = existing_state.get("canais", [])
+                if i < len(existing_canais):
+                    existing_etapa = existing_canais[i].get("etapa", "")
+                    if existing_etapa in ("concluido", "pulado"):
+                        continue
 
             narr_nome = f"{tag}"
             narr_path = pasta_narracoes / f"{narr_nome}.mp3"
 
             voice_id = job["voice_id"]
+            _voz_cfg = (job.get("template") or {}).get("narracao_voz", {}) or {}
+
+            # === INWORLD PRIMARY (provider=inworld no template) ===
+            # Util pra canais DE — Chatterbox Turbo nao suporta alemao, Base eh lento
+            # (20-37min) vs Inworld ~3-5min. Quando provider=inworld no template:
+            # 1. Tenta Inworld direto
+            # 2. Se falhar, cai pra Chatterbox fallback (fallback_chatterbox.voice_ref)
+            # 3. Se Chatterbox falhar, cai pra Minimax (fluxo padrao)
+            _iw_primary = (_voz_cfg.get("provider") == "inworld" and _voz_cfg.get("voice_id"))
+            narr_succeeded = False
+            if _iw_primary:
+                inworld_key = config.get("inworld_api_key", "")
+                iw_voice = _voz_cfg.get("voice_id", "")
+                iw_model = _voz_cfg.get("model", "inworld-tts-1.5-max")
+                if inworld_key and iw_voice:
+                    production_log.atualizar_canal(i, etapa="narracao", etapa_detalhe="Inworld primary...", inicio=time.time())
+                    production_log.adicionar_log(f"{tag}: Inworld primary ({iw_voice})")
+                    try:
+                        import narrator_inworld
+                        iw_result = narrator_inworld.narrar_inworld_chunked(
+                            api_key=inworld_key,
+                            voice_id=iw_voice,
+                            texto=cel.get("roteiro", ""),
+                            nome_saida=narr_nome,
+                            pasta=str(pasta_narracoes),
+                            model=iw_model,
+                        )
+                        if iw_result.get("ok"):
+                            iw_path = Path(iw_result["audio_local"])
+                            production_log.atualizar_canal(i, etapa_detalhe=f"OK Inworld ({iw_path.name})", narracao_path=str(iw_path), erro="")
+                            production_log.adicionar_log(f"{tag}: Inworld primary OK -> {iw_path.name}")
+                            try:
+                                video_log_db.registrar_narracao(
+                                    data_ref, tag, "ok",
+                                    provider="inworld",
+                                    voice_id=iw_voice,
+                                    fallback=False,
+                                    chunks=iw_result.get("chunks", 0),
+                                    path=str(iw_path),
+                                    template=job.get("template", {}).get("nome", ""),
+                                    template_id=job.get("template_id", ""),
+                                )
+                            except Exception:
+                                pass
+                            _enfileirar_render(i, job, iw_path)
+                            continue  # proximo canal
+                        else:
+                            production_log.adicionar_log(f"{tag}: Inworld primary falhou ({(iw_result.get('erro') or '')[:120]}). Tentando Chatterbox fallback.")
+                    except Exception as _iwerr:
+                        production_log.adicionar_log(f"{tag}: Inworld primary exception ({_iwerr}). Tentando Chatterbox fallback.")
+                else:
+                    production_log.adicionar_log(f"{tag}: Inworld primary sem api_key/voice_id. Tentando Chatterbox.")
+
+            # === CHATTERBOX (PRIMARY se provider=chatterbox OU FALLBACK de Inworld primary) ===
+            # Lê voice_ref de fallback_chatterbox quando provider=inworld, senao do raiz.
+            if _iw_primary:
+                _fb_cb = _voz_cfg.get("fallback_chatterbox") or {}
+                _chatterbox_ref = (_fb_cb.get("voice_ref") or "").strip()
+                _cb_model_variant = (_fb_cb.get("chatterbox_model") or "base")
+                _cb_exag = float(_fb_cb.get("exaggeration", 0.5))
+                _cb_cfg = float(_fb_cb.get("cfg_weight", 0.5))
+            else:
+                _chatterbox_ref = (_voz_cfg.get("voice_ref") or "").strip()
+                _cb_model_variant = (_voz_cfg.get("chatterbox_model") or "base")
+                _cb_exag = float(_voz_cfg.get("exaggeration", 0.5))
+                _cb_cfg = float(_voz_cfg.get("cfg_weight", 0.5))
+            _use_chatterbox = bool(_chatterbox_ref) and (_voz_cfg.get("provider") == "chatterbox" or _iw_primary)
+            narr_succeeded = False
+            if _use_chatterbox:
+                try:
+                    import narration_queue
+                    import threading as _th
+                    cb_destino = str(pasta_narracoes / f"{narr_nome}.mp3")
+                    cb_result = None
+
+                    if narration_queue.REMOTE_MODE:
+                        # VPS enfileira, worker local processa.
+                        # RETRY: ate 2 tentativas Chatterbox antes de cair pro Inworld.
+                        # Resume aproveita chunks ja gerados na 2a tentativa.
+                        MAX_CB_RETRIES = 2
+                        TIMEOUT_NARR = 90 * 60  # timeout queue 90min cada
+                        for _cb_attempt in range(MAX_CB_RETRIES):
+                            production_log.atualizar_canal(i, etapa="narracao",
+                                etapa_detalhe=f"Chatterbox{f' (retry {_cb_attempt})' if _cb_attempt else ''}...",
+                                inicio=time.time())
+                            if _cb_attempt == 0:
+                                production_log.adicionar_log(
+                                    f"{tag}: Narracao Chatterbox enfileirada "
+                                    f"(voice_ref={Path(_chatterbox_ref).name})"
+                                )
+                            else:
+                                production_log.adicionar_log(
+                                    f"{tag}: Retry Chatterbox {_cb_attempt}/{MAX_CB_RETRIES-1} (resume chunks)"
+                                )
+                            _evt = _th.Event()
+                            _holder = {"resultado": None, "erro": None}
+                            def _on_done(resultado):
+                                _holder["resultado"] = resultado
+                                _evt.set()
+                            def _on_error(erro):
+                                _holder["erro"] = erro
+                                _evt.set()
+                            job_id_narr = f"{tag}_{data_ref}_narr_{_cb_attempt}"
+                            narration_queue.enfileirar(
+                                job_id=job_id_narr,
+                                texto=cel.get("roteiro", ""),
+                                voice_ref=_chatterbox_ref,
+                                nome_saida=narr_nome,
+                                destino_remoto=cb_destino,
+                                exaggeration=_cb_exag,
+                                cfg_weight=_cb_cfg,
+                                model_variant=_cb_model_variant,
+                                canal_idx=i,  # pra worker reportar "Chatterbox N/total" no Monitor
+                                on_done=_on_done,
+                                on_error=_on_error,
+                            )
+                            # Wait CANCELAVEL: checa estado["cancelado"] a cada 10s em
+                            # vez de bloquear TIMEOUT_NARR direto. Fix 29/05: o cancel
+                            # nao interrompia _evt.wait, entao narracao travada (orfa
+                            # por reboot) so destravava com restart do uvicorn. Agora o
+                            # botao Cancelar funciona em ate 10s. Combinado com o stale
+                            # recovery de 15min (narration_queue), orfao se auto-corrige.
+                            _waited = 0
+                            _POLL = 10
+                            _wait_status = "timeout"
+                            while _waited < TIMEOUT_NARR:
+                                if _evt.wait(timeout=min(_POLL, TIMEOUT_NARR - _waited)):
+                                    _wait_status = "done"
+                                    break
+                                if estado["cancelado"]:
+                                    _wait_status = "cancel"
+                                    break
+                                _waited += _POLL
+                            if _wait_status == "cancel":
+                                production_log.adicionar_log(f"{tag}: Narracao cancelada pelo usuario")
+                                cb_result = {"ok": False, "erro": "cancelado pelo usuario"}
+                            elif _wait_status == "timeout":
+                                production_log.adicionar_log(
+                                    f"{tag}: Chatterbox queue TIMEOUT {TIMEOUT_NARR//60}min (attempt {_cb_attempt+1})"
+                                )
+                                cb_result = {"ok": False, "erro": f"timeout queue {TIMEOUT_NARR//60}min"}
+                            elif _holder["resultado"]:
+                                cb_result = {"ok": True, **_holder["resultado"]}
+                            else:
+                                cb_result = {"ok": False, "erro": _holder["erro"] or "erro desconhecido"}
+                            if cb_result.get("ok"):
+                                break  # sucesso, sai do retry
+                            if _wait_status == "cancel":
+                                break  # cancelado: nao re-tenta
+                            # falhou: se tem mais retry, loga e tenta de novo
+                            if _cb_attempt < MAX_CB_RETRIES - 1:
+                                production_log.adicionar_log(
+                                    f"{tag}: Chatterbox falhou ({(cb_result.get('erro') or '')[:80]}). Retry com resume..."
+                                )
+                            else:
+                                production_log.adicionar_log(
+                                    f"{tag}: Chatterbox falhou apos {MAX_CB_RETRIES} tentativas. Caindo para Inworld."
+                                )
+                    else:
+                        # LOCAL: chama subprocess direto (modo dev)
+                        import narrator_chatterbox
+                        if not narrator_chatterbox.disponivel():
+                            production_log.adicionar_log(
+                                f"{tag}: Chatterbox venv indisponivel local. Caindo para fluxo padrao."
+                            )
+                            cb_result = {"ok": False, "erro": "venv indisponivel"}
+                        else:
+                            production_log.atualizar_canal(i, etapa="narracao",
+                                etapa_detalhe="Chatterbox (local GPU)...", inicio=time.time())
+                            production_log.adicionar_log(
+                                f"{tag}: Narracao via Chatterbox local "
+                                f"(voice_ref={Path(_chatterbox_ref).name})"
+                            )
+                            cb_result = narrator_chatterbox.narrar_chatterbox(
+                                texto=cel.get("roteiro", ""),
+                                voice_ref=_chatterbox_ref,
+                                nome_saida=narr_nome,
+                                destino_final=cb_destino,
+                                exaggeration=_cb_exag,
+                                cfg_weight=_cb_cfg,
+                                model_variant=_cb_model_variant,
+                            )
+
+                    if cb_result and cb_result.get("ok"):
+                        narr_path_local = Path(cb_destino)
+                        if narr_path_local.exists():
+                            production_log.atualizar_canal(i,
+                                etapa_detalhe=f"Chatterbox OK ({narr_path_local.name})",
+                                narracao_path=str(narr_path_local))
+                            production_log.adicionar_log(
+                                f"{tag}: Chatterbox OK -> {narr_path_local.name} "
+                                f"({cb_result.get('duracao_seg',0):.0f}s audio, "
+                                f"{cb_result.get('tempo_geracao_seg',0)/60:.1f}min gen)"
+                            )
+                            try:
+                                video_log_db.registrar_narracao(
+                                    data_ref, tag, "ok",
+                                    provider="chatterbox",
+                                    voice_id=Path(_chatterbox_ref).stem,
+                                    fallback=False,
+                                    chunks=cb_result.get("chunks", 0),
+                                    path=str(narr_path_local),
+                                    template=job.get("template", {}).get("nome", ""),
+                                    template_id=job.get("template_id", ""),
+                                )
+                            except Exception:
+                                pass
+                            _enfileirar_render(i, job, narr_path_local)
+                            narr_succeeded = True
+                            falhas_consec_primario = 0  # primario novo (Chatterbox) OK
+                            continue  # proximo canal
+                        else:
+                            production_log.adicionar_log(
+                                f"{tag}: Chatterbox reportou OK mas MP3 nao chegou em {cb_destino}. "
+                                f"Caindo para fluxo padrao."
+                            )
+                    elif cb_result:
+                        production_log.adicionar_log(
+                            f"{tag}: Chatterbox falhou ({(cb_result.get('erro') or '')[:120]}). "
+                            f"Caindo para Inworld/Minimax..."
+                        )
+                except Exception as _cberr:
+                    production_log.adicionar_log(
+                        f"{tag}: Chatterbox exception ({_cberr}). Caindo para Inworld."
+                    )
+
+            # === INWORLD (1o FALLBACK apos Chatterbox falhar) ===
+            # Decisao Piter 2026-05-13: Inworld vem antes do Minimax pq Minimax
+            # via ai33.pro tem instabilidade alta (timeouts frequentes).
+            fallback_cfg = (job.get("template") or {}).get("narracao_voz", {}).get("fallback") or {}
+            inworld_key = config.get("inworld_api_key", "")
+            inworld_succeeded = False
+            if fallback_cfg.get("provider") == "inworld" and inworld_key and fallback_cfg.get("voice_id"):
+                fb_voice = fallback_cfg.get("voice_id", "")
+                fb_model = fallback_cfg.get("model", "inworld-tts-1.5-max")
+                production_log.atualizar_canal(i, etapa="narracao", etapa_detalhe="Inworld (fallback 1)...", inicio=time.time())
+                production_log.adicionar_log(f"{tag}: Inworld 1o fallback ({fb_voice})")
+                try:
+                    import narrator_inworld
+                    fb_result = narrator_inworld.narrar_inworld_chunked(
+                        api_key=inworld_key,
+                        voice_id=fb_voice,
+                        texto=cel.get("roteiro", ""),
+                        nome_saida=narr_nome,
+                        pasta=str(pasta_narracoes),
+                        model=fb_model,
+                    )
+                    if fb_result.get("ok"):
+                        fb_path = Path(fb_result["audio_local"])
+                        production_log.atualizar_canal(i, etapa_detalhe=f"OK Inworld ({fb_path.name})", narracao_path=str(fb_path), erro="")
+                        production_log.adicionar_log(f"{tag}: Inworld OK -> {fb_path.name}")
+                        try:
+                            video_log_db.registrar_narracao(
+                                data_ref, tag, "ok",
+                                provider="inworld",
+                                voice_id=fb_voice,
+                                fallback=True,
+                                chunks=fb_result.get("chunks", 0),
+                                path=str(fb_path),
+                                template=job.get("template", {}).get("nome", ""),
+                                template_id=job.get("template_id", ""),
+                            )
+                        except Exception:
+                            pass
+                        _enfileirar_render(i, job, fb_path)
+                        inworld_succeeded = True
+                        continue  # proximo canal
+                    else:
+                        production_log.adicionar_log(f"{tag}: Inworld falhou ({fb_result.get('erro','')[:120]}). Caindo para Minimax 2o fallback.")
+                        try:
+                            video_log_db.registrar_narracao(
+                                data_ref, tag, "erro",
+                                provider="inworld",
+                                voice_id=fb_voice,
+                                fallback=True,
+                                erro=fb_result.get("erro",""),
+                                template=job.get("template", {}).get("nome", ""),
+                                template_id=job.get("template_id", ""),
+                            )
+                        except Exception:
+                            pass
+                except Exception as _iwerr:
+                    production_log.adicionar_log(f"{tag}: Inworld exception ({_iwerr}). Caindo para Minimax 2o fallback.")
+
+            # === MINIMAX 2o FALLBACK (so se Inworld falhar OU nao configurado) ===
             if not voice_id:
-                production_log.atualizar_canal(i, etapa="erro", erro="Sem voz configurada")
-                production_log.adicionar_log(f"{tag}: ERRO - sem voz")
+                production_log.atualizar_canal(i, etapa="erro", erro="Sem voz Minimax E Inworld falhou/nao config")
+                production_log.adicionar_log(f"{tag}: ERRO - sem voice_id Minimax e Inworld nao serviu")
                 continue
 
             if not api_key:
@@ -854,7 +1151,7 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
                 continue
 
             MAX_NARR_RETRIES = 2
-            narr_succeeded = False  # default p/ caso o for_loop abaixo nao executar
+            # narr_succeeded ja foi inicializado acima (default False se Chatterbox nao OK)
 
             # Gate skip: se 2+ canais seguidos cairam em fallback E este canal tem
             # Inworld configurado, pula direto pro Inworld (zera retries primario).
@@ -1044,70 +1341,18 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
             if not _skip_primario:
                 falhas_consec_primario += 1
 
-            # === FALLBACK INWORLD ===
-            # Todos os retries do provedor primario falharam. Tenta Inworld se configurado.
-            fallback_cfg = (job.get("template") or {}).get("narracao_voz", {}).get("fallback")
-            inworld_key = config.get("inworld_api_key", "")
-            if fallback_cfg and fallback_cfg.get("provider") == "inworld" and inworld_key:
-                fb_voice = fallback_cfg.get("voice_id", "")
-                fb_model = fallback_cfg.get("model", "inworld-tts-1.5-max")
-                if fb_voice:
-                    production_log.atualizar_canal(i, etapa="narracao", etapa_detalhe="Fallback Inworld...", inicio=time.time())
-                    production_log.adicionar_log(f"{tag}: Fallback Inworld ({fb_voice}) apos {MAX_NARR_RETRIES} falhas no primario")
-                    try:
-                        import narrator_inworld
-                        fb_result = narrator_inworld.narrar_inworld_chunked(
-                            api_key=inworld_key,
-                            voice_id=fb_voice,
-                            texto=cel.get("roteiro", ""),
-                            nome_saida=narr_nome,
-                            pasta=str(pasta_narracoes),
-                            model=fb_model,
-                        )
-                        if fb_result.get("ok"):
-                            fb_path = Path(fb_result["audio_local"])
-                            production_log.atualizar_canal(i, etapa_detalhe=f"OK fallback ({fb_path.name})", narracao_path=str(fb_path), erro="")
-                            production_log.adicionar_log(f"{tag}: Fallback Inworld OK -> {fb_path.name}")
-                            try:
-                                video_log_db.registrar_narracao(
-                                    data_ref, tag, "ok",
-                                    provider="inworld",
-                                    voice_id=fb_voice,
-                                    fallback=True,
-                                    chunks=fb_result.get("chunks", 0),
-                                    path=str(fb_path),
-                                    template=job.get("template", {}).get("nome", ""),
-                                    template_id=job.get("template_id", ""),
-                                )
-                            except Exception:
-                                pass
-                            _enfileirar_render(i, job, fb_path)
-                            # Conta como fallback consecutivo (heuristica anti-timeout pra resto da data)
-                            fallbacks_consecutivos += 1
-                            if fallbacks_consecutivos >= 2 and not forcar_inworld_resto_data:
-                                forcar_inworld_resto_data = True
-                                production_log.adicionar_log(f"!!! 2 fallbacks consecutivos detectados — proximos canais da data {data_ref} pulam Minimax (vao direto pro Inworld). Economiza ~20min/canal de timeout.")
-                            continue
-                        else:
-                            production_log.adicionar_log(f"{tag}: Fallback Inworld falhou - {fb_result.get('erro', '')}")
-                            try:
-                                video_log_db.registrar_narracao(
-                                    data_ref, tag, "erro",
-                                    provider="inworld",
-                                    voice_id=fb_voice,
-                                    fallback=True,
-                                    erro=fb_result.get("erro", ""),
-                                    template=job.get("template", {}).get("nome", ""),
-                                    template_id=job.get("template_id", ""),
-                                )
-                            except Exception:
-                                pass
-                    except Exception as e:
-                        production_log.adicionar_log(f"{tag}: Fallback Inworld exception - {e}")
+            # (Inworld ja foi tentado como 1o fallback acima — se chegamos aqui sem
+            # narr_succeeded, Minimax tambem falhou e canal fica em erro)
 
         # Garantir narracao nao ficou travada
         narrator.estado_narracao_auto["ativo"] = False
         narrator.estado_narracao_auto["status"] = "idle"
+
+        # Garantir que thread Phase 1 (roteiros) terminou — em geral ja terminou,
+        # mas garante caso o consumer tenha saido cedo por cancelamento/timeout
+        if _roteiro_thread.is_alive():
+            production_log.adicionar_log(f"Aguardando thread Phase 1 (roteiros) terminar...")
+            _roteiro_thread.join(timeout=TIMEOUT_ROTEIRO)
 
         # Esperar todos os renders enfileirados terminarem
         production_log.adicionar_log(f"Aguardando {len(_render_pendentes)} renders na fila...")
@@ -1154,22 +1399,10 @@ def _produzir_loop(data_idx_inicio: int, ordem_colunas: list = None):
     estado["loop_data_atual"] = data_idx_inicio
     estado["loop_total"] = total_datas - data_idx_inicio
 
-    # Auto-management: subir pods se nao tiver nenhum rodando
-    if render_queue.REMOTE_MODE:
-        try:
-            import pods_manager
-            atuais = [p for p in pods_manager.listar_pods() if p.get("status") == "RUNNING"]
-            if not atuais:
-                production_log.adicionar_log("LIFECYCLE: Nenhum pod ativo. Subindo 3 pods (boot ~3min)...")
-                r = pods_manager.start_pods(n=3, aguardar_polls=True)
-                production_log.adicionar_log(f"LIFECYCLE: {r.get('pods_prontos',0)}/{r.get('pods_criados',0)} pods bootstrapping. Aguardando workers conectarem (~3min adicional)...")
-                # Espera workers reportarem polls
-                time.sleep(180)  # buffer pra apt+pip+worker bundle terminar
-            else:
-                production_log.adicionar_log(f"LIFECYCLE: {len(atuais)} pods ja rodando, reaproveitando")
-            pods_manager.marcar_atividade()
-        except Exception as e:
-            production_log.adicionar_log(f"LIFECYCLE: AVISO subir pods falhou ({e}); produzindo mesmo assim (workers podem nao existir)")
+    # Lazy start: pods sobem soh quando primeiro render entrar na fila
+    # via _iniciar_pods_se_necessario() dentro de _enfileirar_render.
+    # Removido em 2026-05-13: bloco antigo que subia 3 pods + sleep(180)
+    # bloqueava o loop por 3min mesmo com worker local pollando.
 
     for data_idx in range(data_idx_inicio, total_datas):
         if estado["cancelado"]:
@@ -1235,15 +1468,8 @@ def _produzir_loop(data_idx_inicio: int, ordem_colunas: list = None):
     estado["loop"] = False
     estado["ativo"] = False
 
-    # Auto-management: parar pods quando produção terminar (loop completo ou cancelada)
-    if render_queue.REMOTE_MODE:
-        try:
-            import pods_manager
-            production_log.adicionar_log("LIFECYCLE: Produção encerrada. Parando todos os pods...")
-            r = pods_manager.stop_all_pods()
-            production_log.adicionar_log(f"LIFECYCLE: {r.get('parados', 0)} pods parados (custo GPU=$0)")
-        except Exception as e:
-            production_log.adicionar_log(f"LIFECYCLE: AVISO parar pods falhou ({e}); pare manualmente via /api/pods/stop")
+    # POD MANAGEMENT DESABILITADO (2026-05-13 por decisao Piter):
+    # RunPod nao eh usado. Worker local processa tudo. Stop-all-pods removido.
 
 
 def _iniciar_pods_se_necessario():
@@ -1297,13 +1523,15 @@ def iniciar_producao(data_idx: int, temas_data: dict = None, ordem_colunas: list
     }
     production_log._salvar()
 
-    # Wrapper que sobe pods antes da função real (em background pra não atrasar API response)
+    # Wrapper LAZY: NAO sobe pods preemptivamente. Pod soh sobe quando o
+    # primeiro render entrar na fila (chamada dentro de _enfileirar_render).
+    # Antes, pod subia no inicio e ficava idle durante ~60-90min (roteiros +
+    # narracoes) torrando $0.65/h. Lazy start economiza ~$0.80-1.20 por
+    # produção de 8 canais.
     def _wrap_loop(*args):
-        _iniciar_pods_se_necessario()
         _produzir_loop(*args)
 
     def _wrap_data(*args):
-        _iniciar_pods_se_necessario()
         produzir_data_completa(*args)
         # Quando termina (loop=false single data), parar pods também
         if render_queue.REMOTE_MODE:
