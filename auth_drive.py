@@ -50,9 +50,9 @@ def main():
 
     creds = flow.run_local_server(
         port=0,
-        open_browser=True,
-        authorization_prompt_message="Autorize no browser. URL: {url}",
-        success_message="Autorizado! Pode fechar esta janela.",
+        open_browser=False,
+        authorization_prompt_message="\n>>> COPIE A URL ABAIXO E COLE NO NAVEGADOR LOGADO EM pitermoreiraviolim@gmail.com:\n\n{url}\n\nAguardando autorizacao (callback automatico apos voce clicar 'Permitir')...\n",
+        success_message="Autorizado! Pode fechar esta janela do navegador.",
     )
 
     # Salva token

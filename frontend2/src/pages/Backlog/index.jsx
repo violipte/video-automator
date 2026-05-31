@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useMemo } from 'react'
 import { PageHeader } from '../../components/Layout/AppShell'
 import { Card, CardHeader, CardBody } from '../../components/Common/Card'
 import { Button } from '../../components/Common/Button'
@@ -16,11 +16,29 @@ export function Backlog() {
   const [items, setItems] = useState([])
   const [loading, setLoading] = useState(true)
   const [filter, setFilter] = useState('pendentes')
+  const [searchTitulo, setSearchTitulo] = useState('')
+  const [searchThumb, setSearchThumb] = useState('')
   const [linkInput, setLinkInput] = useState('')
   const [tituloInput, setTituloInput] = useState('')
   const [thumbInput, setThumbInput] = useState('')
   const [adding, setAdding] = useState(false)
   const [configOpen, setConfigOpen] = useState(false)
+
+  // Filtra localmente por titulo E thumb separadamente (AND quando ambos preenchidos)
+  const filteredItems = useMemo(() => {
+    const qT = searchTitulo.trim().toLowerCase()
+    const qH = searchThumb.trim().toLowerCase()
+    if (!qT && !qH) return items
+    return items.filter(it => {
+      const titulo = (it.titulo || '').toLowerCase()
+      const thumb = (it.texto_thumb || '').toLowerCase()
+      if (qT && !titulo.includes(qT)) return false
+      if (qH && !thumb.includes(qH)) return false
+      return true
+    })
+  }, [items, searchTitulo, searchThumb])
+
+  const hasSearch = !!(searchTitulo.trim() || searchThumb.trim())
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -215,12 +233,51 @@ export function Backlog() {
             { value: 'concluidos', label: 'Concluídos' },
           ]}
         />
+        <div style={{ position: 'relative', display: 'inline-flex', alignItems: 'center', flex: 1, minWidth: 180, maxWidth: 280 }}>
+          <Input
+            placeholder="🔎 Buscar título..."
+            value={searchTitulo}
+            onChange={(e) => setSearchTitulo(e.target.value)}
+            style={{ width: '100%', paddingRight: searchTitulo ? 32 : 12 }}
+          />
+          {searchTitulo && (
+            <button
+              type="button"
+              onClick={() => setSearchTitulo('')}
+              title="Limpar busca de título"
+              style={{ position: 'absolute', right: 6, background: 'transparent', border: 'none', color: 'var(--text-sec)', cursor: 'pointer', fontSize: 14, padding: '2px 6px' }}
+            >✕</button>
+          )}
+        </div>
+        <div style={{ position: 'relative', display: 'inline-flex', alignItems: 'center', flex: 1, minWidth: 180, maxWidth: 280 }}>
+          <Input
+            placeholder="🖼 Buscar thumb..."
+            value={searchThumb}
+            onChange={(e) => setSearchThumb(e.target.value)}
+            style={{ width: '100%', paddingRight: searchThumb ? 32 : 12 }}
+          />
+          {searchThumb && (
+            <button
+              type="button"
+              onClick={() => setSearchThumb('')}
+              title="Limpar busca de thumb"
+              style={{ position: 'absolute', right: 6, background: 'transparent', border: 'none', color: 'var(--text-sec)', cursor: 'pointer', fontSize: 14, padding: '2px 6px' }}
+            >✕</button>
+          )}
+        </div>
         <Button variant="ghost" size="sm" onClick={load}>↻ Atualizar</Button>
-        <span className="backlog-count">{items.length} item{items.length !== 1 ? 's' : ''}</span>
+        <span className="backlog-count">
+          {hasSearch
+            ? `${filteredItems.length}/${items.length} item${items.length !== 1 ? 's' : ''}`
+            : `${items.length} item${items.length !== 1 ? 's' : ''}`}
+        </span>
       </div>
 
       <BacklogTable
-        items={items}
+        items={filteredItems}
+        totalItems={items.length}
+        searchTitulo={searchTitulo}
+        searchThumb={searchThumb}
         loading={loading}
         onUpdate={updateField}
         onToggle={toggleStatus}
@@ -233,7 +290,7 @@ export function Backlog() {
   )
 }
 
-function BacklogTable({ items, loading, onUpdate, onToggle, onDelete, onReenriquecer }) {
+function BacklogTable({ items, totalItems, searchTitulo, searchThumb, loading, onUpdate, onToggle, onDelete, onReenriquecer }) {
   if (loading && !items.length) {
     return (
       <Card padding="lg">
@@ -246,10 +303,21 @@ function BacklogTable({ items, loading, onUpdate, onToggle, onDelete, onReenriqu
   }
 
   if (!items.length) {
+    // Diferencia "lista vazia" de "busca sem match"
+    const qT = (searchTitulo || '').trim()
+    const qH = (searchThumb || '').trim()
+    const hasSearch = (qT || qH) && totalItems > 0
+    let msg = 'Nenhum item. Cole um link YT acima pra adicionar.'
+    if (hasSearch) {
+      const partes = []
+      if (qT) partes.push(`título="${qT}"`)
+      if (qH) partes.push(`thumb="${qH}"`)
+      msg = `Nenhum item bate com ${partes.join(' + ')} (de ${totalItems} no total).`
+    }
     return (
       <Card padding="lg">
         <div style={{ textAlign: 'center', padding: 40, color: 'var(--text-sec)' }}>
-          Nenhum item. Cole um link YT acima pra adicionar.
+          {msg}
         </div>
       </Card>
     )

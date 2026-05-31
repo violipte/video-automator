@@ -276,24 +276,40 @@ def corrigir_srt(srt_path: str, idioma: str, template_id: str = None, maiuscula:
     # Remover legendas vazias
     legendas = [leg for leg in legendas if leg.texto.strip()]
 
-    # Dividir blocos onde a 2ª linha estourou max_chars (evitar 3+ linhas na tela)
+    # Dividir blocos RECURSIVAMENTE ate cada linha caber em max_chars
+    # E cada bloco ter <= max_linhas. Cobre casos onde palavras alemas
+    # compostas (ex: "SPIRITUELLEN WIDERSTAND") estouram limite e libass
+    # quebra automaticamente em 3-4 linhas na tela.
+    def _bloco_excede(texto: str) -> bool:
+        """True se qualquer linha do bloco excede max_chars OU se ha mais que max_linhas linhas."""
+        linhas_b = texto.split("\n")
+        if len(linhas_b) > max_linhas:
+            return True
+        for l in linhas_b:
+            if len(l) > max_chars:
+                return True
+        return False
+
+    def _dividir_recursivo(leg: Legenda, depth: int = 0) -> list:
+        """Quebra leg em blocos sequenciais ate cada um caber. depth limita a 8 niveis."""
+        if depth > 8 or not _bloco_excede(leg.texto):
+            return [leg]
+        # Re-quebrar com mais granularidade: dividir palavras em metade temporal
+        todas = leg.texto.replace("\n", " ").split()
+        if len(todas) < 2:
+            return [leg]  # nao da pra dividir 1 palavra
+        meio = len(todas) // 2
+        texto1 = _quebrar_linhas(" ".join(todas[:meio]), max_chars, max_linhas)
+        texto2 = _quebrar_linhas(" ".join(todas[meio:]), max_chars, max_linhas)
+        ts_meio = _interpolar_timestamp(leg.inicio, leg.fim, 0.5)
+        leg1 = Legenda(0, leg.inicio, ts_meio, texto1)
+        leg2 = Legenda(0, ts_meio, leg.fim, texto2)
+        # Recursao: cada metade pode ainda exceder
+        return _dividir_recursivo(leg1, depth+1) + _dividir_recursivo(leg2, depth+1)
+
     legendas_final = []
     for leg in legendas:
-        linhas = leg.texto.split("\n")
-        # Se alguma linha estoura max_chars, dividir o bloco
-        if max_linhas >= 2 and len(linhas) == 2 and len(linhas[1]) > max_chars:
-            # Dividir em 2 blocos, cada um com 1 ou 2 linhas que cabem
-            todas_palavras = leg.texto.replace("\n", " ").split()
-            # Dividir no meio temporal
-            meio = len(todas_palavras) // 2
-            texto1 = _quebrar_linhas(" ".join(todas_palavras[:meio]), max_chars, max_linhas)
-            texto2 = _quebrar_linhas(" ".join(todas_palavras[meio:]), max_chars, max_linhas)
-            # Calcular timestamp do meio
-            ts_meio = _interpolar_timestamp(leg.inicio, leg.fim, 0.5)
-            legendas_final.append(Legenda(0, leg.inicio, ts_meio, texto1))
-            legendas_final.append(Legenda(0, ts_meio, leg.fim, texto2))
-        else:
-            legendas_final.append(leg)
+        legendas_final.extend(_dividir_recursivo(leg))
 
     srt_corrigido = _legendas_para_srt(legendas_final)
     saida = TEMP_DIR / f"{srt_path.stem}_fixed.srt"

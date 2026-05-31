@@ -92,9 +92,14 @@ tar -xzf /tmp/worker.tar.gz -C /opt/worker
 echo "  Bundle extraido. Arquivos:"
 ls /opt/worker | head -10
 
-# 4. Cria dirs no network volume + valida assets
-echo "[4/5] Validando network volume + assets..."
-mkdir -p /workspace/temp /workspace/cache /workspace/exports /opt/worker/logs
+# 4. Cria dirs - TEMP/CACHE em DISCO LOCAL (NVMe), EXPORT no Network Volume
+# CRITICO 2026-05-11: cache/temp em /workspace/* (MooseFS rede) causava
+# render 2.3x mais lento que local porque cada um dos ~200 clips Ken Burns
+# e arquivos temp pequenos sofriam latency de network filesystem.
+# Solucao: cache/temp ficam em /root/worker-* (disco local NVMe do container),
+# so o MP4 final vai pra /workspace/exports (rede, write sequencial grande).
+echo "[4/5] Criando dirs locais (cache/temp em NVMe, exports em MooseFS)..."
+mkdir -p /root/worker-temp /root/worker-cache /workspace/exports /opt/worker/logs
 
 if [ -d /workspace/assets ]; then
     echo "  Assets OK. Topo:"
@@ -114,8 +119,8 @@ curl -sf -m 10 "$VPS_URL/api/health" > /dev/null && echo "  VPS OK" || echo "  A
 export VPS_URL="$VPS_URL"
 export WORKER_TOKEN="$WORKER_TOKEN"
 export POLL_INTERVAL="${POLL_INTERVAL:-5}"
-export TEMP_DIR="${TEMP_DIR:-/workspace/temp}"
-export CACHE_DIR="${CACHE_DIR:-/workspace/cache}"
+export TEMP_DIR="${TEMP_DIR:-/root/worker-temp}"
+export CACHE_DIR="${CACHE_DIR:-/root/worker-cache}"
 export EXPORT_BASE="${EXPORT_BASE:-/workspace/exports}"
 export ASSETS_BASE_REMAP="${ASSETS_BASE_REMAP:-F:/Canal Dark=/workspace/assets|F:\\Canal Dark=/workspace/assets}"
 export REMOTE_MODE=true
@@ -133,8 +138,8 @@ cat > /opt/worker/.env <<EOF
 WORKER_TOKEN="${WORKER_TOKEN}"
 VPS_URL="${VPS_URL}"
 POLL_INTERVAL="${POLL_INTERVAL:-5}"
-TEMP_DIR="${TEMP_DIR:-/workspace/temp}"
-CACHE_DIR="${CACHE_DIR:-/workspace/cache}"
+TEMP_DIR="${TEMP_DIR:-/root/worker-temp}"
+CACHE_DIR="${CACHE_DIR:-/root/worker-cache}"
 EXPORT_BASE="${EXPORT_BASE:-/workspace/exports}"
 ASSETS_BASE_REMAP="${ASSETS_BASE_REMAP}"
 REMOTE_MODE="true"

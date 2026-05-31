@@ -25,7 +25,7 @@ if sys.platform == "win32":
         if _cublas.exists():
             ctypes.CDLL(str(_cublas))
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -35,6 +35,7 @@ import narrator
 import production_log
 import orchestrator
 import render_queue
+import narration_queue
 
 # Imports GPU — so necessarios em modo local (render_queue.REMOTE_MODE=False)
 if not render_queue.REMOTE_MODE:
@@ -1056,6 +1057,120 @@ def obter_roteiro_celula(key: str):
         return {"roteiro": "", "chars": 0}
 
 
+@app.post("/api/temas/cascade-novos-canais")
+def cascade_ash_pcc_eoa_endpoint():
+    """Adapta ASH/PCC (a partir de NARC) e EOA (a partir de NPD) em todas as datas.
+
+    So preenche celulas vazias. Pula celulas ja preenchidas e fontes sem titulo.
+    """
+    try:
+        import coringa_distribuidor
+        return coringa_distribuidor.cascade_ash_pcc_eoa_todas_datas()
+    except Exception as e:
+        return {"ok": False, "erro": str(e)}
+
+
+@app.get("/api/temas/lookup")
+def lookup_celula_temas(canal: str, data: str):
+    """Lookup direto pra automação de upload: dado (canal, data), retorna metadata da célula.
+
+    Pensado pra outros Claudes/scripts que precisam de titulo+thumb+caminho do MP4
+    sem ter que parsear a grid inteira.
+
+    Query params:
+      canal: nome da coluna (ex: ASH, EN, EOA, NARC)
+      data: formato DD/MM/YYYY (ex: 21/05/2026)
+
+    Returns:
+      {
+        "ok": true,
+        "canal": "ASH",
+        "data": "21/05/2026",
+        "tema": "...",
+        "titulo": "...",
+        "thumb": "F:/path/to/thumb.jpg" ou "" se vazio,
+        "roteiro_chars": 29659,
+        "video_path": "F:/Canal Dark/Automator Exports/2026-05-21/Videos/ASH_20260521_01.mp4",
+        "video_existe": true,
+        "template_id": "ash",
+        "pipeline_id": "whispers-from-ashtar",
+        "drive_folder_id": "11PwXo5_UZ16ejh91SjYaYboeq49T_o1N"  // se template tiver
+      }
+    Erro: {"ok": false, "erro": "..."}
+    """
+    try:
+        data_grid = scriptwriter.carregar_temas()
+        if not isinstance(data_grid, dict):
+            return {"ok": False, "erro": "grid invalida"}
+        colunas = data_grid.get("colunas", [])
+        linhas = data_grid.get("linhas", [])
+        celulas = data_grid.get("celulas", {})
+
+        col_idx = next((i for i, c in enumerate(colunas) if c.get("nome") == canal), None)
+        if col_idx is None:
+            return {"ok": False, "erro": f"canal '{canal}' nao encontrado"}
+        row_idx = next((i for i, l in enumerate(linhas) if l.get("data") == data), None)
+        if row_idx is None:
+            return {"ok": False, "erro": f"data '{data}' nao encontrada"}
+
+        cel = celulas.get(f"{row_idx}_{col_idx}", {}) or {}
+        col = colunas[col_idx]
+
+        # Monta video_path baseado na convencao: {EXPORT_BASE}/{YYYY-MM-DD}/Videos/{TAG}_{YYYYMMDD}_01.mp4
+        parts = data.split("/")
+        if len(parts) == 3:
+            dd, mm, yyyy = parts
+            data_pasta = f"{yyyy}-{mm}-{dd}"
+            data_ymd = f"{yyyy}{mm}{dd}"
+        else:
+            data_pasta = data_ymd = ""
+
+        export_base = Path("F:/Canal Dark/Automator Exports")
+        try:
+            from orchestrator import _export_base as _eb
+            export_base = _eb()
+        except Exception:
+            pass
+
+        tag = col.get("nome", canal)
+        video_path = str(export_base / data_pasta / "Videos" / f"{tag}_{data_ymd}_01.mp4") if data_pasta else ""
+        video_existe = bool(video_path) and Path(video_path).exists()
+
+        # Pega tambem dados do template (drive_folder_id, etc)
+        template_id = col.get("template_id", "")
+        drive_folder_id = ""
+        if template_id:
+            try:
+                with open(Path(__file__).parent / "templates.json", "r", encoding="utf-8") as _f:
+                    tmpls = json.load(_f)
+                if isinstance(tmpls, list):
+                    tmpl = next((x for x in tmpls if isinstance(x, dict) and x.get("id") == template_id), {})
+                elif isinstance(tmpls, dict):
+                    tmpl = tmpls.get(template_id, {})
+                else:
+                    tmpl = {}
+                drive_folder_id = (tmpl.get("drive_config", {}) or {}).get("folder_id", "")
+            except Exception:
+                pass
+
+        return {
+            "ok": True,
+            "canal": canal,
+            "data": data,
+            "tema": cel.get("tema", ""),
+            "titulo": cel.get("titulo", ""),
+            "thumb": cel.get("thumb", ""),
+            "roteiro_chars": len(cel.get("roteiro", "") or ""),
+            "video_path": video_path,
+            "video_existe": video_existe,
+            "template_id": template_id,
+            "pipeline_id": cel.get("pipeline_id") or col.get("pipeline_id", ""),
+            "drive_folder_id": drive_folder_id,
+        }
+    except Exception as e:
+        return {"ok": False, "erro": str(e)}
+
+
 @app.post("/api/temas")
 async def salvar_temas_grid(request: Request):
     """Salva o grid inteiro de temas. Aceita {linhas, colunas, celulas} direto ou {temas: {...}} aninhado.
@@ -1606,6 +1721,21 @@ async def render_worker_progress(request: Request):
     if job_id:
         render_queue.tocar_job_remoto(job_id)
 
+    # Heartbeat tambem marca worker como "vivo" pro lifecycle do orchestrator.
+    # Sem isso, durante um render longo (~25min) o worker nao polla /next-job,
+    # _workers_seen fica stale, e _iniciar_pods_se_necessario interpreta como
+    # "nenhum worker pollando" -> sobe pods RunPod desnecessarios. Bug visto
+    # em 2026-05-13 com 3 pods subindo no meio da producao local.
+    # Tenta extrair worker_id do User-Agent ou header opcional.
+    try:
+        wid = (request.headers.get("X-Worker-Id") or "").strip()
+        if not wid:
+            # Sem header, marcar como worker generico (consome 1 slot de polls_recentes)
+            wid = "render-worker-progress"
+        render_queue.marcar_worker_visto(wid)
+    except Exception:
+        pass
+
     if canal_idx is not None:
         kwargs = {"etapa_detalhe": etapa_detalhe, "progresso": progresso}
         # Resetar timer da UI em qualquer chamada (antes era so progresso<=10).
@@ -1643,6 +1773,168 @@ def render_worker_status(request: Request):
     return {
         "estado": render_queue.obter_estado(),
         "jobs_pendentes": render_queue.jobs_remotos_pendentes(),
+    }
+
+
+# === API: SYSTEM TELEMETRY (GPU/CPU temps from worker locais) ===
+
+_system_telemetry: dict = {}  # worker_id -> last telemetry dict
+_telemetry_lock = threading.Lock()
+
+
+@app.post("/api/system-telemetry")
+async def system_telemetry_post(request: Request):
+    """Worker reporta telemetria (GPU temp/util/mem + CPU util). Auth via Bearer.
+
+    Body: {worker_id, ts, gpu_temp_c, gpu_util_pct, gpu_mem_used_mb, gpu_mem_total_mb, gpu_name, cpu_util_pct, ram_used_gb, ram_total_gb}
+    """
+    _verificar_worker_token(request)
+    dados = await request.json()
+    wid = dados.get("worker_id") or (request.headers.get("X-Worker-Id") or "default")
+    with _telemetry_lock:
+        _system_telemetry[wid] = dados
+        # Limpa stale (> 60s sem update)
+        now = time.time()
+        stale = [k for k, v in _system_telemetry.items() if (now - v.get("ts", now)) > 60]
+        for k in stale:
+            _system_telemetry.pop(k, None)
+    return {"ok": True}
+
+
+@app.get("/api/system-telemetry")
+def system_telemetry_get():
+    """Retorna ultima telemetria de cada worker local. Publico (UI usa)."""
+    with _telemetry_lock:
+        # Limpa stale antes de retornar
+        now = time.time()
+        ativos = {k: v for k, v in _system_telemetry.items() if (now - v.get("ts", now)) <= 60}
+        return {"workers": list(ativos.values())}
+
+
+# === API: NARRATION WORKER (Chatterbox via GPU local) ===
+
+@app.get("/api/narration-worker/next-job")
+def narration_worker_next_job(request: Request, worker_id: str = ""):
+    """Worker local polla pra pegar proximo job de narracao Chatterbox.
+
+    Retorna 204 quando nao tem job. Quando tem, marca como 'processing'.
+    Job traz: texto, voice_ref, nome_saida, destino_remoto, exaggeration, cfg_weight, chunk_max_chars.
+    """
+    _verificar_worker_token(request)
+    if not worker_id:
+        client = request.client
+        worker_id = f"{client.host}:{client.port}" if client else "unknown"
+    job = narration_queue.proximo_job_remoto(worker_id=worker_id)
+    if not job:
+        return JSONResponse(status_code=204, content=None)
+    return job
+
+
+@app.post("/api/narration-worker/progress")
+async def narration_worker_progress(request: Request):
+    """Reporta progresso + heartbeat do job de narracao.
+
+    Body: {job_id, canal_idx, etapa_detalhe, progresso}
+    Se progresso=-1, eh apenas heartbeat (mantem etapa_detalhe mas nao muda progresso).
+    """
+    _verificar_worker_token(request)
+    dados = await request.json()
+    job_id = dados.get("job_id", "")
+    canal_idx = dados.get("canal_idx")
+    etapa_detalhe = dados.get("etapa_detalhe", "")
+    progresso = dados.get("progresso", 0)
+
+    if job_id:
+        narration_queue.tocar_job_remoto(job_id)
+    try:
+        wid = (request.headers.get("X-Worker-Id") or "").strip() or "narration-worker-progress"
+        narration_queue.marcar_worker_visto(wid)
+    except Exception:
+        pass
+
+    if canal_idx is not None:
+        import time as _time
+        kwargs = {"inicio": _time.time(), "etapa": "narracao"}
+        if etapa_detalhe:
+            kwargs["etapa_detalhe"] = etapa_detalhe
+        # progresso=-1 = heartbeat sem chunk update; nao sobrescreve progresso atual
+        if progresso is not None and progresso >= 0:
+            kwargs["progresso"] = progresso
+        production_log.atualizar_canal(canal_idx, **kwargs)
+    return {"ok": True}
+
+
+@app.post("/api/narration-worker/upload-mp3")
+async def narration_worker_upload_mp3(
+    request: Request,
+    job_id: str = Form(...),
+    file: UploadFile = File(...),
+):
+    """Worker faz upload do MP3 gerado. VPS salva em destino_remoto do job.
+
+    Resposta: {ok, path_saved}. Cliente DEVE chamar /complete logo apos.
+    """
+    _verificar_worker_token(request)
+    # Localiza job pelo id (pega destino_remoto que foi enviado no /next-job)
+    pendentes = narration_queue.jobs_remotos_pendentes()
+    job = next((j for j in pendentes if j.get("id") == job_id), None)
+    if not job:
+        raise HTTPException(404, f"job {job_id} nao esta na fila (ja completou ou expirou)")
+
+    destino_remoto = (job.get("destino_remoto") or "").strip()
+    if not destino_remoto:
+        raise HTTPException(400, f"job {job_id} sem destino_remoto definido")
+
+    dst = Path(destino_remoto)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    # Salva o MP3 em destino_remoto
+    try:
+        with open(dst, "wb") as f:
+            shutil.copyfileobj(file.file, f)
+    finally:
+        try: file.file.close()
+        except Exception: pass
+
+    return {"ok": True, "path_saved": str(dst)}
+
+
+@app.post("/api/narration-worker/complete")
+async def narration_worker_complete(request: Request):
+    """Worker reporta conclusao de narracao (apos upload-mp3).
+
+    Body: {job_id, sucesso, erro?, audio_local?, duracao_seg?, chunks?, tempo_geracao_seg?}
+    audio_local eh o path FINAL na VPS (mesmo do destino_remoto).
+    """
+    _verificar_worker_token(request)
+    dados = await request.json()
+    job_id = dados.get("job_id", "")
+    sucesso = dados.get("sucesso", False)
+    erro = dados.get("erro", "")
+    audio_local = dados.get("audio_local", "")
+    duracao_seg = float(dados.get("duracao_seg", 0))
+    chunks = int(dados.get("chunks", 0))
+    tempo_geracao_seg = float(dados.get("tempo_geracao_seg", 0))
+
+    if not job_id:
+        raise HTTPException(400, "job_id obrigatorio")
+
+    narration_queue.completar_job_remoto(
+        job_id, sucesso, erro,
+        audio_local=audio_local,
+        duracao_seg=duracao_seg,
+        chunks=chunks,
+        tempo_geracao_seg=tempo_geracao_seg,
+    )
+    return {"ok": True}
+
+
+@app.get("/api/narration-worker/status")
+def narration_worker_status(request: Request):
+    """Status da fila de narracao Chatterbox."""
+    _verificar_worker_token(request)
+    return {
+        "estado": narration_queue.obter_estado(),
+        "jobs_pendentes": narration_queue.jobs_remotos_pendentes(),
     }
 
 
@@ -1768,6 +2060,15 @@ def prod_log_historico(data: str = ""):
     if not data:
         return {"datas": video_log_db.datas_disponiveis()}
     return {"data": data, "canais": video_log_db.historico_data(data)}
+
+
+@app.get("/api/historico-datas")
+def historico_datas(limit: int = 50):
+    """Historico de datas finalizadas. Cada entry tem: data_ref, inicio_iso,
+    fim_iso, duracao_seg, total_canais, concluidos, erros, pulados, cancelado.
+    Mais recente primeiro. Limite default 50.
+    """
+    return {"datas": production_log.obter_historico_datas(limit=max(1, min(200, limit)))}
 
 
 @app.get("/api/tts/health")
@@ -1938,6 +2239,7 @@ def resetar_producao():
     production_log._salvar()
     # Limpar render queue
     render_queue.limpar()
+    narration_queue.limpar()
     # Matar processos orfaos (so no Windows)
     if sys.platform == "win32":
         import subprocess as sp
@@ -3498,6 +3800,11 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
         <button class="btn btn-sm btn-primary" onclick="processarCoringaAgora(this)" title="Processa Backlog -> coluna BASE no grid Temas">⚡ BASE agora</button>
         <button class="btn btn-sm" onclick="distribuirCoringaAgora(this)" title="Adapta + distribui BASE pros canais Geral configurados">📤 Distribuir agora</button>
         <button class="btn btn-sm" onclick="processarCoAgora(this)" title="CO* em cruz: pega 4 itens Backlog co='' e preenche CO1-CO4 em 2 datas + NARC/NPD adaptado">🔄 CO* em cruz</button>
+        <div style="position:relative;display:inline-flex;align-items:center">
+          <input type="text" id="backlog-search" class="input" placeholder="🔎 Buscar titulo ou thumb..." oninput="onBacklogSearchInput()" style="max-width:240px;padding-right:60px">
+          <span id="backlog-search-count" style="position:absolute;right:28px;font-size:10px;color:var(--text-sec);pointer-events:none;display:none"></span>
+          <button type="button" id="backlog-search-clear" onclick="clearBacklogSearch()" title="Limpar busca" style="position:absolute;right:4px;border:none;background:transparent;color:var(--text-sec);cursor:pointer;font-size:14px;padding:2px 6px;display:none">✕</button>
+        </div>
         <select id="backlog-filtro" onchange="loadBacklog()" class="input" style="max-width:180px">
           <option value="todos">Todos</option>
           <option value="pendentes" selected>Pendentes</option>
@@ -9088,6 +9395,34 @@ fetch('/api/health').then(function(r){ return r.json(); }).then(function(d){
 // BACKLOG TEMAS
 // =============================================================
 let _backlogItens = [];
+let _backlogSearchQuery = '';
+
+function onBacklogSearchInput() {
+  const inp = document.getElementById('backlog-search');
+  _backlogSearchQuery = (inp.value || '').trim().toLowerCase();
+  const clearBtn = document.getElementById('backlog-search-clear');
+  if (clearBtn) clearBtn.style.display = _backlogSearchQuery ? 'block' : 'none';
+  renderBacklog();
+}
+
+function clearBacklogSearch() {
+  const inp = document.getElementById('backlog-search');
+  if (inp) inp.value = '';
+  _backlogSearchQuery = '';
+  const clearBtn = document.getElementById('backlog-search-clear');
+  if (clearBtn) clearBtn.style.display = 'none';
+  renderBacklog();
+}
+
+function _filtrarBacklog(itens) {
+  if (!_backlogSearchQuery) return itens;
+  const q = _backlogSearchQuery;
+  return itens.filter(function(it){
+    const titulo = (it.titulo || '').toLowerCase();
+    const thumb = (it.texto_thumb || '').toLowerCase();
+    return titulo.indexOf(q) !== -1 || thumb.indexOf(q) !== -1;
+  });
+}
 
 async function loadBacklog() {
   const filtro = document.getElementById('backlog-filtro').value;
@@ -9111,15 +9446,36 @@ async function loadBacklog() {
 function renderBacklog() {
   const tbody = document.getElementById('backlog-tbody');
   const cardsWrap = document.getElementById('backlog-cards');
+  const countEl = document.getElementById('backlog-search-count');
 
   if (!_backlogItens.length) {
+    if (countEl) countEl.style.display = 'none';
     tbody.innerHTML = '<tr><td colspan="7" style="padding:24px;text-align:center;color:var(--text-sec)">Nenhum item. Cole um link YT acima pra adicionar.</td></tr>';
     cardsWrap.innerHTML = '<div class="card" style="padding:24px;text-align:center;color:var(--text-sec)">Nenhum item.</div>';
     return;
   }
 
+  // Aplica filtro de busca (titulo ou texto_thumb)
+  const itensVisiveis = _filtrarBacklog(_backlogItens);
+
+  // Contador "N/M" quando ha busca ativa
+  if (countEl) {
+    if (_backlogSearchQuery) {
+      countEl.textContent = itensVisiveis.length + '/' + _backlogItens.length;
+      countEl.style.display = 'inline';
+    } else {
+      countEl.style.display = 'none';
+    }
+  }
+
+  if (!itensVisiveis.length) {
+    tbody.innerHTML = '<tr><td colspan="7" style="padding:24px;text-align:center;color:var(--text-sec)">Nenhum item bate com "' + (_backlogSearchQuery || '').replace(/</g,'&lt;') + '".</td></tr>';
+    cardsWrap.innerHTML = '<div class="card" style="padding:24px;text-align:center;color:var(--text-sec)">Nenhum match.</div>';
+    return;
+  }
+
   // Tabela desktop (template literals com backtick)
-  tbody.innerHTML = _backlogItens.map(function(it) {
+  tbody.innerHTML = itensVisiveis.map(function(it) {
     const isGeral = it.geral === 'Ok';
     const isCoOk = it.co === 'Ok';
     const rowStyle = (isGeral && isCoOk) ? 'opacity:0.55' : '';
@@ -9145,7 +9501,7 @@ function renderBacklog() {
   }).join('');
 
   // Cards mobile
-  cardsWrap.innerHTML = _backlogItens.map(function(it) {
+  cardsWrap.innerHTML = itensVisiveis.map(function(it) {
     const isGeral = it.geral === 'Ok';
     const isCoOk = it.co === 'Ok';
     const cardStyle = (isGeral && isCoOk) ? 'opacity:0.6' : '';

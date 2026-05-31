@@ -9,6 +9,14 @@ production_state.json
 backlog_temas.json
 coringa_automacao.json
 
+# Diretorios com credenciais OAuth (Drive, YouTube, etc) e tokens
+credentials/
+tokens/
+
+# Estados volateis (gatilhos disparados, watchdog snapshots)
+_watchdog_status.json
+_gatilho_*_disparado
+
 # Frontend2 (React)
 frontend2/node_modules/
 frontend2/dist/
@@ -53,7 +61,23 @@ _retrofit_video_log.py
 _retrofit_videos_local.py
 _bench_*.py
 _redistribute_*.py
+_apply_*.py
+_clean_*.py
+_de_inworld_*.py
+_migrar_*.py
+_recover_*.py
+_prompts_*.json
+_notion_*.md
+_build_notion_*.py
 deploy.sh
 worker_config.json
 video_log_db.json
 BACKLOG_PESQUISA.md
+
+# Pastas temporarias de workers paralelos e roteiros em transicao
+temp_w*/
+tmp_*/
+tmp_*.json
+
+# Claude Code session lock
+.claude-lock.json

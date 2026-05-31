@@ -110,6 +110,12 @@
   box-shadow: 0 0 8px var(--accent-glow);
 }
 
+/* Narracao (Chatterbox por chunks): cor roxa distinta da verde do render */
+.channel-progress-bar.channel-progress-bar-narracao {
+  background: linear-gradient(90deg, #b366ff, #d099ff);
+  box-shadow: 0 0 8px rgba(179, 102, 255, 0.45);
+}
+
 .channel-progress-text {
   position: absolute;
   right: 0;

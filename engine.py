@@ -19,7 +19,11 @@ import numpy as np
 
 from transcriber import obter_duracao
 
-TEMP_DIR = Path(__file__).parent / "temp"
+# TEMP_DIR isolado por WORKER_ID pra permitir 2 workers paralelos sem
+# se atropelarem em bg_concat.mp4, filter_complex.txt etc.
+# Sem WORKER_ID definido (modo legacy/VPS-only) = "temp/" como antes.
+_WID = os.environ.get("WORKER_ID", "").strip()
+TEMP_DIR = Path(__file__).parent / (f"temp_w{_WID}" if _WID else "temp")
 TEMP_DIR.mkdir(exist_ok=True)
 CACHE_DIR = Path(__file__).parent / "cache"
 CACHE_DIR.mkdir(exist_ok=True)

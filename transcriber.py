@@ -9,7 +9,9 @@ import json
 import re
 from pathlib import Path
 
-TEMP_DIR = Path(__file__).parent / "temp"
+# TEMP_DIR isolado por WORKER_ID (paralelo). Sem WORKER_ID = "temp/" legacy.
+_WID = os.environ.get("WORKER_ID", "").strip()
+TEMP_DIR = Path(__file__).parent / (f"temp_w{_WID}" if _WID else "temp")
 TEMP_DIR.mkdir(exist_ok=True)
 
 

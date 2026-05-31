@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { PageHeader } from '../../components/Layout/AppShell'
 import { Card, CardHeader, CardBody } from '../../components/Common/Card'
 import { Button } from '../../components/Common/Button'
@@ -24,29 +24,20 @@ const ETAPA_BADGE = {
 export function Monitor() {
   const [health, setHealth] = useState(null)
   const [state, setState] = useState(null)
+  const [telem, setTelem] = useState({workers: []})
   const [datasOpen, setDatasOpen] = useState(false)
   const [historicoOpen, setHistoricoOpen] = useState(false)
-  const [pods, setPods] = useState([])
   const [nowMs, setNowMs] = useState(Date.now())
 
   async function refresh() {
     try {
-      const [h, s, p] = await Promise.all([
+      const [h, s, t] = await Promise.all([
         api.get('/api/health'),
         api.get('/api/production-log'),
-        api.get('/api/pods/status').catch(() => ({ pods: [] })),
+        api.get('/api/system-telemetry').catch(() => ({workers: []})),
       ])
-      setHealth(h); setState(s); setPods(p?.pods || [])
+      setHealth(h); setState(s); setTelem(t || {workers: []})
     } catch (e) { /* silent */ }
-  }
-
-  async function pararPods() {
-    if (!confirm('Parar todos os pods da RunPod?\n(Custo zero enquanto parados. Próxima produção sobe tudo de novo automaticamente.)')) return
-    try {
-      const r = await api.post('/api/pods/stop')
-      toast.success(`${r.parados || 0} pods parados`)
-      refresh()
-    } catch (e) { toast.error('Erro: ' + e.message) }
   }
 
   useEffect(() => {
@@ -91,7 +82,8 @@ export function Monitor() {
   const rq = health.render_queue || {}
   const isProd = !!health.producao_ativa
   const canais = state?.canais || []
-  const log = (state?.log || []).slice(-30).reverse()
+  // Filtra logs LIFECYCLE (pods RunPod) - operacao agora eh local-only
+  const log = (state?.log || []).filter(l => !(l?.msg || '').startsWith('LIFECYCLE')).slice(-30).reverse()
 
   return (
     <>
@@ -109,9 +101,6 @@ export function Monitor() {
               <Button variant="primary" onClick={() => setDatasOpen(true)}>▶ Produzir Tudo</Button>
             )}
             <Button variant="ghost" onClick={() => setHistoricoOpen(true)}>📊 Histórico</Button>
-            {pods.some(p => p.status === 'RUNNING') && !isProd && (
-              <Button variant="ghost" onClick={pararPods}>🛑 Parar Pods</Button>
-            )}
             <Button variant="ghost" size="sm" onClick={refresh}>↻</Button>
           </>
         }
@@ -122,7 +111,16 @@ export function Monitor() {
           title="Produção"
           value={isProd ? 'em andamento' : 'idle'}
           accent={isProd}
-          detail={isProd && state?.data_ref ? `Data: ${state.data_ref}` : `pid ${health.pid}`}
+          detail={(() => {
+            if (isProd && state?.inicio) {
+              const decorrido = Math.max(0, (nowMs/1000) - state.inicio)
+              return `${state.data_ref || ''} · ⏱ ${fmtDur(decorrido)}`
+            }
+            if (state?.data_ref && state?.duracao_seg) {
+              return `${state.data_ref} · ✓ ${fmtDur(state.duracao_seg)}`
+            }
+            return `pid ${health.pid}`
+          })()}
         />
         <StatusCard
           title="Render Queue"
@@ -130,21 +128,52 @@ export function Monitor() {
           accent={rq.ativo}
           detail={rq.job_atual || 'nenhum job ativo'}
         />
-        <StatusCard
-          title="Pods RunPod"
-          value={(() => {
-            const running = pods.filter(p => p.status === 'RUNNING').length
-            const total = pods.length
-            return running > 0 ? `${running}/${total} ativos` : `${total} parados`
-          })()}
-          accent={pods.some(p => p.status === 'RUNNING')}
-          detail={(() => {
-            const running = pods.filter(p => p.status === 'RUNNING')
-            if (!running.length) return 'custo $0/hr'
-            const cost = running.reduce((s, p) => s + (p.cost_per_hr || 0), 0)
-            return `$${cost.toFixed(2)}/hr`
-          })()}
-        />
+        {telem.workers && telem.workers.length > 0 && telem.workers.slice(0, 1).map((w, idx) => {
+          const gpuTemp = w.gpu_temp_c
+          const gpuUtil = w.gpu_util_pct
+          const gpuMemPct = w.gpu_mem_total_mb ? Math.round(100 * w.gpu_mem_used_mb / w.gpu_mem_total_mb) : 0
+          const cpuUtil = w.cpu_util_pct
+          const cpuTemp = w.cpu_temp_c
+          const moboTemp = w.motherboard_temp_c
+          const nvmeTemp = w.nvme_temp_c
+          const ramUsed = w.ram_used_gb
+          const ramTotal = w.ram_total_gb
+          const _tcolor = (t) => t == null ? 'inherit' : (t >= 85 ? '#ff6464' : t >= 75 ? '#ffaa44' : 'inherit')
+          return (
+            <React.Fragment key={w.worker_id || idx}>
+              <StatusCard
+                title="GPU (5070 Ti)"
+                value={
+                  <span>
+                    <span style={{color: _tcolor(gpuTemp)}}>{gpuTemp != null ? `${gpuTemp}°C` : '—'}</span>
+                    {' · '}
+                    <span style={{fontSize:'0.85em'}}>{gpuUtil != null ? `${gpuUtil}%` : '—'}</span>
+                  </span>
+                }
+                accent={gpuUtil > 50}
+                detail={<span style={{fontSize:'11px'}}>VRAM {gpuMemPct}% ({w.gpu_mem_used_mb||0}/{w.gpu_mem_total_mb||0} MB)</span>}
+              />
+              <StatusCard
+                title="CPU"
+                value={
+                  <span>
+                    <span style={{color: _tcolor(cpuTemp)}}>{cpuTemp != null ? `${cpuTemp}°C` : '—'}</span>
+                    {' · '}
+                    <span style={{fontSize:'0.85em'}}>{cpuUtil != null ? `${cpuUtil}%` : '—'}</span>
+                  </span>
+                }
+                accent={cpuUtil > 50}
+                detail={
+                  <span style={{fontSize:'11px'}}>
+                    {moboTemp != null && `Mobo ${moboTemp}°C · `}
+                    {nvmeTemp != null && `NVMe ${nvmeTemp}°C · `}
+                    {ramUsed != null && `RAM ${ramUsed}/${ramTotal}GB`}
+                  </span>
+                }
+              />
+            </React.Fragment>
+          )
+        })}
       </div>
 
       <div className="monitor-grid">
@@ -244,7 +273,10 @@ function ChannelRow({ canal: c, nowMs }) {
       <Badge variant={conf.variant} dot={conf.dot}>{conf.label}</Badge>
       {progresso > 0 && progresso < 100 && (
         <div className="channel-progress">
-          <div className="channel-progress-bar" style={{ width: `${progresso}%` }} />
+          <div
+            className={`channel-progress-bar ${c.etapa === 'narracao' ? 'channel-progress-bar-narracao' : ''}`}
+            style={{ width: `${progresso}%` }}
+          />
           <span className="channel-progress-text">{progresso}%</span>
         </div>
       )}

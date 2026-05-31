@@ -12,7 +12,9 @@ from datetime import datetime
 
 BASE_DIR = Path(__file__).parent
 LOG_FILE = BASE_DIR / "production_state.json"
+HISTORICO_DATAS_FILE = BASE_DIR / "historico_datas.json"  # lista de datas finalizadas
 _lock = threading.RLock()  # RLock pois adicionar_log chama _salvar
+_hist_lock = threading.Lock()
 
 # Estado da produção completa (persistente)
 _state = {
@@ -115,7 +117,7 @@ def adicionar_log(msg: str):
 
 
 def finalizar(cancelado: bool = False):
-    """Marca produção como finalizada."""
+    """Marca produção como finalizada e registra em historico_datas.json."""
     _state["ativo"] = False
     _state["cancelado"] = cancelado
     concluidos = sum(1 for c in _state.get("canais", []) if c.get("etapa") == "concluido")
@@ -124,10 +126,61 @@ def finalizar(cancelado: bool = False):
     _state["concluidos"] = concluidos
     _state["erros"] = erros
     _state["pulados"] = pulados
-    tempo = time.time() - (_state.get("inicio") or time.time())
+    inicio_ts = _state.get("inicio") or time.time()
+    fim_ts = time.time()
+    tempo = fim_ts - inicio_ts
+    _state["fim"] = fim_ts
+    _state["duracao_seg"] = tempo
     status = "CANCELADO" if cancelado else "CONCLUÍDO"
-    adicionar_log(f"{status} | {concluidos} OK | {erros} erros | {pulados} pulados | {tempo:.0f}s total")
+    adicionar_log(f"{status} | {concluidos} OK | {erros} erros | {pulados} pulados | {tempo:.0f}s total ({tempo/60:.1f}min)")
+
+    # Persistir no historico_datas.json (append)
+    try:
+        with _hist_lock:
+            hist = []
+            if HISTORICO_DATAS_FILE.exists():
+                try:
+                    with open(HISTORICO_DATAS_FILE, "r", encoding="utf-8") as f:
+                        hist = json.load(f)
+                except Exception:
+                    hist = []
+            hist.append({
+                "data_ref": _state.get("data_ref", ""),
+                "data_idx": _state.get("data_idx"),
+                "inicio_ts": inicio_ts,
+                "inicio_iso": datetime.fromtimestamp(inicio_ts).isoformat(),
+                "fim_ts": fim_ts,
+                "fim_iso": datetime.fromtimestamp(fim_ts).isoformat(),
+                "duracao_seg": tempo,
+                "total_canais": _state.get("total_canais", 0),
+                "concluidos": concluidos,
+                "erros": erros,
+                "pulados": pulados,
+                "cancelado": cancelado,
+            })
+            # Limita a 200 entradas
+            if len(hist) > 200:
+                hist = hist[-200:]
+            with open(HISTORICO_DATAS_FILE, "w", encoding="utf-8") as f:
+                json.dump(hist, f, ensure_ascii=False, indent=2, default=str)
+    except Exception:
+        pass
+
     _salvar()
+
+
+def obter_historico_datas(limit: int = 50) -> list:
+    """Retorna ultimas N datas processadas, mais recente primeiro."""
+    try:
+        with _hist_lock:
+            if not HISTORICO_DATAS_FILE.exists():
+                return []
+            with open(HISTORICO_DATAS_FILE, "r", encoding="utf-8") as f:
+                hist = json.load(f)
+            # Mais recente primeiro
+            return list(reversed(hist[-limit:]))
+    except Exception:
+        return []
 
 
 def obter_estado() -> dict:

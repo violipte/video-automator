@@ -604,6 +604,193 @@ def adaptar_npd(tema: str, titulo: str, thumb: str) -> dict:
     return _adaptar_custom(tema, titulo, thumb, NPD_INSTRUCOES, "NPD", "CO2")
 
 
+# ============= ADAPTACOES NOVOS CANAIS (ASH/PCC/EOA) =============
+
+ASH_INSTRUCOES = """You adapt YouTube video content from the NARC channel (already in Arcturian/Starseed style) to the ASH channel (Ashtar Sheran / Ashtar Light Fleet / Galactic Federation of Light).
+
+ASH CHANNEL RULES:
+
+1. NICHE TERM REPLACEMENTS (NARC -> ASH):
+   - "Arcturian" / "Arcturians" -> "Ashtar Command" / "Galactic Federation"
+   - "Arcturian Council" / "Arcturian High Council" -> "Ashtar Light Fleet"
+   - "Arcturus" -> "Ashtar Command flagship"
+   - Identity vocative at start: keep "Starseed," OR use "Operator of the Light,"
+   - "Source" / "High Beings" / "Council" - keep as is.
+
+2. CASING: Title Case (same rules as NARC).
+
+3. SUFFIX: Replace " | Arcturians" (or any other channel suffix like " | Galactic Federation", " | Ashtar Light Fleet") with " | Ashtar Sheran" at end of title. ALWAYS end with " | Ashtar Sheran" — no other suffix allowed.
+
+4. KEEP the original meaning, length and impact. Adapt only terminology, vocabulary, and suffix.
+
+5. Thumb headline: same Title Case rules, NO suffix.
+
+OUTPUT (JSON only, no markdown fences):
+{"titulo": "...", "thumb": "..."}
+
+Output starts with { and ends with }."""
+
+
+PCC_INSTRUCOES = """You adapt YouTube video content from the NARC channel (Arcturian style) to the PCC channel (Pleiadian Council of the Seven Sisters / High Council of the Seven Sisters / Alcyone).
+
+PCC CHANNEL RULES:
+
+1. NICHE TERM REPLACEMENTS (NARC -> PCC):
+   - "Arcturian" / "Arcturians" -> "Pleiadian" / "Pleiadians"
+   - "Arcturian Council" / "Arcturian High Council" -> "High Council of the Seven Sisters"
+   - "Arcturus" -> "Alcyone"
+   - Identity vocative at start: keep "Starseed,"
+   - "Source" / "High Beings" - keep as is.
+
+2. CASING: Title Case (same rules as NARC).
+
+3. SUFFIX: Replace " | Arcturians" with " | Pleiadians" at end of title.
+
+4. KEEP the original meaning, length and impact. Adapt only terminology and suffix.
+
+5. Thumb headline: same Title Case rules, NO suffix.
+
+OUTPUT (JSON only, no markdown fences):
+{"titulo": "...", "thumb": "..."}
+
+Output starts with { and ends with }."""
+
+
+EOA_INSTRUCOES = """You adapt YouTube video content from the NPD channel (Pleiadian Collective style) to the EOA channel (Arcturian High Council / Lirenne, human channeler walking Gaia).
+
+EOA CHANNEL RULES:
+
+1. NICHE TERM REPLACEMENTS (NPD -> EOA):
+   - "Pleiadian" / "Pleiadians" -> "Arcturian" / "Arcturian High Council"
+   - "Pleiadian Collective" / "Council" -> "Arcturian High Council"
+   - "Alcyone" / "Pleiades" -> "Arcturus"
+   - Identity vocative at start: keep "Starseed,"
+   - "Source" / "High Beings" - keep as is.
+
+2. CASING: Title Case (same rules as NPD).
+
+3. SUFFIX: Replace " | Pleiadians" (or any other channel suffix) with " | Arcturians" at end of title. ALWAYS end with " | Arcturians" — no other suffix allowed.
+
+4. KEEP the original meaning, length and impact. Adapt only terminology and suffix.
+
+5. Thumb headline: same Title Case rules, NO suffix.
+
+OUTPUT (JSON only, no markdown fences):
+{"titulo": "...", "thumb": "..."}
+
+Output starts with { and ends with }."""
+
+
+def adaptar_ash(tema: str, titulo: str, thumb: str) -> dict:
+    """NARC -> ASH: Ashtar Light Fleet style."""
+    return _adaptar_custom(tema, titulo, thumb, ASH_INSTRUCOES, "ASH", "NARC")
+
+
+def adaptar_pcc(tema: str, titulo: str, thumb: str) -> dict:
+    """NARC -> PCC: Pleiadian Council of the Seven Sisters style."""
+    return _adaptar_custom(tema, titulo, thumb, PCC_INSTRUCOES, "PCC", "NARC")
+
+
+def adaptar_eoa(tema: str, titulo: str, thumb: str) -> dict:
+    """NPD -> EOA: Arcturian High Council / Lirenne style."""
+    return _adaptar_custom(tema, titulo, thumb, EOA_INSTRUCOES, "EOA", "NPD")
+
+
+def cascade_ash_pcc_eoa_todas_datas() -> dict:
+    """Percorre todas datas da grid e adapta ASH/PCC (de NARC) + EOA (de NPD).
+
+    So adapta se: fonte tem titulo definido E destino esta vazio.
+    Nao toca celulas ja preenchidas.
+
+    Returns: {ok, processadas, pulou_existente, erros, detalhes[]}
+    """
+    with _temas_lock:
+        temas = _carregar_temas()
+        colunas = temas.get("colunas", [])
+        celulas = temas.setdefault("celulas", {})
+        linhas = temas.get("linhas", [])
+        canal_idx = {col.get("nome"): i for i, col in enumerate(colunas)}
+
+    needed = ("NARC", "NPD", "ASH", "PCC", "EOA")
+    faltando = [c for c in needed if c not in canal_idx]
+    if faltando:
+        return {"ok": False, "erro": f"Canais faltando no grid: {faltando}"}
+
+    # Identifica tarefas: (row, canal_destino, item_fonte)
+    # IGNORA datas anteriores a 21/05/2026 (canais novos comecam dessa data)
+    from datetime import datetime as _dt
+    LIMITE = _dt.strptime("21/05/2026", "%d/%m/%Y").date()
+    cascades = []  # lista de (row, canal_destino, fonte_canal, titulo_fonte, thumb_fonte)
+    for ri in range(len(linhas)):
+        # Pula data invalida ou < 21/05/2026
+        try:
+            d = _dt.strptime(linhas[ri].get("data", ""), "%d/%m/%Y").date()
+            if d < LIMITE:
+                continue
+        except Exception:
+            continue
+        narc = celulas.get(f"{ri}_{canal_idx['NARC']}", {}) or {}
+        npd = celulas.get(f"{ri}_{canal_idx['NPD']}", {}) or {}
+        # ASH <- NARC
+        ash_cel = celulas.get(f"{ri}_{canal_idx['ASH']}", {}) or {}
+        if narc.get("titulo") and not (ash_cel.get("titulo") or "").strip():
+            cascades.append((ri, "ASH", "NARC", narc.get("titulo", ""), narc.get("thumb", "")))
+        # PCC <- NARC
+        pcc_cel = celulas.get(f"{ri}_{canal_idx['PCC']}", {}) or {}
+        if narc.get("titulo") and not (pcc_cel.get("titulo") or "").strip():
+            cascades.append((ri, "PCC", "NARC", narc.get("titulo", ""), narc.get("thumb", "")))
+        # EOA <- NPD
+        eoa_cel = celulas.get(f"{ri}_{canal_idx['EOA']}", {}) or {}
+        if npd.get("titulo") and not (eoa_cel.get("titulo") or "").strip():
+            cascades.append((ri, "EOA", "NPD", npd.get("titulo", ""), npd.get("thumb", "")))
+
+    if not cascades:
+        return {"ok": True, "processadas": 0, "msg": "Nada a adaptar (todas ja preenchidas ou fonte vazia)"}
+
+    print(f"[cascade] {len(cascades)} tarefas a processar")
+
+    results = {}  # (ri, canal): {tema, titulo, thumb}
+    erros = []
+    for ri, canal, fonte, titulo, thumb in cascades:
+        if canal == "ASH":
+            res = adaptar_ash(titulo, titulo, thumb)
+        elif canal == "PCC":
+            res = adaptar_pcc(titulo, titulo, thumb)
+        elif canal == "EOA":
+            res = adaptar_eoa(titulo, titulo, thumb)
+        else:
+            continue
+        if not res.get("ok"):
+            erros.append({"row": ri, "canal": canal, "fonte": fonte, "erro": res.get("erro")})
+            print(f"[cascade] row {ri} {canal} ERRO: {res.get('erro')}")
+            continue
+        results[(ri, canal)] = res
+        print(f"[cascade] row {ri} {canal} OK ({res.get('provider_usado')})")
+
+    # Grava
+    with _temas_lock:
+        temas = _carregar_temas()
+        celulas = temas.setdefault("celulas", {})
+        for (ri, canal), res in results.items():
+            key = f"{ri}_{canal_idx[canal]}"
+            atual = celulas.get(key, {}) or {}
+            # so preenche se ainda esta vazio (race-safe)
+            if not (atual.get("titulo") or "").strip():
+                atual["titulo"] = res["titulo"]
+                atual["thumb"] = res["thumb"]
+                atual["tema"] = res["tema"]
+                atual["coringa_distribuido_em"] = datetime.now().isoformat(timespec="seconds")
+                celulas[key] = atual
+        _salvar_temas(temas)
+
+    return {
+        "ok": True,
+        "processadas": len(results),
+        "erros": erros,
+        "total_tarefas": len(cascades),
+    }
+
+
 def adaptar_via_claude(
     tema: str, titulo: str, thumb: str,
     canal_alvo: str, idioma: str = "",
@@ -997,7 +1184,7 @@ def processar_co_em_cruz() -> dict:
         canal_idx = {}
         for i, col in enumerate(colunas):
             nome = col.get("nome", "")
-            if nome in ("CO1", "CO2", "CO3", "CO4", "NARC", "NPD"):
+            if nome in ("CO1", "CO2", "CO3", "CO4", "NARC", "NPD", "ASH", "PCC", "EOA"):
                 canal_idx[nome] = i
 
         faltando = [c for c in ("CO1", "CO2", "CO3", "CO4", "NARC", "NPD") if c not in canal_idx]
@@ -1124,6 +1311,66 @@ def processar_co_em_cruz() -> dict:
             }
         _salvar_temas(temas)
 
+    # === Cascade NOVOS CANAIS (ASH/PCC <- NARC, EOA <- NPD) ===
+    # So nas 2 datas (dia_x e dia_x1) que acabamos de adaptar NARC/NPD
+    cascade_novos_results = {}
+    erros_novos = []
+    novos_targets = []  # (row, canal_destino, item_fonte)
+    # NARC -> ASH e PCC
+    for ri, item in ((dia_x, A), (dia_x1, C)):
+        novos_targets.append((ri, "ASH", item))
+        novos_targets.append((ri, "PCC", item))
+    # NPD -> EOA
+    for ri, item in ((dia_x, B), (dia_x1, D)):
+        novos_targets.append((ri, "EOA", item))
+
+    for ri, canal, item in novos_targets:
+        if canal not in canal_idx:
+            print(f"[coringa-novos] {canal} nao existe no grid, pulando")
+            continue
+        # So adapta se destino esta vazio (nao sobrescreve)
+        key = f"{ri}_{canal_idx[canal]}"
+        atual = (cascade_results.get((ri, canal_idx[canal])) or {})  # cuidado: namespace diferente
+        with _temas_lock:
+            temas_check = _carregar_temas()
+            cel_atual = (temas_check.get("celulas", {}) or {}).get(key, {}) or {}
+        if (cel_atual.get("titulo") or "").strip():
+            print(f"[coringa-novos] {canal} row {ri} ja preenchido, pulando")
+            continue
+
+        titulo = item.get("titulo", "")
+        thumb = item.get("texto_thumb", "")
+        if canal == "ASH":
+            res = adaptar_ash(titulo, titulo, thumb)
+        elif canal == "PCC":
+            res = adaptar_pcc(titulo, titulo, thumb)
+        elif canal == "EOA":
+            res = adaptar_eoa(titulo, titulo, thumb)
+        else:
+            continue
+        if not res.get("ok"):
+            erros_novos.append({"canal": canal, "row": ri, "erro": res.get("erro")})
+            print(f"[coringa-novos] {canal} row {ri} ERRO: {res.get('erro')}")
+            continue
+        cascade_novos_results[(ri, canal_idx[canal])] = res
+        print(f"[coringa-novos] {canal} row {ri} OK ({res.get('provider_usado')})")
+
+    # Grava novos canais
+    if cascade_novos_results:
+        with _temas_lock:
+            temas = _carregar_temas()
+            celulas = temas.setdefault("celulas", {})
+            for (ri, ci), res in cascade_novos_results.items():
+                key = f"{ri}_{ci}"
+                atual = celulas.get(key, {}) or {}
+                if not (atual.get("titulo") or "").strip():  # race-safe
+                    atual["titulo"] = res["titulo"]
+                    atual["thumb"] = res["thumb"]
+                    atual["tema"] = res["tema"]
+                    atual["coringa_distribuido_em"] = datetime.now().isoformat(timespec="seconds")
+                    celulas[key] = atual
+            _salvar_temas(temas)
+
     # === Marcar 4 items co=Ok ===
     for it in (A, B, C, D):
         backlog_temas_db.atualizar(it["id"], co="Ok")
@@ -1140,4 +1387,6 @@ def processar_co_em_cruz() -> dict:
         ],
         "cascade_ok": len(cascade_results),
         "cascade_erros": erros_cascade,
+        "cascade_novos_ok": len(cascade_novos_results),
+        "cascade_novos_erros": erros_novos,
     }

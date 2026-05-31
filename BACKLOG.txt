@@ -1664,3 +1664,36 @@ BUGS RECORRENTES IDENTIFICADOS (precisa investigar):
     Acao requerida: nenhuma direta — DEV/Maestro usa essa nota ao priorizar fila
 
 ================================================================================
+
+[OBS] HANDOFF DEV: implementar cadeia de fallback image gen
+    Pesquisa OBS concluída em 2026-05-10. Especificação completa entregue na
+    página Notion filha de DEV:
+      https://www.notion.so/35d770cbb8de812ab736fda4a5583f18
+
+    DECISÕES APROVADAS PELO PITER:
+      - Roteamento condicional por len(prompt_final):
+          ≤4000 chars: ai33.pro → Together.ai → Fal.ai
+          >4000 chars:  Together.ai → Fal.ai
+      - Together.ai: google/flash-image-3.1, $0.05/img, 16:9 1K
+      - Fal.ai: fal-ai/nano-banana-2, $0.08/img, 16:9 1K
+      - CO1-CO4 ficam fora (continuam imagem_fixa PIL)
+      - Política se todos falharem: log + erro + segue (canal sem thumb)
+      - Custo máximo: $0.80/ciclo (10 canais via Fal.ai pior caso)
+
+    JA FEITO POR OBS:
+      - Pesquisa Etapa 1 (matriz comparativa, 14 providers avaliados)
+      - Etapa 4 (handoff page DEV)
+      - config.json: adicionadas chaves together_api_key + fal_api_key
+        (one-off, autorizado por Piter, registrado em monitor-2026-05-10.jsonl)
+
+    DEV IMPLEMENTA:
+      - lib_thumbnail.py: _gerar_imagem_together() + _gerar_imagem_fal()
+      - lib_thumbnail.gerar_thumbnail(): roteamento condicional + cadeia
+      - image_metrics.py novo (espelho do tts_metrics)
+      - Eventos em logs/monitor-history.jsonl (alimenta Dashboard futuro)
+      - 6 testes de aceite documentados na página
+
+    Esforço estimado: ~6-8h (handoff page tem checklist DONE detalhado)
+    Prioridade: ALTA (bug ativo: thumbs falhando em DE/EN com prompt >4000 chars)
+
+================================================================================
