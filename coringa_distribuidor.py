@@ -57,9 +57,12 @@ def set_automacao_habilitada(valor: bool) -> bool:
 def _carregar_temas() -> dict:
     if not TEMAS_FILE.exists():
         return {"colunas": [], "linhas": [], "celulas": {}}
+    # Usa o carregador atomico do scriptwriter (com fallback automatico para .bak1 se corrompido).
     try:
-        with open(TEMAS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        from scriptwriter import _carregar_json
+        data = _carregar_json(TEMAS_FILE, default={"colunas": [], "linhas": [], "celulas": {}})
+        if not isinstance(data, dict):
+            data = {"colunas": [], "linhas": [], "celulas": {}}
         data.setdefault("colunas", [])
         data.setdefault("linhas", [])
         data.setdefault("celulas", {})
@@ -67,15 +70,39 @@ def _carregar_temas() -> dict:
         for col in data.get("colunas", []):
             if col.get("tipo") == "coringa" and col.get("nome") == "Coringa":
                 col["nome"] = "BASE"
+        # SAFEGUARD CRITICO: NUNCA permitir que esta funcao retorne um dict
+        # com colunas[] ou linhas[] vazios se o arquivo no disco tem 4MB+ de
+        # dados validos. Se colunas vazio mas arquivo grande, falhar HARD em vez
+        # de devolver vazio (que dispara o save zerado catastrofico).
+        if (not data["colunas"] or not data["linhas"]) and TEMAS_FILE.stat().st_size > 100_000:
+            raise RuntimeError(
+                f"[coringa] temas.json com {TEMAS_FILE.stat().st_size} bytes mas "
+                f"colunas={len(data['colunas'])} linhas={len(data['linhas'])} — "
+                "abortando para preservar arquivo. Investigar manualmente."
+            )
         return data
     except Exception as e:
         print(f"[coringa] erro carregando temas.json: {e}")
-        return {"colunas": [], "linhas": [], "celulas": {}}
+        # IMPORTANTE: re-raise para o caller NAO sobrescrever com vazio.
+        raise
 
 
 def _salvar_temas(data: dict):
-    with open(TEMAS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    # Usa o save atomico do scriptwriter (atomic write + backup rotativo).
+    # Bug historico (03/06/2026): write nao-atomico corrompeu temas.json
+    # com null bytes no meio + header zerado. Centralizar para impedir reincidencia.
+    from scriptwriter import _salvar_json
+    # PROTECAO EXTRA: nunca salvar com colunas[]/linhas[] vazios se o disco tem dados.
+    if (not data.get("colunas") or not data.get("linhas")):
+        try:
+            sz = TEMAS_FILE.stat().st_size if TEMAS_FILE.exists() else 0
+        except Exception:
+            sz = 0
+        if sz > 100_000:
+            raise RuntimeError(
+                f"[coringa] BLOQUEADO save com colunas/linhas vazias enquanto disco tem {sz} bytes."
+            )
+    _salvar_json(TEMAS_FILE, data)
 
 
 def _shift_celulas_coluna(celulas: dict, from_col: int, delta: int = 1) -> dict:
@@ -108,13 +135,43 @@ def _shift_celulas_linha(celulas: dict, from_row: int, delta: int = 1) -> dict:
     return novo
 
 
-def garantir_coluna_coringa(temas: dict) -> int:
-    """Garante coluna 'BASE' (tipo=coringa) na posicao idx 0 do grid.
-    Idempotente: se ja existe na pos 0 com tipo=coringa, nao mexe."""
+def _grupo_col(col: dict) -> str:
+    """Grupo de uma coluna base (colunas antigas sem o campo = 'geral')."""
+    return (col.get("grupo") or "geral").strip().lower()
+
+
+def garantir_coluna_coringa(temas: dict, grupo: str = "geral") -> int:
+    """Garante a coluna BASE (tipo=coringa) do GRUPO pedido. Multi-base (2026-07):
+    - grupo 'geral'  -> comportamento legado: coluna 'BASE' na posicao 0.
+    - outros grupos  -> coluna 'BASE-<GRUPO>' criada no FIM do grid (sem shift de celulas).
+    Idempotente."""
+    grupo = (grupo or "geral").strip().lower()
     colunas = temas.get("colunas", [])
-    # Ja existe coluna coringa (em qq posicao)?
+
+    if grupo != "geral":
+        # base de nicho: procura por tipo+grupo; cria no FIM se nao existe
+        for i, col in enumerate(colunas):
+            if col.get("tipo") == "coringa" and _grupo_col(col) == grupo:
+                return i
+        col_nova = {
+            "nome": f"BASE-{grupo[:3].upper()}",
+            "tipo": "coringa",
+            "grupo": grupo,
+            "pipeline_id": "",
+            "template_id": "",
+            "voice_id": "",
+            "voice_provider": "",
+            "coringa_recebe": False,
+        }
+        colunas.append(col_nova)
+        return len(colunas) - 1
+
+    # ---- grupo geral: comportamento LEGADO (BASE @ idx 0) ----
+    # Ja existe coluna coringa GERAL (em qq posicao)?
     for i, col in enumerate(colunas):
         nome_low = col.get("nome", "").lower()
+        if col.get("tipo") == "coringa" and _grupo_col(col) != "geral":
+            continue  # base de OUTRO nicho (ex: BASE-EST) nunca e promovida a BASE geral
         if (col.get("tipo") == "coringa") or nome_low in ("coringa", "base"):
             if i == 0:
                 # garante tipo + nome novo
@@ -210,7 +267,7 @@ def processar_item_geral(item: dict) -> dict:
 
     with _temas_lock:
         temas = _carregar_temas()
-        col_idx = garantir_coluna_coringa(temas)
+        col_idx = garantir_coluna_coringa(temas, grupo=item.get("grupo", "geral"))
         row_idx = _achar_ou_criar_linha(temas, data_str)
 
         cel_key = f"{row_idx}_{col_idx}"
@@ -362,6 +419,7 @@ def get_canal_config(coluna: dict) -> dict:
         "adaptado": bool(coluna.get("coringa_adaptado", True)),
         "casing": (coluna.get("coringa_casing", "") or "").lower(),  # ""|uppercase|titlecase
         "vinculo_co_origem": coluna.get("vinculo_co_origem", "") or "",
+        "grupo": (coluna.get("coringa_grupo", "") or "geral").lower(),  # multi-base: de qual BASE recebe
     }
 
 
@@ -384,6 +442,7 @@ def atualizar_config_canal(nome: str, **campos) -> dict:
         "adaptado": "coringa_adaptado",
         "casing": "coringa_casing",
         "vinculo_co_origem": "vinculo_co_origem",
+        "grupo": "coringa_grupo",   # multi-base: de qual BASE o canal recebe (geral|estoicismo|...)
     }
     if "vinculo_co_origem" in campos and campos["vinculo_co_origem"]:
         v = str(campos["vinculo_co_origem"]).strip().upper()
@@ -395,6 +454,8 @@ def atualizar_config_canal(nome: str, **campos) -> dict:
         if v not in CASING_OPCOES:
             return {"erro": f"casing invalido: {v}. Use {CASING_OPCOES}"}
         campos["casing"] = v
+    if "grupo" in campos and campos["grupo"] is not None:
+        campos["grupo"] = str(campos["grupo"]).strip().lower() or "geral"
 
     with _temas_lock:
         temas = _carregar_temas()
@@ -584,7 +645,10 @@ def _adaptar_custom(tema: str, titulo: str, thumb: str,
         return {"ok": False, "erro": f"Adaptacao {canal_alvo} retornou titulo vazio",
                 "raw": res["raw"][:500], "provider_usado": res["provider_usado"]}
 
-    thumb_out = (parsed.get("thumb") or "").strip()
+    # Thumb sempre em UPPERCASE (default do grid Temas).
+    # Mesmo que o LLM/INSTRUCOES retornem em caixa baixa/Title Case, forcamos
+    # caixa alta aqui — comportamento esperado pra thumbnails de prod.
+    thumb_out = (parsed.get("thumb") or "").strip().upper()
     return {
         "ok": True,
         "tema": gerar_tema_fundido(titulo_out, thumb_out),  # concatenacao literal
@@ -592,6 +656,47 @@ def _adaptar_custom(tema: str, titulo: str, thumb: str,
         "thumb": thumb_out,
         "provider_usado": res["provider_usado"],
     }
+
+
+# === VALIDACAO ANTI-REGRESSAO ===
+# Vocabulario PROIBIDO em canais adaptados (NARC/NPD/ASH/PCC/EOA). Se aparece no
+# output, o LLM falhou em adaptar e provavelmente devolveu copia/parafrase do CO1.
+# Nesse caso, REJEITAMOS a gravacao em vez de salvar lixo no grid.
+# Historico: junho 2026, 28 celulas ASH/PCC/EOA gravadas como copia do CO1 porque
+# o LLM as vezes ignora a INSTRUCAO de adaptar quando recebe input cru.
+import re as _re_validar
+_VOCAB_CO1_PROIBIDO = [
+    _re_validar.compile(p, _re_validar.IGNORECASE) for p in (
+        r"\bchosen\s+ones?\b",
+        r"\bgod\b",          # "God" sozinho. Pega "God Just", "God Sent", "of God"
+        r"\bearth\b",        # deve ser "Gaia"
+        r"\bdevil\b",        # deve ser "Shadow Forces"
+        r"\bheaven\b",       # deve ser "High Beings" / "The Council"
+        r"\bangels?\b",      # deve ser "High Beings"
+        r"\bholy\s+spirit\b",
+        r"\bjesus\b",
+        r"\bchrist\b",
+        # Decisao Piter 06/2026: ASH NUNCA usa "Operator of the Light", so "Starseed,".
+        # Adicionado como vocab proibido global (NARC/PCC/EOA/NPD tambem nao usam).
+        r"\boperator\s+of\s+the\s+light\b",
+    )
+]
+
+
+def _validar_adaptacao(canal_alvo: str, res: dict) -> tuple:
+    """Valida output de adaptacao. Retorna (ok: bool, motivo: str).
+
+    Rejeita se titulo/thumb contem vocabulario CO1 (= LLM nao adaptou).
+    """
+    tit = (res.get("titulo") or "")
+    thumb = (res.get("thumb") or "")
+    combinado = tit + " " + thumb
+    for pat in _VOCAB_CO1_PROIBIDO:
+        m = pat.search(combinado)
+        if m:
+            return (False, f"adaptacao {canal_alvo} falhou: output contem '{m.group(0)}' "
+                            f"(vocabulario CO1 nao-adaptado). titulo={tit[:80]!r}")
+    return (True, "")
 
 
 def adaptar_narc(tema: str, titulo: str, thumb: str) -> dict:
@@ -614,7 +719,7 @@ ASH CHANNEL RULES:
    - "Arcturian" / "Arcturians" -> "Ashtar Command" / "Galactic Federation"
    - "Arcturian Council" / "Arcturian High Council" -> "Ashtar Light Fleet"
    - "Arcturus" -> "Ashtar Command flagship"
-   - Identity vocative at start: keep "Starseed," OR use "Operator of the Light,"
+   - Identity vocative at start: MUST be "Starseed," (singular, with comma). NEVER use "Operator of the Light" or any other variation. Decision Piter 06/2026: only "Starseed,".
    - "Source" / "High Beings" / "Council" - keep as is.
 
 2. CASING: Title Case (same rules as NARC).
@@ -720,7 +825,7 @@ def cascade_ash_pcc_eoa_todas_datas() -> dict:
     # IGNORA datas anteriores a 21/05/2026 (canais novos comecam dessa data)
     from datetime import datetime as _dt
     LIMITE = _dt.strptime("21/05/2026", "%d/%m/%Y").date()
-    cascades = []  # lista de (row, canal_destino, fonte_canal, titulo_fonte, thumb_fonte)
+    cascades = []  # lista de (row, canal_destino, fonte_canal, tema_fonte, titulo_fonte, thumb_fonte)
     for ri in range(len(linhas)):
         # Pula data invalida ou < 21/05/2026
         try:
@@ -731,18 +836,21 @@ def cascade_ash_pcc_eoa_todas_datas() -> dict:
             continue
         narc = celulas.get(f"{ri}_{canal_idx['NARC']}", {}) or {}
         npd = celulas.get(f"{ri}_{canal_idx['NPD']}", {}) or {}
-        # ASH <- NARC
+        # ASH <- NARC (passa tema+titulo+thumb da fonte ja adaptada)
         ash_cel = celulas.get(f"{ri}_{canal_idx['ASH']}", {}) or {}
         if narc.get("titulo") and not (ash_cel.get("titulo") or "").strip():
-            cascades.append((ri, "ASH", "NARC", narc.get("titulo", ""), narc.get("thumb", "")))
+            cascades.append((ri, "ASH", "NARC",
+                             narc.get("tema", ""), narc.get("titulo", ""), narc.get("thumb", "")))
         # PCC <- NARC
         pcc_cel = celulas.get(f"{ri}_{canal_idx['PCC']}", {}) or {}
         if narc.get("titulo") and not (pcc_cel.get("titulo") or "").strip():
-            cascades.append((ri, "PCC", "NARC", narc.get("titulo", ""), narc.get("thumb", "")))
+            cascades.append((ri, "PCC", "NARC",
+                             narc.get("tema", ""), narc.get("titulo", ""), narc.get("thumb", "")))
         # EOA <- NPD
         eoa_cel = celulas.get(f"{ri}_{canal_idx['EOA']}", {}) or {}
         if npd.get("titulo") and not (eoa_cel.get("titulo") or "").strip():
-            cascades.append((ri, "EOA", "NPD", npd.get("titulo", ""), npd.get("thumb", "")))
+            cascades.append((ri, "EOA", "NPD",
+                             npd.get("tema", ""), npd.get("titulo", ""), npd.get("thumb", "")))
 
     if not cascades:
         return {"ok": True, "processadas": 0, "msg": "Nada a adaptar (todas ja preenchidas ou fonte vazia)"}
@@ -751,21 +859,28 @@ def cascade_ash_pcc_eoa_todas_datas() -> dict:
 
     results = {}  # (ri, canal): {tema, titulo, thumb}
     erros = []
-    for ri, canal, fonte, titulo, thumb in cascades:
+    for ri, canal, fonte, src_tema, src_titulo, src_thumb in cascades:
         if canal == "ASH":
-            res = adaptar_ash(titulo, titulo, thumb)
+            res = adaptar_ash(src_tema, src_titulo, src_thumb)
         elif canal == "PCC":
-            res = adaptar_pcc(titulo, titulo, thumb)
+            res = adaptar_pcc(src_tema, src_titulo, src_thumb)
         elif canal == "EOA":
-            res = adaptar_eoa(titulo, titulo, thumb)
+            res = adaptar_eoa(src_tema, src_titulo, src_thumb)
         else:
             continue
         if not res.get("ok"):
             erros.append({"row": ri, "canal": canal, "fonte": fonte, "erro": res.get("erro")})
             print(f"[cascade] row {ri} {canal} ERRO: {res.get('erro')}")
             continue
+        # VALIDACAO anti-regressao: rejeita output que mantenha vocab CO1
+        valido, motivo = _validar_adaptacao(canal, res)
+        if not valido:
+            erros.append({"row": ri, "canal": canal, "fonte": fonte, "erro": motivo,
+                          "raw_titulo": (res.get("titulo") or "")[:200]})
+            print(f"[cascade] row {ri} {canal} REJEITADO: {motivo}")
+            continue
         results[(ri, canal)] = res
-        print(f"[cascade] row {ri} {canal} OK ({res.get('provider_usado')})")
+        print(f"[cascade] row {ri} {canal} OK ({res.get('provider_usado')}) [fonte={fonte}]")
 
     # Grava
     with _temas_lock:
@@ -865,7 +980,8 @@ def adaptar_via_claude(
                 "raw": resultado_raw[:300], "provider_usado": provider_usado}
 
     titulo_out = (parsed.get("titulo") or "").strip()
-    thumb_out = (parsed.get("thumb") or "").strip()
+    # Thumb sempre UPPERCASE (default do grid Temas) — ver _adaptar_custom acima.
+    thumb_out = (parsed.get("thumb") or "").strip().upper()
 
     # Validacao: pelo menos titulo precisa estar preenchido
     if not titulo_out:
@@ -894,12 +1010,17 @@ def _e_canal_co(nome: str) -> bool:
 def distribuir_linha_coringa(
     row_idx: int, ignorar_delay: bool = False,
     delay_min: int = DIST_DELAY_MIN,
+    grupo: str = "geral",
 ) -> dict:
-    """Distribui Coringa de UMA linha pros canais Geral configurados (recebe=true,
-    sem vinculo_co_origem, nao CO*). NARC/NPD/CO* nao sao tocados aqui (Fase 3).
+    """Distribui a BASE do GRUPO de UMA linha pros canais desse grupo (recebe=true,
+    coringa_grupo compativel, sem vinculo_co_origem, nao CO*). NARC/NPD/CO* = Fase 3 (so geral).
+
+    Multi-base (2026-07): grupo 'geral' = BASE espiritual (legado); 'estoicismo' = BASE-EST -> canais
+    com coringa_grupo='estoicismo' (EST etc.). Canais sem coringa_grupo pertencem ao 'geral'.
 
     Retorna {'ok': bool, 'distribuidos':[], 'pulados':[], 'erros':[]} ou {'erro': '...'}.
     """
+    grupo = (grupo or "geral").strip().lower()
     with _temas_lock:
         temas = _carregar_temas()
         colunas = temas.get("colunas", [])
@@ -910,10 +1031,11 @@ def distribuir_linha_coringa(
             return {"erro": f"row_idx {row_idx} fora do range ({len(linhas)} linhas)"}
 
         coringa_idx = next(
-            (i for i, c in enumerate(colunas) if c.get("tipo") == "coringa"), None
+            (i for i, c in enumerate(colunas)
+             if c.get("tipo") == "coringa" and _grupo_col(c) == grupo), None
         )
         if coringa_idx is None:
-            return {"erro": "Coluna Coringa nao encontrada"}
+            return {"erro": f"Coluna base do grupo '{grupo}' nao encontrada"}
 
         cel_coringa = celulas.get(f"{row_idx}_{coringa_idx}", {})
         if not cel_coringa.get("titulo") and not cel_coringa.get("tema"):
@@ -936,8 +1058,13 @@ def distribuir_linha_coringa(
     for ci, col in enumerate(colunas):
         if col.get("tipo") == "coringa":
             continue
+        if col.get("oculta") or col.get("ativo") is False:
+            continue  # canal desativado/oculto (ex: ENS desligado em 06/2026)
         nome = col.get("nome", "")
         if not col.get("coringa_recebe"):
+            continue
+        # multi-base: canal so recebe da base do SEU grupo (sem o campo = geral)
+        if (col.get("coringa_grupo") or "geral").strip().lower() != grupo:
             continue
         if col.get("vinculo_co_origem"):
             continue  # NARC/NPD - recebem via CO* na Fase 3
@@ -1041,20 +1168,19 @@ def processar_distribuicao_pendentes(ignorar_delay: bool = False) -> dict:
         temas = _carregar_temas()
         colunas = temas.get("colunas", [])
         celulas = temas.get("celulas", {})
-        coringa_idx = next(
-            (i for i, c in enumerate(colunas) if c.get("tipo") == "coringa"), None
-        )
-        if coringa_idx is None:
-            return {"erro": "Coluna Coringa nao encontrada"}
+        # multi-base: todas as colunas base (geral + nichos), cada uma distribui pro SEU grupo
+        bases = {i: _grupo_col(c) for i, c in enumerate(colunas) if c.get("tipo") == "coringa"}
+        if not bases:
+            return {"erro": "Nenhuma coluna base encontrada"}
 
-        candidatos = []
+        candidatos = []   # [(row_idx, grupo)]
         for k, v in celulas.items():
             try:
                 ri, ci = k.split("_")
                 ri, ci = int(ri), int(ci)
             except Exception:
                 continue
-            if ci != coringa_idx:
+            if ci not in bases:
                 continue
             if v.get("coringa_distribuido_em"):
                 continue
@@ -1069,13 +1195,13 @@ def processar_distribuicao_pendentes(ignorar_delay: bool = False) -> dict:
                             continue
                     except Exception:
                         pass
-            candidatos.append(ri)
+            candidatos.append((ri, bases[ci]))
 
     distribuidos_total = 0
     erros_total = 0
     detalhes = []
-    for ri in sorted(candidatos):
-        res = distribuir_linha_coringa(ri, ignorar_delay=ignorar_delay)
+    for ri, grupo in sorted(candidatos):
+        res = distribuir_linha_coringa(ri, ignorar_delay=ignorar_delay, grupo=grupo)
         if "erro" in res and not res.get("ok"):
             erros_total += 1
             detalhes.append({"row_idx": ri, "erro": res["erro"]})
@@ -1191,9 +1317,21 @@ def processar_co_em_cruz() -> dict:
         if faltando:
             return {"ok": False, "erro": f"Canais faltando no grid: {faltando}"}
 
-        # Achar Dia X: primeira linha com CO1 vazio
+        # Achar Dia X: primeira linha com data >= HOJE com CO1 vazio.
+        # Fix raiz (06/2026): antes pegava a primeira CO1 vazia do grid inteiro,
+        # caindo em rows antigas (Abr/Mai) onde o user nao quer distribuir.
+        # Agora ignora datas passadas — coringa nunca enche o passado.
+        from datetime import date as _date
+        _hoje = _date.today()
         dia_x = None
         for ri in range(len(linhas)):
+            data_str = linhas[ri].get("data", "")
+            try:
+                dt = datetime.strptime(data_str, "%d/%m/%Y").date()
+            except Exception:
+                continue
+            if dt < _hoje:
+                continue  # pula datas que ja passaram
             cel_co1 = celulas.get(f"{ri}_{canal_idx['CO1']}", {})
             if not cel_co1.get("titulo"):
                 dia_x = ri
@@ -1311,26 +1449,29 @@ def processar_co_em_cruz() -> dict:
             }
         _salvar_temas(temas)
 
-    # === Cascade NOVOS CANAIS (ASH/PCC <- NARC, EOA <- NPD) ===
-    # So nas 2 datas (dia_x e dia_x1) que acabamos de adaptar NARC/NPD
+    # === Cascade NOVOS CANAIS (ASH/PCC <- NARC adaptado, EOA <- NPD adaptado) ===
+    # CRITICO: usar o RESULTADO ADAPTADO de NARC/NPD (cascade_results), NAO o item
+    # raw do backlog (que esta em formato CO1 "Chosen One/God"). Bug historico:
+    # passar item raw fazia LLM as vezes copiar sem adaptar — 28 celulas ASH/PCC/EOA
+    # de junho/2026 gravadas como copia do CO1.
+    # Combinado com _validar_adaptacao: rejeita gravar se output ainda tem vocab CO1.
     cascade_novos_results = {}
     erros_novos = []
-    novos_targets = []  # (row, canal_destino, item_fonte)
+    novos_targets = []  # (row, canal_destino, canal_fonte)
     # NARC -> ASH e PCC
-    for ri, item in ((dia_x, A), (dia_x1, C)):
-        novos_targets.append((ri, "ASH", item))
-        novos_targets.append((ri, "PCC", item))
+    for ri in (dia_x, dia_x1):
+        novos_targets.append((ri, "ASH", "NARC"))
+        novos_targets.append((ri, "PCC", "NARC"))
     # NPD -> EOA
-    for ri, item in ((dia_x, B), (dia_x1, D)):
-        novos_targets.append((ri, "EOA", item))
+    for ri in (dia_x, dia_x1):
+        novos_targets.append((ri, "EOA", "NPD"))
 
-    for ri, canal, item in novos_targets:
+    for ri, canal, canal_fonte in novos_targets:
         if canal not in canal_idx:
             print(f"[coringa-novos] {canal} nao existe no grid, pulando")
             continue
         # So adapta se destino esta vazio (nao sobrescreve)
         key = f"{ri}_{canal_idx[canal]}"
-        atual = (cascade_results.get((ri, canal_idx[canal])) or {})  # cuidado: namespace diferente
         with _temas_lock:
             temas_check = _carregar_temas()
             cel_atual = (temas_check.get("celulas", {}) or {}).get(key, {}) or {}
@@ -1338,22 +1479,41 @@ def processar_co_em_cruz() -> dict:
             print(f"[coringa-novos] {canal} row {ri} ja preenchido, pulando")
             continue
 
-        titulo = item.get("titulo", "")
-        thumb = item.get("texto_thumb", "")
+        # FONTE: resultado JA ADAPTADO de NARC/NPD (NAO o item raw do backlog)
+        fonte_res = cascade_results.get((ri, canal_idx.get(canal_fonte, -1)))
+        if not fonte_res:
+            erros_novos.append({"canal": canal, "row": ri,
+                                "erro": f"fonte {canal_fonte} sem resultado adaptado pra essa row"})
+            print(f"[coringa-novos] {canal} row {ri} ABORTADO: fonte {canal_fonte} nao adaptada antes")
+            continue
+        src_tema = fonte_res.get("tema", "")
+        src_titulo = fonte_res.get("titulo", "")
+        src_thumb = fonte_res.get("thumb", "")
+
         if canal == "ASH":
-            res = adaptar_ash(titulo, titulo, thumb)
+            res = adaptar_ash(src_tema, src_titulo, src_thumb)
         elif canal == "PCC":
-            res = adaptar_pcc(titulo, titulo, thumb)
+            res = adaptar_pcc(src_tema, src_titulo, src_thumb)
         elif canal == "EOA":
-            res = adaptar_eoa(titulo, titulo, thumb)
+            res = adaptar_eoa(src_tema, src_titulo, src_thumb)
         else:
             continue
+
         if not res.get("ok"):
             erros_novos.append({"canal": canal, "row": ri, "erro": res.get("erro")})
             print(f"[coringa-novos] {canal} row {ri} ERRO: {res.get('erro')}")
             continue
+
+        # VALIDACAO anti-regressao: rejeita output que mantenha vocab CO1
+        valido, motivo = _validar_adaptacao(canal, res)
+        if not valido:
+            erros_novos.append({"canal": canal, "row": ri, "erro": motivo,
+                                "raw_titulo": (res.get("titulo") or "")[:200]})
+            print(f"[coringa-novos] {canal} row {ri} REJEITADO: {motivo}")
+            continue
+
         cascade_novos_results[(ri, canal_idx[canal])] = res
-        print(f"[coringa-novos] {canal} row {ri} OK ({res.get('provider_usado')})")
+        print(f"[coringa-novos] {canal} row {ri} OK ({res.get('provider_usado')}) [fonte={canal_fonte}]")
 
     # Grava novos canais
     if cascade_novos_results:

@@ -554,6 +554,7 @@ def process_job(config: dict, job: dict) -> bool:
     tag = job["tag"]
     canal_idx = job.get("canal_idx", 0)
     tmpl = job["template"]
+    motor = (tmpl.get("motor") or "simples").lower()   # "simples" (FFmpeg) | "vidmator" | "hibrido" (Remotion/Director)
     idioma = job.get("idioma", "en")
     data_pasta = job.get("data_pasta", "")
     video_pasta = job.get("video_pasta", "")
@@ -586,10 +587,15 @@ def process_job(config: dict, job: dict) -> bool:
     roteiro_dir_local.mkdir(parents=True, exist_ok=True)
     roteiro_local = roteiro_dir_local / f"{tag}.txt"
     if not roteiro_local.exists():
-        roteiro_vps_path = str(Path(job.get("narr_path_vps", "")).parent.parent / "Roteiros" / f"{tag}.txt")
+        # PurePosixPath: narr_path_vps é caminho LINUX do VPS — Path() no Windows viraria backslashes
+        # e o endpoint /download não acharia o arquivo (bug pego no 1º e2e vidmator, 2026-07-02).
+        from pathlib import PurePosixPath
+        roteiro_vps_path = str(PurePosixPath(job.get("narr_path_vps", "").replace("\\", "/")).parent.parent
+                               / "Roteiros" / f"{tag}.txt")
         if download_file(config, roteiro_vps_path, str(roteiro_local)):
             log(f"  Roteiro salvo: {roteiro_local.name}")
-        # Nao falhar se roteiro nao baixar — nao é necessario pro render
+        # Nao falhar se roteiro nao baixar — nao é necessario pro render (motor simples);
+        # o motor vidmator PRECISA: render_vidmator valida e aborta com erro claro se faltar.
 
     # 3. Criar pasta de saida de video (sempre usar export_base local, ignorar path do VPS)
     output_dir = export_base / data_pasta / "Videos"
@@ -621,7 +627,7 @@ def process_job(config: dict, job: dict) -> bool:
         heartbeat = None
         try:
             srt_corrigido = None
-            if _legenda_ativa:
+            if _legenda_ativa and motor not in ("vidmator", "hibrido"):
                 # 3. Transcrever (Whisper GPU)
                 report_progress(config, canal_idx, "Transcrevendo...", 10, job_id=job_id)
                 log(f"  Transcrevendo...")
@@ -664,29 +670,43 @@ def process_job(config: dict, job: dict) -> bool:
             # 8s, MUITO mais frequente que o WORKER_JOB_TIMEOUT=7200s.
             report_progress(config, canal_idx, f"Renderizando{retry_msg}... 30%", 30, job_id=job_id)
             log(f"  Renderizando{retry_msg}...")
-            engine = VideoEngine(tmpl, narr_local, video_path)
-
-            _last_pct = [30]
-            _last_report_ts = [time.time()]
-            def _progress_cb(pct):
-                # Mapeia 0-100 do engine pra 30-100 do worker (deixa 30% pra Whisper+legendas)
-                new_pct = int(30 + (pct or 0) * 0.70)
-                if new_pct < 30: new_pct = 30
-                if new_pct > 100: new_pct = 100
-                # Throttle: report a cada 5% OU a cada 15s OU sempre quando >=99.
-                # Reduzido de 3%/8s -> 5%/15s em 2026-05-11 pois saturava VPS
-                # com progress requests (curl externo timeoutava por concorrencia).
-                # WORKER_JOB_TIMEOUT=300s comporta heartbeat a cada 15s com 20x folga.
-                now = time.time()
-                if (new_pct - _last_pct[0] >= 5) or (now - _last_report_ts[0] >= 15) or new_pct >= 99:
-                    _last_pct[0] = new_pct
-                    _last_report_ts[0] = now
+            if motor in ("vidmator", "hibrido"):
+                # === MOTOR VIDMATOR — edição superdinâmica (Remotion/Director) ===
+                # Faz a própria legenda + render; ignora whisper/SRT/engine do Automator.
+                # Saída no mesmo video_path -> validação + upload abaixo seguem iguais.
+                from vidmator_render import render_vidmator
+                def _vm_cb(msg, pct):
                     try:
-                        report_progress(config, canal_idx, f"Renderizando{retry_msg}... {new_pct}%", new_pct, job_id=job_id)
+                        report_progress(config, canal_idx, msg, int(pct), job_id=job_id)
                     except Exception:
                         pass
+                render_vidmator(tmpl, narr_local, str(roteiro_local), video_path,
+                                idioma=idioma, progress_cb=_vm_cb)
+            else:
+                # === MOTOR SIMPLES — engine FFmpeg (comportamento atual, intacto) ===
+                engine = VideoEngine(tmpl, narr_local, video_path)
 
-            engine.montar(srt_path=srt_corrigido, callback_progresso=_progress_cb)
+                _last_pct = [30]
+                _last_report_ts = [time.time()]
+                def _progress_cb(pct):
+                    # Mapeia 0-100 do engine pra 30-100 do worker (deixa 30% pra Whisper+legendas)
+                    new_pct = int(30 + (pct or 0) * 0.70)
+                    if new_pct < 30: new_pct = 30
+                    if new_pct > 100: new_pct = 100
+                    # Throttle: report a cada 5% OU a cada 15s OU sempre quando >=99.
+                    # Reduzido de 3%/8s -> 5%/15s em 2026-05-11 pois saturava VPS
+                    # com progress requests (curl externo timeoutava por concorrencia).
+                    # WORKER_JOB_TIMEOUT=300s comporta heartbeat a cada 15s com 20x folga.
+                    now = time.time()
+                    if (new_pct - _last_pct[0] >= 5) or (now - _last_report_ts[0] >= 15) or new_pct >= 99:
+                        _last_pct[0] = new_pct
+                        _last_report_ts[0] = now
+                        try:
+                            report_progress(config, canal_idx, f"Renderizando{retry_msg}... {new_pct}%", new_pct, job_id=job_id)
+                        except Exception:
+                            pass
+
+                engine.montar(srt_path=srt_corrigido, callback_progresso=_progress_cb)
 
             if Path(video_path).exists() and Path(video_path).stat().st_size > 1000:
                 # Valida moov atom ANTES de reportar complete. Sem isso,

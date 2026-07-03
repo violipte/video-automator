@@ -81,3 +81,13 @@ tmp_*.json
 
 # Claude Code session lock
 .claude-lock.json
+
+# segurança: NUNCA commitar backups/snapshots de dados sensíveis (incidente RunPod 2026-06)
+*.bak
+credentials.json.*
+_*_snapshot.json
+_backlog_snapshot.json
+_temas_snapshot.json
+afiliados.json
+afiliados_html/
+base_temas_export.html

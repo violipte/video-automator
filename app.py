@@ -89,6 +89,44 @@ if _frontend2_dir.exists() and (_frontend2_dir / "index.html").exists():
     def _frontend2_root():
         return FileResponse(_frontend2_dir / "index.html")
 
+
+# === AFILIADOS: serve HTMLs gerados em afiliados_html/<token>.html ===
+# Cada afiliado tem token hex (16 chars) registrado em afiliados.json.
+# URL: /temas/<token>  (sem .html, mais limpo)
+# Validacao: token deve estar em afiliados.json — impede adivinhacao.
+
+_AFILIADOS_DIR = BASE_DIR / "afiliados_html"
+_AFILIADOS_CONFIG = BASE_DIR / "afiliados.json"
+
+
+def _carregar_tokens_afiliados() -> set:
+    """Retorna set de tokens validos. Releitura por chamada (config muda raramente)."""
+    if not _AFILIADOS_CONFIG.exists():
+        return set()
+    try:
+        with open(_AFILIADOS_CONFIG, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return {a.get("token_hex") for a in data if a.get("token_hex")}
+    except Exception:
+        return set()
+
+
+@app.get("/temas/{token}")
+def _afiliado_html(token: str):
+    # Aceita token com ou sem .html
+    token = token.rstrip(".html") if token.endswith(".html") else token
+    # Sanity: 16 hex chars
+    if len(token) != 16 or not all(c in "0123456789abcdef" for c in token):
+        raise HTTPException(status_code=404, detail="not found")
+    # Token tem que estar no JSON (impede adivinhacao por filename)
+    if token not in _carregar_tokens_afiliados():
+        raise HTTPException(status_code=404, detail="not found")
+    arq = _AFILIADOS_DIR / f"{token}.html"
+    if not arq.exists():
+        raise HTTPException(status_code=404, detail="not found")
+    return FileResponse(arq, media_type="text/html")
+
+
 SERVER_START_TIME = time.time()
 
 # === ESTADO GLOBAL ===
@@ -1219,6 +1257,63 @@ async def salvar_temas_grid(request: Request):
             merged_celulas[key] = {**cel_atual, **novo_cel_clean}
         dados["celulas"] = merged_celulas
 
+    # === PROTECAO ANTI-REGRESSAO: rejeita sobrescrita de canais adaptados com vocab CO1 ===
+    # Historico (29/05 -> 01/06 2026): meu fix das 28 celulas ASH/PCC/EOA foi DESFEITO
+    # porque o frontend v2 tinha snapshot em cache (anterior ao fix) e fez save (drag/edit).
+    # O merge sobrescreveu o titulo/thumb/tema adaptados com a versao antiga "Chosen One".
+    # Agora: se o NOVO titulo/thumb de canal NARC/NPD/ASH/PCC/EOA contem vocab CO1
+    # (Chosen One/God/Earth/Devil/Heaven/Angels) E o cel_atual NAO contem, REJEITA a
+    # sobrescrita do titulo+thumb+tema e mantem o que ja estava no disco.
+    try:
+        import coringa_distribuidor as _cd
+        _CANAIS_ADAPTADOS = {"NARC", "NPD", "ASH", "PCC", "EOA"}
+        colunas_save = dados.get("colunas") or []
+        # Mapa: indice_coluna -> canal_nome (so adaptados)
+        _idx_canal = {}
+        for _i, _c in enumerate(colunas_save):
+            _nome = (_c.get("nome") or _c.get("tag") or "").strip()
+            if _nome in _CANAIS_ADAPTADOS:
+                _idx_canal[_i] = _nome
+        celulas_check = dados.get("celulas")
+        if isinstance(celulas_check, dict) and _idx_canal:
+            for _key, _cel in list(celulas_check.items()):
+                if not isinstance(_cel, dict):
+                    continue
+                # key formato "linha_coluna"
+                try:
+                    _ci = int(_key.split("_", 1)[1])
+                except Exception:
+                    continue
+                _canal = _idx_canal.get(_ci)
+                if not _canal:
+                    continue
+                # Valida o titulo+thumb novo
+                _valido, _motivo = _cd._validar_adaptacao(_canal, _cel)
+                if _valido:
+                    continue  # tudo OK, segue
+                # NOVO valor tem vocab CO1 — checa se o ANTIGO no disco tinha
+                _cel_disco = atual_celulas.get(_key, {}) if isinstance(atual_celulas, dict) else {}
+                _antigo_valido, _ = _cd._validar_adaptacao(_canal, _cel_disco) if isinstance(_cel_disco, dict) else (False, "")
+                if _antigo_valido:
+                    # Disco tinha versao adaptada CORRETA. Reverte.
+                    _cel["titulo"] = _cel_disco.get("titulo", _cel.get("titulo", ""))
+                    _cel["thumb"] = _cel_disco.get("thumb", _cel.get("thumb", ""))
+                    _cel["tema"] = _cel_disco.get("tema", _cel.get("tema", ""))
+                    print(f"[temas-save] {_canal} cel {_key}: REJEITADO sobrescrita com vocab CO1. "
+                          f"Mantido valor adaptado do disco. ({_motivo[:80]})")
+    except Exception as _e_validar:
+        # Falha na validacao nao deve derrubar o save
+        print(f"[temas-save] AVISO: validacao anti-regressao falhou: {_e_validar}")
+
+    # Default UPPERCASE pro campo `thumb` em todas as celulas (regra do grid Temas).
+    # Cobre tanto edicao manual no frontend quanto qualquer outra fonte de save.
+    # Se a celula vier sem thumb ou com thumb nao-string, nao toca.
+    celulas_final = dados.get("celulas")
+    if isinstance(celulas_final, dict):
+        for _key, _cel in celulas_final.items():
+            if isinstance(_cel, dict) and isinstance(_cel.get("thumb"), str):
+                _cel["thumb"] = _cel["thumb"].upper()
+
     scriptwriter.salvar_temas(dados)
     # Sync com Supabase: enviar cada célula com título
     config = scriptwriter.carregar_config()
@@ -2193,14 +2288,38 @@ async def prod_log_finish(request: Request):
 
 @app.post("/api/producao-completa/iniciar")
 async def iniciar_producao_completa(request: Request):
-    """Inicia produção completa no backend (thread)."""
+    """Inicia produção completa no backend (thread).
+
+    Aceita data_idx_fim (int, inclusivo) ou data_fim (string DD/MM/YYYY).
+    Quando loop=True + data_idx_fim setado, o loop encerra sozinho depois
+    da data_idx_fim fechar — sem precisar de gatilho externo.
+    """
     dados = await request.json()
     data_idx = dados.get("data_idx", -1)
     ordem = dados.get("ordem", None)
     loop = dados.get("loop", False)
+    data_idx_fim = dados.get("data_idx_fim")
+    data_fim = dados.get("data_fim")
     if data_idx < 0:
         raise HTTPException(400, "data_idx é obrigatório")
-    result = orchestrator.iniciar_producao(data_idx, ordem_colunas=ordem, loop=loop)
+    # Resolver data_fim (string DD/MM/YYYY) -> data_idx_fim via temas.json
+    if data_idx_fim is None and data_fim:
+        try:
+            temas = scriptwriter.carregar_temas() or {}
+            linhas = temas.get("linhas", []) if isinstance(temas, dict) else []
+            for i, L in enumerate(linhas):
+                if L.get("data") == data_fim:
+                    data_idx_fim = i
+                    break
+            if data_idx_fim is None:
+                raise HTTPException(400, f"data_fim {data_fim!r} nao encontrada no grid")
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(400, f"erro resolvendo data_fim: {e}")
+    result = orchestrator.iniciar_producao(
+        data_idx, ordem_colunas=ordem, loop=loop, data_idx_fim=data_idx_fim
+    )
     if not result.get("ok"):
         raise HTTPException(409, result.get("erro", "Erro"))
     return result
@@ -2523,6 +2642,7 @@ async def backlog_adicionar(request: Request):
     resultado = backlog_temas_db.adicionar(
         link=link, titulo=titulo, texto_thumb=texto_thumb,
         data=body.get("data"),
+        grupo=(body.get("grupo") or "geral"),   # multi-base: geral | estoicismo | ...
     )
     if "erro" in resultado:
         return {"ok": False, "erro": resultado["erro"]}
@@ -2617,9 +2737,10 @@ def coringa_distribuir_agora():
 
 
 @app.post("/api/coringa/distribuir-linha/{row_idx}")
-def coringa_distribuir_linha_endpoint(row_idx: int):
-    """Distribui Coringa de uma linha especifica (forca, ignora delay)."""
-    res = coringa_distribuidor.distribuir_linha_coringa(row_idx, ignorar_delay=True)
+def coringa_distribuir_linha_endpoint(row_idx: int, grupo: str = "geral"):
+    """Distribui a BASE de uma linha especifica (forca, ignora delay).
+    ?grupo=estoicismo distribui a BASE-EST dessa linha (default: BASE geral)."""
+    res = coringa_distribuidor.distribuir_linha_coringa(row_idx, ignorar_delay=True, grupo=grupo)
     return res
 
 
@@ -3861,6 +3982,10 @@ input[type=color] { width:48px; height:32px; padding:2px; border:1px solid var(-
         <input type="text" id="backlog-add-link" class="input" placeholder="Cole o link do YouTube (youtube.com/watch?v=... ou youtu.be/...)" style="flex:2;min-width:240px">
         <input type="text" id="backlog-add-titulo" class="input" placeholder="Titulo (opcional)" style="flex:2;min-width:200px">
         <input type="text" id="backlog-add-thumb" class="input" placeholder="Texto thumb (opcional)" style="flex:1;min-width:140px">
+        <select id="backlog-add-grupo" class="input" style="max-width:150px" title="Qual BASE recebe este tema">
+          <option value="geral">BASE (Geral)</option>
+          <option value="estoicismo">BASE-EST (Estoicismo)</option>
+        </select>
         <button class="btn btn-primary" onclick="addBacklogItem()">+ Adicionar</button>
       </div>
       <div id="backlog-add-erro" style="color:var(--danger);margin-top:8px;font-size:12px;display:none"></div>
@@ -9544,10 +9669,11 @@ async function addBacklogItem() {
   if (addBtn) { addBtn.disabled = true; addBtn.textContent = 'Buscando...'; }
 
   try {
+    const grupoSel = document.getElementById('backlog-add-grupo');
     const r = await fetch('/api/backlog', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ link: link, titulo: tituloInp.value, texto_thumb: thumbInp.value })
+      body: JSON.stringify({ link: link, titulo: tituloInp.value, texto_thumb: thumbInp.value, grupo: (grupoSel ? grupoSel.value : 'geral') })
     });
     const d = await r.json();
     if (!d.ok) { erroDiv.textContent = d.erro || 'Erro ao adicionar'; erroDiv.style.display = 'block'; return; }

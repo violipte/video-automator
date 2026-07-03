@@ -66,6 +66,9 @@ def _carregar() -> dict:
             elif "status" in it and "geral" in it:
                 # ambos existem, manter geral (mais recente) e remover status legado
                 it.pop("status", None)
+            # Migration multi-base (2026-07): itens sem grupo pertencem a BASE geral
+            if "grupo" not in it:
+                it["grupo"] = "geral"
         return data
     except Exception:
         return {"itens": []}
@@ -100,15 +103,19 @@ def _proxima_data_sequencial(itens: list) -> str:
     return proxima.strftime("%d/%m/%Y")
 
 
-def adicionar(link: str = "", titulo: str = "", texto_thumb: str = "", data: str = None) -> dict:
+def adicionar(link: str = "", titulo: str = "", texto_thumb: str = "", data: str = None,
+              grupo: str = "geral") -> dict:
     """Adiciona item. Retorna o item criado ou {'erro': '...'} em caso de erro.
 
     Aceita 2 modos:
     - Com link YT: extrai video_id, permite enrich (oEmbed + OCR).
     - Sem link (tema manual): exige titulo. video_id e link ficam vazios.
+
+    grupo: qual BASE recebe o item ("geral" = BASE espiritual | "estoicismo" = BASE-EST | futuros nichos).
     """
     link = (link or "").strip()
     titulo_clean = (titulo or "").strip()
+    grupo = (grupo or "geral").strip().lower()
 
     # Regras de validacao
     if not link and not titulo_clean:
@@ -141,6 +148,7 @@ def adicionar(link: str = "", titulo: str = "", texto_thumb: str = "", data: str
             "texto_thumb": (texto_thumb or "").strip(),
             "link": link,
             "video_id": video_id,
+            "grupo": grupo,   # multi-base: geral | estoicismo | ...
             "geral": "",
             "co": "",
             "criado_em": datetime.now().isoformat(timespec="seconds"),

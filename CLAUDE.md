@@ -4,6 +4,29 @@
 
 Local automation tool that replaces Adobe Premiere Pro for YouTube video production. Produces 12+ videos/day across 6+ channels using Python + FFmpeg. Operator (Piter) runs channels in EN, DE, PT, ES covering spiritual content (Chosen One / Starseed niches). The goal is 100% automation: from script generation through narration, subtitle, video assembly, and (future) upload.
 
+## ⚠️ INFRA / FONTE DE VERDADE (LER PRIMEIRO — evita retrabalho)
+
+- **NÃO existe "v2" como projeto/banco separado.** "v2" = só o **frontend React** (`frontend2/`) que renderiza o MESMO `temas.json`. A URL `http://85.239.243.215:8500/v2/temas` é a UI nova sobre os mesmos dados.
+- **A FONTE DE VERDADE roda no VPS Contabo, NÃO no PC local.** O dono opera tudo via VPS.
+  - Grid de temas: **`GET/POST http://85.239.243.215:8500/api/temas`** → JSON em `/opt/video-automator/temas.json` (~4.4MB), FastAPI. Sem Supabase/DB.
+  - O **`temas.json` LOCAL deste repo está DESATUALIZADO** (parou ~18/04/2026). **NUNCA** edite o local achando que é a fonte — sempre via API do VPS.
+  - `GET /api/health` → `{ok, producao_ativa, render_queue, loop}`. Cheque `producao_ativa:false` antes de batch (race no save).
+  - `POST /api/temas` grava o grid INTEIRO (read-modify-write) → risco de race. Padrão: GET → muda só a célula → POST → relê e confirma → retry.
+- **Deploy:** `./deploy.sh <arquivos>` (deste repo) → VPS; `ssh root@85.239.243.215` + `systemctl restart video-automator`; logs `journalctl -u video-automator -f`. Código no VPS em `/opt/video-automator/`.
+- **Ambientes:** PROD = `video-automator/` (este repo, deploy→VPS). DEV = `automator-dev/` (constrói/testa antes de mergear). `render_worker.py` roda **LOCAL no PC** (REMOTE_MODE: VPS orquestra, worker local renderiza) — editar o worker local afeta o render, mas reiniciar o processo pra carregar.
+- **Grid:** 18 colunas (0-17). col 0 = BASE (semente, não sobe). col 5 = ENS (OCULTO). 16 canais válidos (CON/DE/EN/EN2/EN3/ENO/ENO2/CO1-4/NARC/NPD/ASH/PCC/EOA).
+
+## ⚡ VidMator — motor de edição dinâmica (EM PRODUÇÃO desde 2026-07-02)
+
+**Leia `VIDMATOR_INTEGRATION.md` — inteligência completa.** Resumo: cada template tem `motor`
+(`simples`=FFmpeg legado | `vidmator`=Remotion/Director). Canais EST/TTM/TTM2 (e DOC) produzem em
+série pelo fluxo natural (pipeline nativa → narração Chatterbox local → bridge `vidmator_render.py`
+com lock de serialização + gate do CTA de produto + cold-open typewriter). O campo `motor` é lido só
+no `render_worker.py` LOCAL (plugar canal novo NÃO exige deploy; exige restart dos workers se o bridge
+mudar). Grid tem multi-BASE por grupo (BASE espiritual + BASE-EST estoicismo) no coringa. Regras
+críticas: 1 template POR canal (colisão de nomes); CTA do eBook NUNCA pode faltar (3 gates); após
+mudança estrutural no grid, F5 na aba + re-verificar (clobber por UI stale).
+
 ## Architecture
 
 **Single-file SPA**: FastAPI backend (`app.py`, ~7800 lines) serves an inline HTML/JS dashboard via a `DASHBOARD_HTML` string. No separate frontend build. All JavaScript lives inside Python string literals in `app.py`. Server runs on port 8500.
