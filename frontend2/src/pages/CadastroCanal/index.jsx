@@ -14,6 +14,7 @@ const SECOES = [
     titulo: '1. Identidade', campos: [
       { k: 'nome', l: 'Nome do canal (YouTube)', t: 'text', req: true },
       { k: 'handle', l: 'Handle/@ desejado', t: 'text', req: true },
+      { k: 'sigla', l: 'Sigla/TAG do canal (ex.: EST, CO3 — vira nome da coluna e prefixo dos arquivos)', t: 'text', req: true },
       { k: 'idioma', l: 'Idioma', t: 'select', req: true, ops: ['EN', 'PT', 'DE', 'ES', 'outro'] },
     ],
   },
@@ -31,7 +32,6 @@ const SECOES = [
       { k: 'roteiro_chars', l: 'Tamanho do roteiro', t: 'select', req: true, ops: ['~8k chars (8-10min)', '~13k (12-15min)', '~23-26k (20-30min)', 'outro'] },
       { k: 'hook_tempo', l: 'Tempo do hook', t: 'select', req: true, ops: ['15s', '30s', '1min', '2min', 'custom'] },
       { k: 'abertura', l: 'Estilo de abertura', t: 'select', req: true, ops: ['com frase (cold-open quote + typewriter)', 'sem frase'] },
-      { k: 'estrutura_roteiro', l: 'Estrutura do roteiro (default = padrão do nicho: TTM somático / VidRush numerado / doc-histórias)', t: 'text' },
     ],
   },
   {
@@ -72,7 +72,7 @@ const SECOES = [
   {
     titulo: '8. Infra & Contas', campos: [
       { k: 'conta_google', l: 'Conta Google (email)', t: 'text', req: true },
-      { k: 'proxy_modo', l: 'Proxy (canal logado SEMPRE no seu próprio proxy)', t: 'select', req: true, ops: ['alocar um dos 16 SOCKS5 livres', 'novo proxy dedicado'] },
+      { k: 'proxy_id', l: 'Proxy — ID no drive-to-youtube (canal logado SEMPRE no seu próprio proxy)', t: 'text', req: true },
       { k: 'oauth_feito', l: 'OAuth de upload (drive-to-youtube) já feito?', t: 'toggle' },
       { k: 'coluna_grid', l: 'Coluna no grid (nova — posição? ou substituir qual?)', t: 'text', req: true },
     ],
