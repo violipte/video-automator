@@ -50,6 +50,8 @@ const SECOES = [
       { k: 'legenda', l: 'Legenda queimada', t: 'select', ops: ['não', 'sim — estilo 1', 'sim — estilo 2', 'sim — estilo 3', 'sim — estilo 4', 'sim — estilo 5'] },
       { k: 'thumb', l: 'Estilo de thumb (referência ou descrição)', t: 'textarea' },
       { k: 'moldura', l: 'Marca d’água/moldura (caminho ou vazio)', t: 'text' },
+      { k: 'personagem', l: 'Canal terá PERSONAGEM dinâmico (mascote nos beats)?', t: 'toggle', req: true },
+      { k: 'personagem_pasta', l: 'Link da pasta com as imagens do personagem (poses)', t: 'text' },
     ],
   },
   {
@@ -101,7 +103,7 @@ export function CadastroCanal() {
   useEffect(() => { carregar() }, [])
 
   const okCount = useMemo(
-    () => OBRIGATORIOS.filter((k) => (k === 'tipo_a' || k === 'tem_produto')
+    () => OBRIGATORIOS.filter((k) => (k === 'tipo_a' || k === 'tem_produto' || k === 'personagem')
       ? form[k] !== undefined : preenchido(form[k])).length,
     [form],
   )
