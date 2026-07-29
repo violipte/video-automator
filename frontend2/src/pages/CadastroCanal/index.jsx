@@ -15,21 +15,12 @@ const SECOES = [
       { k: 'nome', l: 'Nome do canal (YouTube)', t: 'text', req: true },
       { k: 'handle', l: 'Handle/@ desejado', t: 'text', req: true },
       { k: 'idioma', l: 'Idioma', t: 'select', req: true, ops: ['EN', 'PT', 'DE', 'ES', 'outro'] },
-      { k: 'publico', l: 'País/público-alvo (ex.: EUA 45+)', t: 'text', req: true },
-      { k: 'posicionamento', l: 'Posicionamento em 1 frase ("canal de ___ que ___ para ___")', t: 'textarea', req: true },
-      { k: 'rede', l: 'Rede/família (irmão de qual canal?)', t: 'text' },
-      { k: 'referencias', l: 'Canais-modelo (1-3 links)', t: 'textarea' },
     ],
   },
   {
-    titulo: '2. Nicho & Conteúdo', campos: [
+    titulo: '2. Nicho', campos: [
       { k: 'nicho', l: 'Nicho principal', t: 'text', req: true },
-      { k: 'subnichos', l: 'Subnichos permitidos (rotação)', t: 'text' },
       { k: 'tipo_a', l: 'Nicho de PRODUTO/MODELO (tipo A — carros, bikes, tênis)? B-roll travado no modelo exato', t: 'toggle', req: true },
-      { k: 'temas_semente', l: '10 temas/títulos-semente pra primeira leva (um por linha)', t: 'textarea', req: true, rows: 6 },
-      { k: 'proibidos', l: 'Temas/abordagens PROIBIDOS neste canal (child safety já vale pra todos)', t: 'textarea', req: true },
-      { k: 'autoridades', l: 'Autoridades/figuras citáveis do nicho', t: 'textarea' },
-      { k: 'termos_banidos', l: 'Termos banidos no roteiro (ex.: hustle, mindset, alpha)', t: 'text' },
     ],
   },
   {
@@ -38,8 +29,9 @@ const SECOES = [
       { k: 'estilo', l: 'Estilo (se vidmator/híbrido)', t: 'select', ops: ['v1 (limpo, aprovado)', 'v2 (trilha por momento + SFX + overlays)'] },
       { k: 'tier', l: 'Tier de footage do canal', t: 'select', req: true, ops: ['T1 — só stock', 'T2 — stock + CC/domínio público', 'T3 — web completo'] },
       { k: 'roteiro_chars', l: 'Tamanho do roteiro', t: 'select', req: true, ops: ['~8k chars (8-10min)', '~13k (12-15min)', '~23-26k (20-30min)', 'outro'] },
+      { k: 'hook_tempo', l: 'Tempo do hook', t: 'select', req: true, ops: ['15s', '30s', '1min', '2min', 'custom'] },
+      { k: 'abertura', l: 'Estilo de abertura', t: 'select', req: true, ops: ['com frase (cold-open quote + typewriter)', 'sem frase'] },
       { k: 'estrutura_roteiro', l: 'Estrutura do roteiro (default = padrão do nicho: TTM somático / VidRush numerado / doc-histórias)', t: 'text' },
-      { k: 'shorts', l: 'Shorts por semana (0 = não)', t: 'text' },
     ],
   },
   {
@@ -48,8 +40,6 @@ const SECOES = [
       { k: 'voz_nome', l: 'Nome/ID da voz (se existente — ex.: George, Brian)', t: 'text' },
       { k: 'voz_provider', l: 'Provider', t: 'select', req: true, ops: ['chatterbox (local, pool)', 'minimax_clone', 'inworld', 'ai33'] },
       { k: 'voz_speed', l: 'Speed (default 0.95)', t: 'text' },
-      { k: 'voz_pitch', l: 'Pitch (default 0)', t: 'text' },
-      { k: 'correcoes', l: 'Palavras que o STT/narração erra ("epic tetus"→"Epictetus", uma por linha)', t: 'textarea' },
     ],
   },
   {
@@ -64,7 +54,7 @@ const SECOES = [
   },
   {
     titulo: '6. Áudio', campos: [
-      { k: 'trilha_modo', l: 'Trilha', t: 'select', req: true, ops: ['acervo da equipe por momento (v2, automático)', 'pasta fixa no Drive', 'arquivo único'] },
+      { k: 'trilha_modo', l: 'Trilha', t: 'select', req: true, ops: ['pasta local (por momento, v2 automático)', 'pasta fixa no Drive', 'arquivo único'] },
       { k: 'trilha_detalhe', l: 'Pasta/arquivo da trilha (se fixa)', t: 'text' },
       { k: 'trilha_volume', l: 'Volume da trilha (default 0.08 v2 / padrão do template)', t: 'text' },
       { k: 'sfx', l: 'SFX/whoosh/transitions (v2)', t: 'select', ops: ['sim (default)', 'reduzido', 'não'] },
@@ -77,26 +67,20 @@ const SECOES = [
       { k: 'link_destino', l: 'link_destino (URL do produto)', t: 'text' },
       { k: 'cta_overlay', l: 'CTA subscribe overlay', t: 'select', ops: ['default (30s, 8s, a cada 300s)', 'custom', 'não'] },
       { k: 'comentario_fixado', l: 'Comentário fixado padrão (com link?)', t: 'textarea' },
-      { k: 'afiliados', l: 'Afiliados/links extras da descrição', t: 'textarea' },
     ],
   },
   {
     titulo: '8. Infra & Contas', campos: [
-      { k: 'conta_google', l: 'Conta Google (email) — criação/login/senha é com o Piter', t: 'text', req: true },
+      { k: 'conta_google', l: 'Conta Google (email)', t: 'text', req: true },
       { k: 'proxy_modo', l: 'Proxy (canal logado SEMPRE no seu próprio proxy)', t: 'select', req: true, ops: ['alocar um dos 16 SOCKS5 livres', 'novo proxy dedicado'] },
       { k: 'oauth_feito', l: 'OAuth de upload (drive-to-youtube) já feito?', t: 'toggle' },
       { k: 'coluna_grid', l: 'Coluna no grid (nova — posição? ou substituir qual?)', t: 'text', req: true },
-      { k: 'coringa_recebe', l: 'Recebe temas do coringa? (só com regra de nicho própria — lição ENO)', t: 'toggle', req: true },
-      { k: 'regra_nicho', l: 'Regra de nicho (1-3 frases: o que É e o que NÃO É tema deste canal)', t: 'textarea', req: true },
     ],
   },
   {
-    titulo: '9. Debut & Cadência', campos: [
-      { k: 'debut_data', l: 'Data-alvo do debut', t: 'text', req: true },
-      { k: 'videos_lancamento', l: 'Vídeos prontos no lançamento', t: 'select', req: true, ops: ['1', '3 (recomendado)', '5+'] },
-      { k: 'cadencia', l: 'Cadência pós-debut', t: 'select', req: true, ops: ['1/dia', '3/semana', 'outro'] },
-      { k: 'horario', l: 'Horário de publicação (timezone do público)', t: 'text' },
-      { k: 'descricao', l: 'Descrição do canal (vazio = eu escrevo a partir do posicionamento)', t: 'textarea' },
+    titulo: '9. Descrições & Playlists', campos: [
+      { k: 'descricao', l: 'Descrição do canal', t: 'textarea' },
+      { k: 'descricao_videos', l: 'Descrição default dos vídeos (usada em todo upload; {{titulo}} disponível)', t: 'textarea' },
       { k: 'playlists', l: 'Playlists iniciais', t: 'text' },
     ],
   },
@@ -118,7 +102,7 @@ export function CadastroCanal() {
   useEffect(() => { carregar() }, [])
 
   const okCount = useMemo(
-    () => OBRIGATORIOS.filter((k) => (k === 'tipo_a' || k === 'tem_produto' || k === 'coringa_recebe')
+    () => OBRIGATORIOS.filter((k) => (k === 'tipo_a' || k === 'tem_produto')
       ? form[k] !== undefined : preenchido(form[k])).length,
     [form],
   )
