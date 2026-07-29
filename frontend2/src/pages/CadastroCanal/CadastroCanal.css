@@ -1,0 +1,81 @@
+/* Cadastro de Canal — segue os tokens do tema (dark + accent) */
+.cadcanal {
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  gap: 16px;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* lista lateral */
+.cadcanal-lista {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px;
+  overflow-y: auto;
+}
+.cadcanal-lista-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+.cadcanal-lista-head h2 { font-size: var(--text-sm); text-transform: uppercase; letter-spacing: var(--track-wide); color: var(--text-sec); }
+.cadcanal-vazio { color: var(--text-sec); font-size: var(--text-sm); padding: 8px 4px; }
+.cadcanal-item { padding: 8px 10px; border-radius: 8px; cursor: pointer; border: 1px solid transparent; margin-bottom: 4px; }
+.cadcanal-item:hover { background: var(--panel); }
+.cadcanal-item.ativo { border-color: var(--accent); background: var(--panel); }
+.cadcanal-item-nome { font-size: var(--text-sm); font-weight: var(--fw-medium); color: var(--text); }
+.cadcanal-item-meta { display: flex; justify-content: space-between; align-items: center; margin-top: 4px; }
+.cadcanal-pill { font-size: var(--text-xs); padding: 1px 8px; border-radius: 99px; background: var(--panel); border: 1px solid var(--border); color: var(--text-sec); }
+.cadcanal-pill.ok { color: var(--accent); border-color: var(--accent); }
+.cadcanal-del { background: none; border: none; color: var(--text-sec); cursor: pointer; font-size: 14px; }
+.cadcanal-del:hover { color: #e5484d; }
+
+/* form */
+.cadcanal-form { overflow-y: auto; padding-right: 6px; }
+.cadcanal-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; margin-bottom: 14px; }
+.cadcanal-head h1 { font-size: 20px; color: var(--text); }
+.cadcanal-sub { color: var(--text-sec); font-size: var(--text-sm); margin-top: 4px; max-width: 640px; }
+.cadcanal-progresso { min-width: 180px; text-align: right; }
+.cadcanal-prog-txt { font-size: var(--text-xs); color: var(--text-sec); margin-bottom: 4px; }
+.cadcanal-prog-bar { height: 6px; background: var(--panel-2); border-radius: 99px; overflow: hidden; }
+.cadcanal-prog-bar div { height: 100%; background: var(--accent); transition: width var(--t-fast); }
+
+.cadcanal-secao { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; margin-bottom: 12px; }
+.cadcanal-secao h3 { font-size: var(--text-sm); color: var(--text); margin-bottom: 10px; }
+.cadcanal-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; }
+.cadcanal-campo { display: flex; flex-direction: column; gap: 4px; }
+.cadcanal-campo.wide { grid-column: 1 / -1; }
+.cadcanal-label { font-size: var(--text-xs); color: var(--text-sec); }
+.cadcanal-label em { color: var(--accent); font-style: normal; font-weight: bold; }
+
+.cadcanal-campo input, .cadcanal-campo textarea, .cadcanal-campo select {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 7px 10px;
+  font-size: var(--text-sm);
+  font-family: inherit;
+  outline: none;
+}
+.cadcanal-campo input:focus, .cadcanal-campo textarea:focus, .cadcanal-campo select:focus { border-color: var(--accent); }
+.cadcanal-campo textarea { resize: vertical; }
+
+.cadcanal-toggle { display: flex; gap: 6px; }
+.cadcanal-toggle button {
+  flex: 1; padding: 6px 0; border-radius: 8px; cursor: pointer;
+  background: var(--panel); border: 1px solid var(--border); color: var(--text-sec); font-size: var(--text-sm);
+}
+.cadcanal-toggle button.on { border-color: var(--accent); color: var(--accent); font-weight: var(--fw-medium); }
+
+.cadcanal-rodape { position: sticky; bottom: 0; background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 16px; display: flex; align-items: center; gap: 14px; }
+.cadcanal-guardrails { flex: 1; font-size: var(--text-xs); color: var(--text-sec); }
+.cadcanal-msg { font-size: var(--text-sm); }
+.cadcanal-msg.ok { color: var(--accent); }
+.cadcanal-msg.erro { color: #e5484d; }
+
+.cadcanal-btn {
+  background: var(--panel); border: 1px solid var(--border); color: var(--text);
+  border-radius: 8px; padding: 6px 14px; font-size: var(--text-sm); cursor: pointer;
+}
+.cadcanal-btn:hover { border-color: var(--accent); }
+.cadcanal-btn.primario { background: var(--accent); border-color: var(--accent); color: #0b0f0c; font-weight: var(--fw-medium); padding: 9px 22px; }
+.cadcanal-btn.primario:disabled { opacity: 0.6; cursor: default; }

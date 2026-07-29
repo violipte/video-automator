@@ -7,6 +7,8 @@ const NAV = [
   { to: '/temas',    label: 'Temas',         icon: 'M9.663 17h4.673M12 3v1M19.07 4.93l-.7.7M21 12h-1M4 12H3M5.64 5.64l-.71-.7M9 18.5h6L13.5 16h-3L9 18.5z' },
   { to: '/backlog',  label: 'Backlog Temas', icon: 'M9 11H5a2 2 0 00-2 2v7a2 2 0 002 2h14a2 2 0 002-2v-7a2 2 0 00-2-2h-4M9 11V5h6v6M12 14v4' },
   { to: '/templates',label: 'Templates',     icon: 'M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z' },
+  { to: '/vidmator', label: 'VidMator',      icon: 'M19.82 2H4.18A2.18 2.18 0 0 0 2 4.18v15.64A2.18 2.18 0 0 0 4.18 22h15.64A2.18 2.18 0 0 0 22 19.82V4.18A2.18 2.18 0 0 0 19.82 2zM7 2v20M17 2v20M2 12h20M2 7h5M2 17h5M17 17h5M17 7h5' },
+  { to: '/cadastro-canal', label: 'Cadastro Canal', icon: 'M16 21v-2a4 4 0 00-4-4H6a4 4 0 00-4 4v2M9 11a4 4 0 100-8 4 4 0 000 8zM19 8v6M22 11h-6' },
   { to: '/monitor',  label: 'Monitor',       icon: 'M22 12h-4l-3 9L9 3l-3 9H2' },
   { to: '/log',      label: 'Log',           icon: 'M3 3h18v18H3zM3 9h18M9 3v18' },
   { to: '/config',   label: 'Config',        icon: 'M12 15a3 3 0 100-6 3 3 0 000 6zM19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9' },

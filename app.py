@@ -10,7 +10,7 @@ import threading
 import time
 import uuid
 import shutil
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Adicionar DLLs NVIDIA ao PATH para CUDA funcionar (so no Windows)
@@ -36,6 +36,7 @@ import production_log
 import orchestrator
 import render_queue
 import narration_queue
+import tempo_tracker
 
 # Imports GPU — so necessarios em modo local (render_queue.REMOTE_MODE=False)
 if not render_queue.REMOTE_MODE:
@@ -249,6 +250,57 @@ def deletar_template(template_id: str):
         raise HTTPException(404, "Template não encontrado")
     del templates[template_id]
     salvar_templates(templates)
+    return {"ok": True}
+
+
+# === API: CADASTRO DE CANAL (formulário de debut — 28/07/2026) ===
+# Respostas alimentam: coluna do grid, templates.json, pipeline, style_card VidMator.
+
+CADASTROS_FILE = BASE_DIR / "cadastros_canais.json"
+_cadastros_lock = threading.Lock()
+
+
+def _carregar_cadastros() -> dict:
+    if CADASTROS_FILE.exists():
+        with open(CADASTROS_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+
+def _salvar_cadastros(cads: dict):
+    with open(CADASTROS_FILE, "w", encoding="utf-8") as f:
+        json.dump(cads, f, ensure_ascii=False, indent=2)
+
+
+@app.get("/api/cadastros-canal")
+def listar_cadastros_canal():
+    cads = _carregar_cadastros()
+    return sorted(cads.values(), key=lambda c: c.get("criado_em") or "", reverse=True)
+
+
+@app.post("/api/cadastros-canal")
+async def salvar_cadastro_canal(request: Request):
+    dados = await request.json()
+    cid = dados.get("id") or str(uuid.uuid4())[:8]
+    dados["id"] = cid
+    agora = datetime.now().isoformat()
+    dados["atualizado_em"] = agora
+    with _cadastros_lock:
+        cads = _carregar_cadastros()
+        dados["criado_em"] = (cads.get(cid) or {}).get("criado_em") or agora
+        cads[cid] = dados
+        _salvar_cadastros(cads)
+    return dados
+
+
+@app.delete("/api/cadastros-canal/{cid}")
+def deletar_cadastro_canal(cid: str):
+    with _cadastros_lock:
+        cads = _carregar_cadastros()
+        if cid not in cads:
+            raise HTTPException(404, "Cadastro não encontrado")
+        del cads[cid]
+        _salvar_cadastros(cads)
     return {"ok": True}
 
 
@@ -1336,6 +1388,45 @@ async def salvar_temas_grid(request: Request):
                 cel["synced"] = True
         scriptwriter.salvar_temas(dados)
     return {"ok": True}
+
+
+@app.post("/api/upload/mark")
+async def upload_mark(request: Request):
+    """Marca UMA celula do grid como uploaded (patch ATOMICO, sob o lock do temas).
+
+    Plug do upload event-driven (handoff drive-to-youtube). Substitui o
+    read-modify-write do grid inteiro (~4.4MB) do mark_uploaded: o cliente
+    manda so a identidade (row/col) + campos de upload; o servidor serializa
+    marks concorrentes aqui -> sem lost-update (a race que dessincronizava
+    CO3/CO4). Campos em WHITELIST (nao permite patchar tema/titulo/thumb/roteiro).
+
+    Body: {row:int, col:int, youtube_video_id, youtube_publish_at?, youtube_url?,
+           upload_status?, uploaded_at?}
+    """
+    body = await request.json()
+    try:
+        row = int(body.get("row"))
+        col = int(body.get("col"))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "row e col (int) sao obrigatorios")
+    key = f"{row}_{col}"
+    CAMPOS_OK = ("youtube_video_id", "youtube_publish_at", "youtube_url",
+                 "upload_status", "uploaded_at")
+    patch = {c: body[c] for c in CAMPOS_OK if body.get(c) is not None}
+    if not patch:
+        raise HTTPException(400, "nenhum campo de upload valido no payload")
+    if not patch.get("uploaded_at"):
+        patch["uploaded_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    if not patch.get("upload_status"):
+        patch["upload_status"] = "uploaded"
+    cel = scriptwriter.patch_temas_celula(key, patch)
+    return {
+        "ok": True,
+        "cell": key,
+        "patch": patch,
+        "titulo": cel.get("titulo", ""),
+        "youtube_video_id": cel.get("youtube_video_id", ""),
+    }
 
 
 # === API: NARRAÇÃO ===
@@ -10564,8 +10655,18 @@ def health_check():
     }
 
 
+@app.get("/api/tempos-producao")
+def tempos_producao(limit: int = 60):
+    """Tempo PRECISO por data (tempo_tracker): total wall-clock (à prova de
+    restart/travamento) + tempo ativo + tempo travado + nº de sessões."""
+    return {"tempos": tempo_tracker.resumo(limit=limit)}
+
+
 # === RENDER QUEUE WORKER (startup) ===
 render_queue.iniciar_worker()
+
+# === TEMPO TRACKER (startup) — mede tempo PRECISO por data, à prova de restart/travamento ===
+tempo_tracker.iniciar_tracker()
 
 # === HEALTH MONITOR (thread em background) ===
 

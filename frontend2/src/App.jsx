@@ -5,8 +5,10 @@ import { Backlog } from './pages/Backlog'
 import { Monitor } from './pages/Monitor'
 import { Temas } from './pages/Temas'
 import { Templates } from './pages/Templates'
+import { VidMator } from './pages/VidMator'
 import { Log } from './pages/Log'
 import { Config } from './pages/Config'
+import { CadastroCanal } from './pages/CadastroCanal'
 
 const BASENAME = import.meta.env.BASE_URL.replace(/\/$/, '') || '/'
 
@@ -20,6 +22,8 @@ export default function App() {
           <Route path="/temas"     element={<Temas />} />
           <Route path="/backlog"   element={<Backlog />} />
           <Route path="/templates" element={<Templates />} />
+          <Route path="/vidmator"  element={<VidMator />} />
+          <Route path="/cadastro-canal" element={<CadastroCanal />} />
           <Route path="/log"       element={<Log />} />
           <Route path="/config"    element={<Config />} />
           <Route path="/showcase"  element={<Showcase />} />
