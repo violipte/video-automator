@@ -74,7 +74,6 @@ const SECOES = [
       { k: 'conta_google', l: 'Conta Google (email)', t: 'text', req: true },
       { k: 'proxy_id', l: 'Proxy — ID no drive-to-youtube (canal logado SEMPRE no seu próprio proxy)', t: 'text', req: true },
       { k: 'oauth_feito', l: 'OAuth de upload (drive-to-youtube) já feito?', t: 'toggle' },
-      { k: 'coluna_grid', l: 'Coluna no grid (nova — posição? ou substituir qual?)', t: 'text', req: true },
     ],
   },
   {
