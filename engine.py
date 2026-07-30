@@ -945,11 +945,16 @@ class VideoEngine:
             ret = subprocess.run(clean_cmd, capture_output=True, timeout=60)
             if ret.returncode == 0 and Path(clean_tmp).exists():
                 Path(output_tmp).unlink(missing_ok=True)
-                Path(clean_tmp).rename(self.output_path)  # atomic: .tmp -> .mp4
+                # os.replace (NAO Path.rename): no Windows, rename() levanta
+                # WinError 183 ("arquivo ja existente") se o .mp4 destino existir
+                # -> o video ficava orfao como _clean.tmp e o job era dado como
+                # falho (mordeu NPD 21/07 e EN2 29/07). os.replace sobrescreve
+                # atomicamente em Windows e POSIX.
+                os.replace(str(clean_tmp), str(self.output_path))
             else:
                 # Cleanup metadata falhou — fallback: renomear .tmp direto pra .mp4.
                 # Perde o strip de metadata mas preserva o video.
-                Path(output_tmp).rename(self.output_path)
+                os.replace(str(output_tmp), str(self.output_path))
                 if Path(clean_tmp).exists():
                     Path(clean_tmp).unlink(missing_ok=True)
 

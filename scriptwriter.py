@@ -5,6 +5,8 @@ Suporta Claude, GPT e Gemini. Sistema de credenciais múltiplas com listagem aut
 
 import json
 import os
+import shutil
+import threading
 import time
 import traceback
 from pathlib import Path
@@ -29,16 +31,89 @@ SCRIPTS_DIR.mkdir(exist_ok=True)
 
 # === PERSISTÊNCIA ===
 
+# Lock global por path para evitar writes concorrentes corromperem o arquivo.
+# Salva ATOMICAMENTE (tmp + os.replace) e mantém 5 backups rotativos.
+# Bug histórico (03/06/2026): write não-atômico em temas.json deixou o arquivo
+# com null bytes no meio + header zerado, derrubando o orchestrator.
+_SAVE_LOCKS: dict = {}
+_SAVE_LOCKS_LOCK = threading.Lock()
+
+# Arquivos críticos: mantém backups rotativos antes de cada save.
+_BACKUP_ROTATIVO = {"temas.json", "config.json", "pipelines.json", "credentials.json", "templates.json"}
+
+
+def _get_save_lock(path: Path) -> threading.Lock:
+    p = str(path)
+    with _SAVE_LOCKS_LOCK:
+        lk = _SAVE_LOCKS.get(p)
+        if lk is None:
+            lk = threading.Lock()
+            _SAVE_LOCKS[p] = lk
+        return lk
+
+
 def _carregar_json(path: Path, default=None):
     if path.exists():
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            # Arquivo corrompido — tentar último backup .bak1 e logar incidente.
+            print(f"[_carregar_json] ARQUIVO CORROMPIDO {path.name}: {e}")
+            for i in range(1, 6):
+                bak = path.with_name(path.name + f".bak{i}")
+                if bak.exists():
+                    try:
+                        with open(bak, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                        print(f"[_carregar_json] RECUPERADO de {bak.name}")
+                        return data
+                    except Exception:
+                        continue
+            print(f"[_carregar_json] NENHUM backup valido para {path.name}, usando default")
     return default if default is not None else {}
 
 
 def _salvar_json(path: Path, data):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    """Write atômico: tmp + os.replace + backup rotativo.
+    Garante: nunca deixa o arquivo final em estado parcial. Mesmo se o processo
+    morrer no meio, o arquivo original permanece intacto (só o .tmp fica perdido).
+    Concorrência: lock por path serializa writes ao mesmo arquivo no mesmo processo.
+    """
+    lock = _get_save_lock(path)
+    with lock:
+        path = Path(path)
+        # 1. Backup rotativo (apenas para arquivos críticos)
+        if path.name in _BACKUP_ROTATIVO and path.exists():
+            try:
+                # Rotaciona: bak4 -> bak5, bak3 -> bak4, ..., bak1 -> bak2
+                for i in range(4, 0, -1):
+                    src = path.with_name(path.name + f".bak{i}")
+                    dst = path.with_name(path.name + f".bak{i+1}")
+                    if src.exists():
+                        os.replace(str(src), str(dst))
+                # bak1 = snapshot atual (copy2 preserva mtime)
+                shutil.copy2(str(path), str(path.with_name(path.name + ".bak1")))
+            except Exception as e:
+                # Backup falha não pode impedir o save — só loga.
+                print(f"[_salvar_json] WARN backup {path.name} falhou: {e}")
+
+        # 2. Write atômico: tmp + fsync + replace
+        tmp = path.with_name(path.name + f".tmp.{os.getpid()}.{threading.get_ident()}")
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(str(tmp), str(path))
+        except Exception:
+            # Limpa tmp se algo deu errado
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except Exception:
+                pass
+            raise
 
 
 def carregar_config() -> dict:
@@ -64,6 +139,54 @@ def carregar_temas() -> list:
 
 def salvar_temas(temas: list):
     _salvar_json(TEMAS_FILE, temas)
+
+
+def patch_temas_celula(key: str, patch: dict) -> dict:
+    """Read-modify-write ATOMICO de UMA celula do temas.json, sob o MESMO lock
+    (por-path) do _salvar_json. O cliente manda so a identidade + campos; o
+    servidor serializa aqui -> sem lost-update entre marks/saves concorrentes e
+    sem o read-modify-write de 4.4MB no cliente. Retorna a celula resultante.
+
+    Usado pelo POST /api/upload/mark (plug do upload event-driven)."""
+    lock = _get_save_lock(TEMAS_FILE)
+    with lock:
+        d = _carregar_json(TEMAS_FILE, {})
+        if not isinstance(d, dict):
+            d = {}
+        cels = d.get("celulas")
+        if not isinstance(cels, dict):
+            cels = {}
+            d["celulas"] = cels
+        cel = cels.get(key)
+        cel = dict(cel) if isinstance(cel, dict) else {}
+        cel.update(patch)
+        cels[key] = cel
+        # Write atomico (mesma logica do _salvar_json; lock JA segurado -> nao re-adquire).
+        if TEMAS_FILE.name in _BACKUP_ROTATIVO and TEMAS_FILE.exists():
+            try:
+                for i in range(4, 0, -1):
+                    src = TEMAS_FILE.with_name(TEMAS_FILE.name + f".bak{i}")
+                    dst = TEMAS_FILE.with_name(TEMAS_FILE.name + f".bak{i+1}")
+                    if src.exists():
+                        os.replace(str(src), str(dst))
+                shutil.copy2(str(TEMAS_FILE), str(TEMAS_FILE.with_name(TEMAS_FILE.name + ".bak1")))
+            except Exception as e:
+                print(f"[patch_temas_celula] WARN backup falhou: {e}")
+        tmp = TEMAS_FILE.with_name(TEMAS_FILE.name + f".tmp.{os.getpid()}.{threading.get_ident()}")
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(d, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(str(tmp), str(TEMAS_FILE))
+        except Exception:
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except Exception:
+                pass
+            raise
+        return cel
 
 
 # === CREDENCIAIS ===

@@ -766,6 +766,28 @@ def process_job(config: dict, job: dict) -> bool:
                 report_complete(config, job_id, True, video_path=video_path,
                                 local_storage=drive_storage,
                                 tamanho_mb=size_mb)
+
+                # === GATILHO DE UPLOAD (event-driven) ===
+                # Render OK + MP4 validado -> dispara upload DAQUELE tema, agendando
+                # no slot da PROPRIA data-tema (mata o shift do batch). Feature-flag
+                # em worker_config.json (upload_trigger). NUNCA levanta excecao: o
+                # render ja fechou com sucesso, upload e' extra.
+                try:
+                    import upload_trigger
+                    _r = upload_trigger.disparar(
+                        config, alias=tag, canal_idx=canal_idx,
+                        data_pasta=data_pasta, video_path=video_path,
+                        titulo_esperado=job.get("titulo", ""),
+                    )
+                    if _r.get("skip"):
+                        log(f"  [upload] skip: {_r['skip']}")
+                    elif _r.get("ok"):
+                        log(f"  [upload] OK")
+                    elif _r.get("erro"):
+                        log(f"  [upload] FALHOU: {_r['erro']}")
+                except Exception as _eut:
+                    log(f"  [upload] AVISO trigger falhou (render OK): {_eut}")
+
                 return True
             else:
                 raise RuntimeError("Video nao gerado ou vazio")

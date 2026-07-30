@@ -33,7 +33,7 @@ mudança estrutural no grid, F5 na aba + re-verificar (clobber por UI stale).
 
 **Backend modules**:
 - `engine.py` (~850 lines) - Video assembly engine (OpenCV + FFmpeg)
-- `transcriber.py` - Whisper audio-to-SRT transcription
+- `transcriber.py` - STT audio-to-SRT. **Grok STT API (xAI) primary** (offload da GPU); Whisper local (faster-whisper) só como fallback. Toggle via `worker_config.json` (`stt_provider`, `xai_stt_keys`).
 - `subtitle_fixer.py` - SRT correction rules engine
 - `scriptwriter.py` (~680 lines) - Multi-step LLM pipeline executor + credential system + isolated execution
 - `narrator.py` (~400 lines) - TTS via ai33.pro API (ElevenLabs + Minimax), chunking sequencial
@@ -296,13 +296,13 @@ All FFmpeg processes get `BELOW_NORMAL_PRIORITY_CLASS` via psutil or ctypes fall
 
 ## How Subtitles Work
 
-### Pipeline: Narration MP3 -> Whisper -> SRT -> subtitle_fixer -> ASS
+### Pipeline: Narration MP3 -> STT -> SRT -> subtitle_fixer -> ASS
 
 1. **Transcription** (transcriber.py):
-   - `faster-whisper` with GPU (CUDA float16), falls back to CPU (int8)
-   - Falls back to `openai-whisper` if faster-whisper not installed
-   - After transcription, releases VRAM: `del model` + `gc.collect()` + `torch.cuda.empty_cache()`
-   - Output: SRT file in temp/
+   - **PRIMARY: Grok STT API (xAI)** — `POST https://api.x.ai/v1/stt` (multipart `file`+`language`+`format=true`). Roda FORA da GPU (libera VRAM p/ mais render workers). Áudio é downsampled p/ 16kHz mono 32k antes do upload (~5x menor, mesma acurácia; limite da API é 500MB). Resposta traz `words[]` com timestamps por-palavra → `_words_para_segmentos()` agrupa em segmentos estilo Whisper (por pontuação/gap/chars) → SRT. Rotaciona `xai_stt_keys` (key própria do worker primeiro). ~27s p/ narração de 27MB.
+   - **FALLBACK: Whisper local** (`faster-whisper` GPU→CPU via `_whisper_subprocess.py`) — só se a API Grok falhar OU `stt_provider != "grok"`. Libera VRAM após uso.
+   - Config em `worker_config.json`: `stt_provider` (`grok`|`whisper`) + `xai_stt_keys` (array, gitignored).
+   - Output: SRT file in temp/. Templates com legenda desativada (ex: VidMator EST/TTM) pulam STT inteiro.
 
 2. **SRT Correction** (subtitle_fixer.py):
    - Loads rules: template-embedded rules take priority over `rules/{idioma}.json`
@@ -633,6 +633,7 @@ When a credential is tested/refreshed, the system queries the provider's API for
 ### Temas
 - `GET  /api/temas` - Get temas grid (supports legacy array format, returns grid object)
 - `POST /api/temas` - Save temas grid (with optional Supabase sync)
+- `POST /api/upload/mark` - **Patch ATÔMICO de UMA célula** (só campos de upload em whitelist: `youtube_video_id`, `youtube_publish_at`, `youtube_url`, `upload_status`, `uploaded_at`). Body: `{row, col, ...campos}`. Usa `scriptwriter.patch_temas_celula()` sob o lock do temas → sem lost-update do read-modify-write de 4.4MB. Plug do upload event-driven (handoff drive-to-youtube). NÃO permite patchar tema/titulo/thumb/roteiro.
 
 ### Chat (Claude CLI)
 - `GET  /api/chat/instructions` - Get agent instructions (CLAUDE.md)
