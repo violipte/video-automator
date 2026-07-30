@@ -188,6 +188,22 @@ def _aplicar_thumb(config: dict, repo: Path, canal_yt: str, video_id: str, thumb
         _log(f"thumb NAO aplicada ({type(e).__name__}: {e})")
 
 
+def _marcar_falha(config: dict, row: int, col: int, motivo: str):
+    """DEAD-LETTER: registra a falha no grid pro upload_daily_check re-tentar.
+    Sem isso, uma falha transitoria (proxy, 5xx) perde o video em silencio."""
+    try:
+        import urllib.request
+        vps = (config.get("vps_url") or "").strip()
+        body = json.dumps({"row": row, "col": col,
+                           "upload_status": f"falhou:{motivo[:40]}"}).encode()
+        req = urllib.request.Request(f"{vps}/api/upload/mark", data=body,
+                                     headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=30).read()
+        _log(f"dead-letter registrado: falhou:{motivo[:40]}")
+    except Exception as e:
+        _log(f"dead-letter falhou: {type(e).__name__}: {e}")
+
+
 def _publish_utc(data_iso: str, tz_nome: str, slot: str) -> str:
     """publishAt DETERMINISTICO = data-tema + slot do alias, no TZ do canal -> ISO UTC."""
     from datetime import timezone as _tz
@@ -239,19 +255,24 @@ def _reconciliar(config, repo: Path, canal_yt: str, alias: str, row: int, col: i
         if res.get("consertos"):
             _log(f"AUTO-CORRIGIDO: {res['consertos']}")
         if not res.get("ok"):
-            _telegram(config, f"⚠️ {alias} {data_iso} ({video_id}): estado final incompleto "
+            _telegram(config, f"⚠️ {alias} {data_iso} ({video_id}): estado final INCOMPLETO "
                               f"({res.get('privacy')}, publishAt={res.get('publish_at')})")
-        # marca o grid (patch atomico) com o estado final
+        # marca o grid (patch atomico) com o estado final.
+        # ⚠️ "scheduled" SO quando 100% confirmado (private + publishAt): esse status
+        # e' o que faz o gatilho fazer no-op na proxima passada. Se marcar cedo demais,
+        # um video incompleto nunca mais e' consertado; se nao marcar, arrisca DUPLICATA.
+        # "incompleto" = video no ar mas faltando algo -> proxima passada RECONCILIA
+        # (nao re-sobe, porque o video_id ja esta gravado).
         try:
             import urllib.request
             body = json.dumps({"row": row, "col": col, "youtube_video_id": video_id,
                                "youtube_publish_at": res.get("publish_at") or pub,
                                "youtube_url": f"https://youtube.com/watch?v={video_id}",
-                               "upload_status": "scheduled" if res.get("ok") else "uploaded"}).encode()
+                               "upload_status": "scheduled" if res.get("ok") else "incompleto"}).encode()
             req = urllib.request.Request(f"{vps}/api/upload/mark", data=body,
                                          headers={"Content-Type": "application/json"})
             urllib.request.urlopen(req, timeout=30).read()
-            _log("grid marcado (scheduled)" if res.get("ok") else "grid marcado (uploaded)")
+            _log("grid marcado (scheduled)" if res.get("ok") else "grid marcado (INCOMPLETO)")
         except Exception as e:
             _log(f"marca do grid falhou: {type(e).__name__}: {e}")
     except Exception as e:
@@ -315,10 +336,37 @@ def _disparar_interno(config, alias, canal_idx, data_pasta, video_path, titulo_e
 
     cel = _buscar_celula(vps, row, col)
 
-    # --- checagem 2: idempotencia (ja subiu? no-op) ---
-    if cel.get("youtube_video_id"):
-        _log(f"SKIP {alias} {data_pasta}: ja tem youtube_video_id={cel['youtube_video_id']}")
-        return {"ok": True, "skip": "ja uploaded", "erro": None, "stdout": ""}
+    # --- checagem 1b: o MP4 e' DESTE alias? (barreira anti-troca barata) ---
+    # O nome e' <ALIAS>_<YYYYMMDD>_NN.mp4. Se o prefixo nao bate, alguem passou
+    # o video errado -> nao sobe (publicar video trocado e' pior que nao publicar).
+    if not vp.name.upper().startswith(alias + "_"):
+        _abortar(config, alias, data_pasta, f"MP4 nao pertence a {alias}: {vp.name}")
+        return {"ok": False, "erro": "mp4 de outro canal", "skip": None, "stdout": ""}
+
+    # --- checagem 2: idempotencia ---
+    # ATENCAO (risco #7): ter video_id NAO significa "terminado". Se o fluxo
+    # morreu no meio, o video existe mas pode estar sem CTA/thumb/agendamento.
+    #   status "scheduled" => 100% confirmado -> no-op (protege de DUPLICATA)
+    #   status != scheduled => video no ar porem INCOMPLETO -> NAO re-sobe,
+    #                          apenas RECONCILIA (completa o que falta)
+    vid_existente = cel.get("youtube_video_id")
+    if vid_existente:
+        if (cel.get("upload_status") or "") == "scheduled":
+            _log(f"SKIP {alias} {data_pasta}: ja concluido ({vid_existente})")
+            return {"ok": True, "skip": "ja uploaded", "erro": None, "stdout": ""}
+        _log(f"{alias} {data_pasta}: video {vid_existente} existe mas status="
+             f"{cel.get('upload_status')!r} — RECONCILIANDO (sem re-subir)")
+        thumb_r = None
+        if cfg.get("thumb_gen", True):
+            try:
+                import thumb_pipeline
+                thumb_r = thumb_pipeline.gerar(alias, data_pasta,
+                                               timeout_seg=int(cfg.get("thumb_timeout", 900)))
+            except Exception:
+                pass
+        _reconciliar(config, Path(cfg.get("repo") or ""), canal_yt, alias, row, col,
+                     data_pasta, vid_existente, thumb_r, slot, tz)
+        return {"ok": True, "skip": "reconciliado", "erro": None, "stdout": ""}
 
     # --- checagem 3: titulo do grid bate com o que foi renderizado ---
     tit_grid = (cel.get("titulo") or "").strip()
@@ -375,6 +423,16 @@ def _disparar_interno(config, alias, canal_idx, data_pasta, video_path, titulo_e
                            timeout=int(cfg.get("timeout_seg", 3600)))
         out = (p.stdout or "").strip()
         if p.returncode != 0:
+            # DEAD-LETTER: pode ter subido e morrido depois (foi o que houve em
+            # 06/08). Se ha video_id no stdout/grid, reconcilia; senao registra
+            # "falhou" pro upload_daily_check re-tentar — nunca some em silencio.
+            vid = _video_id_de(out) or _video_id_do_grid(vps, row, col)
+            if vid:
+                _log(f"rc={p.returncode} MAS existe video {vid} — reconciliando")
+                _reconciliar(config, repo, canal_yt, alias, row, col, data_pasta,
+                             vid, thumb_path, slot, tz)
+                return {"ok": True, "skip": "rc!=0 mas reconciliado", "erro": None, "stdout": out}
+            _marcar_falha(config, row, col, f"rc={p.returncode}")
             _abortar(config, alias, data_pasta,
                      f"upload_one rc={p.returncode}: {(p.stderr or out)[-300:]}")
             return {"ok": False, "erro": f"rc={p.returncode}", "skip": None, "stdout": out}

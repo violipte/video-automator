@@ -22,6 +22,7 @@ import os
 import random
 import subprocess
 import sys
+import time
 import urllib.request
 from pathlib import Path
 
@@ -37,6 +38,56 @@ N_VARIANTES = 4
 
 def _log(m):
     print(f"[thumb_pipeline] {m}", flush=True)
+
+
+# ---------------------------------------------------------------- lock GLOBAL
+# O `chrome_profile` do Flow e' UM SO. O lock do upload_trigger e' POR CANAL —
+# entao 2 canais renderizando juntos (sao 4 render workers) chamariam este
+# modulo ao mesmo tempo e subiriam 2 Playwright no MESMO perfil: perfil
+# corrompido = perde o login do Flow e a thumb quebra pra TODOS os canais.
+# Aqui o lock e' GLOBAL (1 geracao por vez na maquina) e ESPERA a vez, em vez
+# de desistir — a thumb pode atrasar, mas nao pode corromper o perfil.
+_LOCK = Path(os.environ.get("TEMP", ".")) / "automator_upload_locks" / "flow_chrome.lock"
+_LOCK_STALE = 1800   # 30min: geracao de 4 thumbs leva ~2-3min; mais que isso e' orfao
+
+
+class _LockFlow:
+    def __init__(self, espera_max=900):
+        self.espera_max = espera_max
+        self.fd = None
+
+    def __enter__(self):
+        _LOCK.parent.mkdir(parents=True, exist_ok=True)
+        t0 = time.time()
+        avisou = False
+        while time.time() - t0 < self.espera_max:
+            try:
+                self.fd = os.open(str(_LOCK), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(self.fd, f"{os.getpid()} {time.time()}".encode())
+                return self
+            except FileExistsError:
+                try:
+                    idade = time.time() - _LOCK.stat().st_mtime
+                except OSError:
+                    idade = 0
+                if idade > _LOCK_STALE:
+                    _log(f"lock do Flow orfao ({idade/60:.0f}min) — roubando")
+                    _LOCK.unlink(missing_ok=True)
+                    continue
+                if not avisou:
+                    _log("outro canal esta gerando thumb — aguardando a vez do Chrome/Flow")
+                    avisou = True
+                time.sleep(10)
+        _log(f"nao consegui o lock do Flow em {self.espera_max}s — sobe SEM thumb")
+        return None
+
+    def __exit__(self, *exc):
+        try:
+            if self.fd is not None:
+                os.close(self.fd)
+                _LOCK.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _split2(s: str):
@@ -95,8 +146,12 @@ def _montar_lote(canal: str, data_br: str, n: int) -> list:
     return lote
 
 
-def _revisar(paths: list) -> Path:
-    """pick_best_thumb (Gemini vision) no venv do drive-to-youtube. Fallback: 1ª."""
+def _revisar(paths: list):
+    """pick_best_thumb (Gemini vision) no venv do drive-to-youtube.
+
+    Devolve o Path da melhor, ou **None** se TODAS foram reprovadas (typo/glitch)
+    — nota de corte: melhor publicar sem thumb do que com thumb quebrada.
+    Se o revisor em si falhar (quota/rede), cai pra 1ª (fail-safe do lado deles)."""
     code = (
         "import sys,json;sys.path.insert(0,r'%s');"
         "from pathlib import Path;from lib.thumb_picker import pick_best_thumb;"
@@ -111,10 +166,15 @@ def _revisar(paths: list) -> Path:
             o = json.loads(ln[len("__PICK__"):])
             m = o["meta"]
             _log(f"revisor: escolheu {Path(o['best']).name} | {str(m.get('reason'))[:70]}")
+            ruins = set(m.get("typo_options") or []) | set(m.get("glitch_options") or [])
             if m.get("typo_options"):
                 _log(f"  descartadas (typo): {m['typo_options']}")
             if m.get("glitch_options"):
                 _log(f"  descartadas (glitch): {m['glitch_options']}")
+            # NOTA DE CORTE: se o revisor reprovou TODAS, nao publicar nenhuma.
+            if len(ruins) >= len(paths):
+                _log(f"  TODAS as {len(paths)} reprovadas — sobe SEM thumb")
+                return None
             return Path(o["best"])
     _log(f"revisor falhou (rc={r.returncode}) — usando a 1ª. err={(r.stderr or '')[-200:]}")
     return paths[0]
@@ -136,12 +196,17 @@ def gerar(canal: str, data_iso: str, timeout_seg: int = 900, n: int = N_VARIANTE
         lote_f = out / "_lote.json"
         lote_f.write_text(json.dumps(lote, ensure_ascii=False, indent=2), encoding="utf-8")
 
-        # projeto NOVO dedicado por (data, canal) — sem --proj o driver cria um
-        _log(f"gerando {n} thumbs no Nano Banana (projeto novo) -> {out}")
-        r = subprocess.run([str(VEO_PY), str(AQUI / "thumb_gen" / "thumb_nano.py"),
-                            str(lote_f), str(out), "2"],
-                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout_seg,
-                           env=dict(os.environ, PYTHONUTF8="1"))
+        # LOCK GLOBAL: 1 geracao por vez na maquina (chrome_profile e' unico)
+        with _LockFlow() as lk:
+            if lk is None:
+                return None       # nao conseguiu a vez -> sobe sem thumb
+            # projeto NOVO dedicado por (data, canal) — sem --proj o driver cria um
+            _log(f"gerando {n} thumbs no Nano Banana (projeto novo) -> {out}")
+            r = subprocess.run([str(VEO_PY), str(AQUI / "thumb_gen" / "thumb_nano.py"),
+                                str(lote_f), str(out), "2"],
+                               capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=timeout_seg,
+                               env=dict(os.environ, PYTHONUTF8="1"))
         for ln in (r.stdout or "").splitlines()[-6:]:
             _log(f"  driver| {ln.strip()}")
 

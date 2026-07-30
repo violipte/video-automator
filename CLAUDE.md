@@ -994,6 +994,24 @@ render OK + MP4 válido
 | `thumb_pipeline.py` | gera N thumbs e devolve a melhor. **Nunca levanta**: falhou → `None` → sobe sem thumb |
 | `thumb_gen/thumb_nano.py` | monkey-patch da config pra aba **Imagem** e reuso do `veo_driver` |
 | `upload_verify.py` | reconciliador idempotente pós-upload |
+| `upload_daily_check.py` | rede de segurança diária: re-tenta `falhou:*`, reconcilia `incompleto`, confere se o `scheduled` virou `public` (D+1) |
+
+### Estados no grid (`upload_status`) — o contrato anti-duplicata
+| status | significado | o que o gatilho faz na próxima passada |
+|---|---|---|
+| *(vazio)* | nunca subiu | sobe |
+| `falhou:<motivo>` | dead-letter | `upload_daily_check --apply` re-tenta |
+| `incompleto` | **vídeo NO AR**, faltando thumb/CTA/pin/agendamento | **reconcilia** (nunca re-sobe — o `video_id` já está gravado) |
+| `scheduled` | **100% confirmado** (private + publishAt) | **no-op** |
+
+`scheduled` é gravado **só** quando o reconciliador devolve `ok:true`. Marcar cedo
+demais congelaria um vídeo incompleto; não marcar arriscaria **duplicata**.
+
+### Concorrência
+- **Upload:** lock **por canal** (CO3/CO4 dividem canal e profile AdsPower).
+- **Thumb:** lock **GLOBAL** (`flow_chrome.lock`) — o `chrome_profile` do Flow é
+  **um só**; 2 canais gerando junto subiriam 2 Playwright no mesmo perfil e
+  **corromperiam o login**. Espera a vez (até 15min); não conseguiu → sobe sem thumb.
 
 ### ⚠️ Regras que já custaram bug
 - **`canal_idx` NÃO é a coluna do grid** — é o índice na *ordem da produção* (produzir só o ENO2 dá `canal_idx=0`). A col vem do **nome da coluna**. Confundir publicou um vídeo com título/thumb da BASE.
