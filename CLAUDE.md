@@ -1007,6 +1007,56 @@ render OK + MP4 válido
 `scheduled` é gravado **só** quando o reconciliador devolve `ok:true`. Marcar cedo
 demais congelaria um vídeo incompleto; não marcar arriscaria **duplicata**.
 
+### Esteira puxada (formato Toyota — Piter 30/07)
+```
+render (4 workers) ──enfileira──▶ THUMB ──▶ UPLOAD ──▶ PIN ──▶ done
+                                 fila de 1  paralelo    fila de 1
+                                 (Flow)     entre       (AdsPower)
+                                            canais
+```
+- **Fila**: `_esteira/tarefas/<ALIAS>_<data>.json` ([esteira.py](esteira.py)) — sobrevive a reboot; gitignored (títulos inéditos, repo público). Consumidor = [esteira_worker.py](esteira_worker.py) (no watchdog; heartbeat em `_esteira/`).
+- **Render não espera mais**: com `upload_trigger.esteira=true`, o render worker só grava o JSON e volta pra fila (antes ficava ~15-20min preso em thumb+upload inline). Se o heartbeat do esteira_worker estiver velho (>10min), cai no fluxo inline — nada fica preso.
+- **Thumb** (1 por vez, chrome_profile único): projeto do Flow **por DATA** (`_esteira/flow_projects.json`, id capturado do stdout do driver); canais do dia dividem o projeto, o marcador `[CANAL dd-mm vN]` impede casamento cruzado. Projeto quebrado → registro apagado → próxima geração cria novo.
+- **Upload** (paralelo entre canais, serial dentro): 1 thread por canal YouTube (CO3/CO4 = mesma thread). `upload_one --no-pin --publish-utc <SLOT_MAP>` — o horário tem **fonte única** (SLOT_MAP daqui); os PUBLISH_SLOTS do Supabase são só legado p/ chamadas fora do Automator. `_LockCanal` agora **espera a vez** (45min) e, estourando, registra dead-letter — nunca skip silencioso.
+- **Pin** (fila global de 1): `upload_verify --ensure-pin` (unlisted → acha o comentário → pina via AdsPower `pin_slot(1)` → reagenda → confirma). 2 tentativas com 10min de intervalo.
+
+**REGRAS DE OURO (nunca seguram a esteira):**
+- thumb falhou → `thumb_status='pendente'` no grid, tema **segue pro upload sem thumb**;
+- pin falhou 2× → `pin_status='pendente'`, vídeo **continua agendado**;
+- `upload_daily_check --apply` re-tenta os dois todo dia até limpar. Publicação é prioridade absoluta.
+
+Status visível na grade: `fila:thumb` / `fila:upload` / `fila:pin` (badge ⏳ roxo) e pendências no tooltip. **`upload_one.py` (drive-to-youtube) agora é mantido por este repo** (decisão Piter 30/07) — o outro Claude não deve editá-lo sem alinhar.
+
+### Célula publicada é IMUTÁVEL
+Regra do Piter (30/07): *"vídeo postado NÃO tem o grid alterado; se houver alteração, será manual direto no vídeo no canal."*
+
+Guard em `scriptwriter.salvar_temas()` → `_congelar_publicadas()`: se a célula em disco tem `youtube_video_id`, os campos `titulo/tema/thumb/roteiro` são **revertidos** para o valor do disco. Campos de upload seguem livres (o reconciliador precisa deles).
+
+**Mora no `scriptwriter`, não no endpoint** — o `POST /api/temas` não é o único caminho: o `coringa_distribuidor` grava direto por `_salvar_temas` → `salvar_temas`. Guard só no endpoint deixava a distribuição passar por baixo, que foi quem contaminou ENO (27/07) e CON (30/07–30/08). Fora do lock de propósito: `_salvar_json` pega o mesmo lock por path e `threading.Lock` não é reentrante.
+
+### Journal write-ahead (anti-duplicata que não depende da rede)
+`%TEMP%/automator_upload_journal/<ALIAS>_<YYYY-MM-DD>.json`, estados `subindo → subiu → confirmado`.
+
+Existe porque a proteção anti-duplicata não podia depender de uma escrita **pela rede**: se o `POST /api/upload/mark` falhava depois de um upload OK, o grid ficava sem `video_id`, a passada seguinte não via nada e **re-subia**.
+
+| journal | o gatilho faz |
+|---|---|
+| vazio | sobe normal |
+| `subiu`/`confirmado` + grid sem `video_id` | **não re-sobe** — reconcilia e ressincroniza o grid |
+| `subindo` | **não sobe**: o processo anterior morreu no meio e não dá pra saber se o YouTube recebeu. Dead-letter + Telegram. Confira o canal; se o vídeo não está lá, **apague o journal** e re-dispare |
+
+O `mark` também tem retry (0/3/8/20/45s). `upload_daily_check` varre o journal e ressincroniza órfãos.
+
+### Onde VER esse status
+- **Grade do Temas** (`/v2/temas`) — badge no canto inferior-esquerdo de cada célula
+  (`▶` verde = `scheduled`, `◐` amarelo = `incompleto`, `✕` vermelho = `falhou`,
+  `↑` azul = `uploaded` legado, `?` vermelho = estado não previsto). Click abre no
+  YouTube; hover mostra o status cru + `publishAt`. Barra-resumo acima da grade
+  conta os estados **do range de datas filtrado**, incluindo `○ sem upload`
+  (renderizado e não subiu). Lê direto de `/api/temas` — sem backend novo.
+- **`GET /api/upload/status?dias=14&canal=ENO2`** — mesma leitura em JSON, pra script/CLI.
+- Estado desconhecido **nunca some da tela**: cai no bucket vermelho `outro`.
+
 ### Concorrência
 - **Upload:** lock **por canal** (CO3/CO4 dividem canal e profile AdsPower).
 - **Thumb:** lock **GLOBAL** (`flow_chrome.lock`) — o `chrome_profile` do Flow é
@@ -1018,6 +1068,7 @@ demais congelaria um vídeo incompleto; não marcar arriscaria **duplicata**.
 - **Thumb nunca bloqueia publicação** (regra do Piter). Timeout 15min; estourou, sobe sem ela.
 - **YouTube não aceita comentário em vídeo `private`** → comentar enquanto `unlisted` e **só depois** agendar. Reconciliar num vídeo já agendado exige: unlisted → comenta → pina → reagenda.
 - **`statistics.commentCount` mente** em vídeo private/unlisted recente (volta 0 com comentários existentes) → contar via `commentThreads().list()`. Confiar no count gerou 3 CTAs duplicados.
+- **`videos.list` tem consistência EVENTUAL** — logo após um update ele ainda devolve o estado ANTIGO. Ler uma vez só pra confirmar o agendamento deu **falso negativo** no ENO2 07/08 (vídeo `private`+agendado certinho, leitura devolveu `unlisted/None`) → marcou `incompleto` e a checagem diária ia "reconciliar" um vídeo 100% pronto, mexendo na privacidade à toa. `upload_verify` **reconfere com backoff** (3/5/8/12/20s) antes de desistir, e o `ok` exige o `publishAt` **bater com o alvo** — não só existir.
 - **`subprocess.run(text=True)` decodifica em cp1252 no Windows** → título com `…`/emoji quebra o `_readerthread` e **mata o processo filho** no meio. Sempre `encoding="utf-8", errors="replace"`.
 - `publishAt` = **data-tema + slot do alias**, nunca recalculado (o "bump" era a origem do shift).
 
@@ -1043,6 +1094,16 @@ Canais com credenciais provisionadas: `CON, CO3, DE, EN2, EN3RE, ENO, ENO2, EST,
 See `BACKLOG.txt` for the full list. Key pending items by priority:
 
 ### HIGH PRIORITY
+- **Nova aba "Upload" no frontend2** (pedido do Piter 30/07 — designada pro OUTRO Claude do Automator):
+  página dedicada mostrando o estado da esteira/upload por data×canal. Tudo que precisa já existe no backend:
+  - `GET /api/upload/status?dias=N&canal=X` → `{resumo, total, itens[]}` com
+    `{data, canal, row, col, titulo, status, video_id, url, publish_at, thumb_status, pin_status, ok}`
+  - Estados de `status`: `scheduled` (verde, 100% ok) · `fila:thumb|fila:upload|fila:pin` (esteira andando)
+    · `incompleto` · `falhou:*` (dead-letter) · `uploaded` (legado) · vazio = nunca subiu
+  - `thumb_status`/`pin_status` = `pendente` são pendências que o daily re-tenta (vídeo JÁ está agendado)
+  - Referência visual: badges/chips já implementados na grade do Temas (`UPLOAD_KINDS` em
+    `frontend2/src/pages/Temas/index.jsx` + CSS `up-*` em `Temas.css`) — reusar o vocabulário
+  - NÃO mexer em `upload_one.py` / `upload_trigger.py` / `esteira*.py` sem alinhar (ownership: sessão esteira)
 - Monitor: detailed render progress (clips count, ETA)
 - Parallel narrations (Etapa B)
 

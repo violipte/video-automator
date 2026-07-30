@@ -52,6 +52,45 @@ SLOT_MAP = {
 LOCK_DIR = Path(os.environ.get("TEMP", ".")) / "automator_upload_locks"
 LOCK_STALE_SEG = 7200  # 2h: lock mais velho que isso e' orfao (worker morreu)
 
+# JOURNAL write-ahead: registro LOCAL de "estou subindo / subi", ao lado do
+# processo que sobe. Existe porque a protecao anti-duplicata nao pode depender
+# de uma escrita pela REDE: se o POST /api/upload/mark falha DEPOIS do upload ter
+# dado certo, o grid fica sem video_id, a proxima passada nao ve nada e RE-SOBE.
+# Estados: subindo -> subiu -> confirmado.
+JOURNAL_DIR = Path(os.environ.get("TEMP", ".")) / "automator_upload_journal"
+
+
+def _journal_path(alias: str, data_iso: str) -> Path:
+    return JOURNAL_DIR / f"{alias}_{data_iso}.json"
+
+
+def _journal_ler(alias: str, data_iso: str) -> dict:
+    try:
+        p = _journal_path(alias, data_iso)
+        if p.exists():
+            return json.loads(p.read_text(encoding="utf-8"))
+    except Exception as e:
+        _log(f"journal ilegivel ({type(e).__name__}) — tratando como vazio")
+    return {}
+
+
+def _journal_escrever(alias: str, data_iso: str, estado: str, video_id: str = ""):
+    """Grava o estado ANTES/DEPOIS do upload. Falhar aqui nao derruba o fluxo,
+    mas perde a rede anti-duplicata -> loga alto."""
+    try:
+        JOURNAL_DIR.mkdir(parents=True, exist_ok=True)
+        p = _journal_path(alias, data_iso)
+        atual = _journal_ler(alias, data_iso)
+        atual.update({"alias": alias, "data": data_iso, "estado": estado,
+                      "ts": datetime.now().isoformat(timespec="seconds")})
+        if video_id:
+            atual["video_id"] = video_id
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(atual, ensure_ascii=False), encoding="utf-8")
+        os.replace(str(tmp), str(p))
+    except Exception as e:
+        _log(f"ATENCAO: journal NAO gravado ({estado}): {type(e).__name__}: {e}")
+
 
 def _log(msg: str):
     print(f"[upload_trigger] {msg}", flush=True)
@@ -86,15 +125,24 @@ def _abortar(config: dict, alias: str, data_tema: str, motivo: str):
 
 class _LockCanal:
     """Lock por canal entre PROCESSOS (os 4 render workers sao processos separados).
-    O_CREAT|O_EXCL e' atomico no Windows/NTFS. Lock velho (>2h) = orfao, e' roubado."""
+    O_CREAT|O_EXCL e' atomico no Windows/NTFS. Lock velho (>2h) = orfao, e' roubado.
 
-    def __init__(self, canal: str):
+    ESPERA a vez (default 45min) em vez de desistir na hora. Desistir era o furo
+    #1 da auditoria de 30/07: CO3 e CO4 sao o MESMO canal YouTube — terminando
+    juntos, um levava skip silencioso, a celula ficava sem upload_status e
+    nenhuma rede de seguranca via o video. Upload de ~1.9GB leva 10-20min, entao
+    quem chega segundo espera o primeiro e sobe em seguida."""
+
+    def __init__(self, canal: str, espera_max: int = 2700):
         LOCK_DIR.mkdir(parents=True, exist_ok=True)
         self.path = LOCK_DIR / f"{canal}.lock"
+        self.espera_max = espera_max
         self.fd = None
 
     def __enter__(self):
-        for _ in range(2):
+        t0 = time.time()
+        avisou = False
+        while True:
             try:
                 self.fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
                 os.write(self.fd, f"{os.getpid()} {time.time()}".encode())
@@ -108,8 +156,12 @@ class _LockCanal:
                     _log(f"lock orfao ({idade/60:.0f}min) — roubando: {self.path.name}")
                     self.path.unlink(missing_ok=True)
                     continue
-                return None  # ocupado por outro upload do mesmo canal
-        return None
+                if time.time() - t0 >= self.espera_max:
+                    return None      # quem chamou registra dead-letter (nunca silencio)
+                if not avisou:
+                    _log(f"canal {self.path.stem} com upload em andamento — esperando a vez")
+                    avisou = True
+                time.sleep(20)
 
     def __exit__(self, *exc):
         try:
@@ -166,12 +218,13 @@ def _video_id_de(stdout: str) -> str:
     return ""
 
 
-def _aplicar_thumb(config: dict, repo: Path, canal_yt: str, video_id: str, thumb: Path):
+def _aplicar_thumb(config: dict, repo: Path, canal_yt: str, video_id: str, thumb: Path) -> bool:
     """set_thumbnail no video ja subido. Best-effort: falha aqui NAO derruba nada
-    (o video ja esta no ar/agendado — thumb e' cosmetica e resolve-se depois)."""
+    (o video ja esta no ar/agendado — thumb e' cosmetica e resolve-se depois).
+    Retorna True se o YouTube aceitou (o daily usa pra limpar a pendencia)."""
     if not video_id:
         _log("thumb NAO aplicada: video_id nao veio no stdout do upload_one")
-        return
+        return False
     try:
         py = repo / "venv" / "Scripts" / "python.exe"
         code = ("import sys;sys.path.insert(0,'.');from pathlib import Path;"
@@ -182,10 +235,11 @@ def _aplicar_thumb(config: dict, repo: Path, canal_yt: str, video_id: str, thumb
                            env=dict(os.environ, CHANNEL_ALIAS=canal_yt, PYTHONUTF8="1"))
         if "THUMB_OK" in (r.stdout or ""):
             _log(f"thumb aplicada em {video_id}: {thumb.name}")
-        else:
-            _log(f"thumb NAO aplicada (rc={r.returncode}): {(r.stderr or r.stdout or '')[-200:]}")
+            return True
+        _log(f"thumb NAO aplicada (rc={r.returncode}): {(r.stderr or r.stdout or '')[-200:]}")
     except Exception as e:
         _log(f"thumb NAO aplicada ({type(e).__name__}: {e})")
+    return False
 
 
 def _marcar_falha(config: dict, row: int, col: int, motivo: str):
@@ -263,25 +317,79 @@ def _reconciliar(config, repo: Path, canal_yt: str, alias: str, row: int, col: i
         # um video incompleto nunca mais e' consertado; se nao marcar, arrisca DUPLICATA.
         # "incompleto" = video no ar mas faltando algo -> proxima passada RECONCILIA
         # (nao re-sobe, porque o video_id ja esta gravado).
-        try:
-            import urllib.request
-            body = json.dumps({"row": row, "col": col, "youtube_video_id": video_id,
-                               "youtube_publish_at": res.get("publish_at") or pub,
-                               "youtube_url": f"https://youtube.com/watch?v={video_id}",
-                               "upload_status": "scheduled" if res.get("ok") else "incompleto"}).encode()
-            req = urllib.request.Request(f"{vps}/api/upload/mark", data=body,
-                                         headers={"Content-Type": "application/json"})
-            urllib.request.urlopen(req, timeout=30).read()
-            _log("grid marcado (scheduled)" if res.get("ok") else "grid marcado (INCOMPLETO)")
-        except Exception as e:
-            _log(f"marca do grid falhou: {type(e).__name__}: {e}")
+        # RETRY: uma unica tentativa era o furo do risco #7 — um blip de rede aqui
+        # deixava o grid sem video_id com o video JA no ar, e a passada seguinte
+        # duplicaria. O journal local ja cobre isso, mas insistir aqui evita que a
+        # divergencia chegue a existir.
+        import urllib.request
+        status_final = "scheduled" if res.get("ok") else "incompleto"
+        body = json.dumps({"row": row, "col": col, "youtube_video_id": video_id,
+                           "youtube_publish_at": res.get("publish_at") or pub,
+                           "youtube_url": f"https://youtube.com/watch?v={video_id}",
+                           "upload_status": status_final}).encode()
+        marcou = False
+        for tentativa, espera in enumerate((0, 3, 8, 20, 45), 1):
+            if espera:
+                time.sleep(espera)
+            try:
+                req = urllib.request.Request(f"{vps}/api/upload/mark", data=body,
+                                             headers={"Content-Type": "application/json"})
+                urllib.request.urlopen(req, timeout=30).read()
+                marcou = True
+                _log(f"grid marcado ({status_final})" + (f" na tentativa {tentativa}" if tentativa > 1 else ""))
+                break
+            except Exception as e:
+                _log(f"marca do grid falhou (tentativa {tentativa}/5): {type(e).__name__}: {e}")
+        if marcou:
+            # So agora o journal pode dizer "confirmado": grid e YouTube concordam.
+            if status_final == "scheduled":
+                _journal_escrever(alias, data_iso, "confirmado", video_id)
+        else:
+            # O video ESTA no ar e o grid nao sabe. O journal (estado 'subiu') e' o
+            # que impede a proxima passada de duplicar; a checagem diaria ressincroniza.
+            _log("ATENCAO: grid NAO marcado apos 5 tentativas — journal segura a duplicata")
+            _telegram(config, f"⚠️ {alias} {data_iso}: video {video_id} NO AR mas o grid nao "
+                              f"aceitou a marca (5 tentativas). O journal impede duplicata; "
+                              f"a checagem diaria ressincroniza.")
     except Exception as e:
         _log(f"reconciliacao falhou ({type(e).__name__}: {e}) — video ja esta no ar")
 
 
+def rodar_pin(config: dict, alias: str, data_iso: str, video_id: str) -> dict:
+    """Estagio PIN da esteira: fixa o CTA de um video JA agendado.
+
+    upload_verify --ensure-pin faz: unlisted -> acha o comentario -> pina
+    (AdsPower, pin_slot(1)) -> reagenda -> confirma com backoff.
+    Retorna o dict do __VERIFY__ ({"pinned": bool, ...}); {} se nem rodou.
+    NUNCA levanta — pin nao pode derrubar nada (video ja esta agendado)."""
+    try:
+        cfg = _cfg(config)
+        repo = Path(cfg.get("repo") or "F:/Canal Dark/Apps Rapidos/drive-to-youtube")
+        canal_yt, tz, slot = SLOT_MAP[alias]
+        pub = _publish_utc(data_iso, tz, slot)
+        py = repo / "venv" / "Scripts" / "python.exe"
+        cmd = [str(py), "-u", str(Path(__file__).parent / "upload_verify.py"),
+               "--video-id", video_id, "--publish-utc", pub, "--ensure-pin"]
+        r = subprocess.run(cmd, cwd=str(repo), capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=1200,
+                           env=dict(os.environ, CHANNEL_ALIAS=canal_yt,
+                                    PYTHONUTF8="1", PIN_CONCURRENCY="1"))
+        res = {}
+        for ln in (r.stdout or "").splitlines():
+            if ln.startswith("[verify]"):
+                _log(ln)
+            elif ln.startswith("__VERIFY__"):
+                res = json.loads(ln[len("__VERIFY__"):])
+        return res
+    except Exception as e:
+        _log(f"rodar_pin falhou ({type(e).__name__}: {e}) — video segue agendado")
+        return {}
+
+
 def disparar(config: dict, alias: str, canal_idx: int, data_pasta: str,
              video_path: str, titulo_esperado: str = "") -> dict:
-    """Dispara o upload de UM video recem-renderizado.
+    """Dispara o upload de UM video recem-renderizado (fluxo INLINE legado:
+    gera thumb aqui e o upload_one pina).
 
     Chamado pelo render_worker apos validar o MP4. NUNCA levanta excecao.
     Retorna {"ok":bool, "skip":str|None, "erro":str|None, "stdout":str}.
@@ -299,7 +407,28 @@ def disparar(config: dict, alias: str, canal_idx: int, data_pasta: str,
         return {"ok": False, "erro": str(e), "skip": None, "stdout": ""}
 
 
-def _disparar_interno(config, alias, canal_idx, data_pasta, video_path, titulo_esperado):
+def disparar_esteira(config: dict, alias: str, data_pasta: str, video_path: str,
+                     thumb_path=None, titulo_esperado: str = "") -> dict:
+    """Versao pro esteira_worker (estagio UPLOAD da esteira puxada):
+      - thumb ja veio do estagio anterior (ou veio None = sobe sem thumb);
+      - --no-pin: o PIN e' o estagio seguinte, em fila global (AdsPower).
+    Mesmas protecoes do fluxo inline (journal, grid, locks). NUNCA levanta.
+    Retorna tambem "video_id" quando disponivel."""
+    try:
+        return _disparar_interno(config, alias, -1, data_pasta, video_path,
+                                 titulo_esperado, thumb_pre=(thumb_path or ""),
+                                 no_pin=True)
+    except Exception as e:
+        _log(f"EXCECAO esteira (engolida): {type(e).__name__}: {e}")
+        try:
+            _telegram(config, f"⚠️ esteira upload excecao {alias} {data_pasta}: {e}")
+        except Exception:
+            pass
+        return {"ok": False, "erro": str(e), "skip": None, "stdout": ""}
+
+
+def _disparar_interno(config, alias, canal_idx, data_pasta, video_path, titulo_esperado,
+                      thumb_pre=None, no_pin=False):
     cfg = _cfg(config)
     if not cfg.get("enabled"):
         return {"ok": False, "skip": "trigger desabilitado", "erro": None, "stdout": ""}
@@ -353,11 +482,14 @@ def _disparar_interno(config, alias, canal_idx, data_pasta, video_path, titulo_e
     if vid_existente:
         if (cel.get("upload_status") or "") == "scheduled":
             _log(f"SKIP {alias} {data_pasta}: ja concluido ({vid_existente})")
-            return {"ok": True, "skip": "ja uploaded", "erro": None, "stdout": ""}
+            return {"ok": True, "skip": "ja uploaded", "erro": None, "stdout": "",
+                    "video_id": vid_existente}
         _log(f"{alias} {data_pasta}: video {vid_existente} existe mas status="
              f"{cel.get('upload_status')!r} — RECONCILIANDO (sem re-subir)")
         thumb_r = None
-        if cfg.get("thumb_gen", True):
+        if thumb_pre is not None:
+            thumb_r = thumb_pre or None       # esteira ja resolveu a thumb
+        elif cfg.get("thumb_gen", True):
             try:
                 import thumb_pipeline
                 thumb_r = thumb_pipeline.gerar(alias, data_pasta,
@@ -366,7 +498,32 @@ def _disparar_interno(config, alias, canal_idx, data_pasta, video_path, titulo_e
                 pass
         _reconciliar(config, Path(cfg.get("repo") or ""), canal_yt, alias, row, col,
                      data_pasta, vid_existente, thumb_r, slot, tz)
-        return {"ok": True, "skip": "reconciliado", "erro": None, "stdout": ""}
+        return {"ok": True, "skip": "reconciliado", "erro": None, "stdout": "",
+                "video_id": vid_existente}
+
+    # --- checagem 2b: JOURNAL LOCAL (anti-duplicata que nao depende da rede) ---
+    # Chegar aqui significa que o GRID nao tem video_id. Mas o grid e' escrito
+    # pela rede: se o mark falhou depois de um upload OK, o video ESTA no ar e o
+    # grid nao sabe. Sem esta checagem, a proxima passada duplicaria.
+    jr = _journal_ler(alias, data_pasta)
+    est_j = (jr or {}).get("estado") or ""
+    if est_j in ("subiu", "confirmado"):
+        vid_j = jr.get("video_id") or ""
+        _log(f"JOURNAL diz que {alias} {data_pasta} JA SUBIU ({vid_j or 'sem id'}) "
+             f"mas o grid nao tem video_id — a marcacao se perdeu. NAO re-subo; reconcilio.")
+        _reconciliar(config, Path(cfg.get("repo") or ""), canal_yt, alias, row, col,
+                     data_pasta, vid_j, None, slot, tz)
+        return {"ok": True, "skip": "journal: ja subiu (grid ressincronizado)",
+                "erro": None, "stdout": "", "video_id": vid_j}
+    if est_j == "subindo":
+        # O processo anterior morreu ENTRE o inicio e o fim do upload. Nao da pra
+        # saber se o YouTube recebeu. Subir agora pode DUPLICAR; nao subir apenas
+        # atrasa. Escolha deliberada: nao sobe, marca dead-letter e pede olho humano.
+        _marcar_falha(config, row, col, "upload anterior morreu no meio")
+        _abortar(config, alias, data_pasta,
+                 f"upload anterior morreu NO MEIO (journal={_journal_path(alias, data_pasta).name}). "
+                 f"Confira o canal: se o video NAO esta la, apague o journal e re-dispare.")
+        return {"ok": False, "erro": "journal: estado indeterminado", "skip": None, "stdout": ""}
 
     # --- checagem 3: titulo do grid bate com o que foi renderizado ---
     tit_grid = (cel.get("titulo") or "").strip()
@@ -379,19 +536,29 @@ def _disparar_interno(config, alias, canal_idx, data_pasta, video_path, titulo_e
         return {"ok": False, "erro": "titulo divergente", "skip": None, "stdout": ""}
 
     # --- lock por canal (CO3/CO4 compartilham o canal E o profile AdsPower) ---
+    # O lock ESPERA a vez. Se mesmo assim estourar (45min), NAO some em silencio:
+    # dead-letter no grid pro upload_daily_check re-tentar amanha.
     lock = _LockCanal(canal_yt)
     with lock as got:
         if got is None:
-            _log(f"SKIP {alias}: canal {canal_yt} com upload em andamento (lock)")
-            return {"ok": False, "skip": "canal ocupado", "erro": None, "stdout": ""}
+            _marcar_falha(config, row, col, "lock do canal ocupado alem do timeout")
+            _abortar(config, alias, data_pasta,
+                     f"canal {canal_yt} ocupado por >45min — dead-letter registrado")
+            return {"ok": False, "erro": "canal ocupado (dead-letter)", "skip": None, "stdout": ""}
 
         repo = Path(cfg.get("repo") or "F:/Canal Dark/Apps Rapidos/drive-to-youtube")
         script = repo / "upload_one.py"
         py = repo / "venv" / "Scripts" / "python.exe"
+        # --publish-utc: FONTE UNICA de horario e' o SLOT_MAP daqui. Antes o
+        # upload_one derivava dos PUBLISH_SLOTS do Supabase — duas fontes pra
+        # mesma decisao; divergindo, o verify "consertava" o horario toda vez.
         cmd = [str(py), "-u", str(script),
                "--canal", canal_yt, "--alias", alias,
                "--row", str(row), "--col", str(col),
-               "--data", data_pasta, "--mp4", str(vp)]
+               "--data", data_pasta, "--mp4", str(vp),
+               "--publish-utc", _publish_utc(data_pasta, tz, slot)]
+        if no_pin:
+            cmd.append("--no-pin")   # esteira: PIN e' estagio proprio, fila global
 
         if cfg.get("dry_run", True):
             _log(f"DRY-RUN {alias} {data_pasta} row={row} col={col} "
@@ -403,12 +570,14 @@ def _disparar_interno(config, alias, canal_idx, data_pasta, video_path, titulo_e
             _abortar(config, alias, data_pasta, f"upload_one.py nao existe em {repo}")
             return {"ok": False, "erro": "upload_one.py ausente", "skip": None, "stdout": ""}
 
-        # === THUMB: gera AQUI (fim do render, ANTES do upload) ===
-        # Nano Banana (0 cred) + revisor Gemini. REGRA DE OURO: se falhar,
-        # thumb_pipeline devolve None e o upload segue SEM thumb —
-        # publicacao e' prioridade, thumb resolve-se depois.
+        # === THUMB ===
+        # Esteira: veio pronta do estagio anterior (thumb_pre; "" = sem thumb).
+        # Inline legado: gera aqui. REGRA DE OURO nos dois casos: falhou ->
+        # sobe SEM thumb, publicacao e' prioridade, resolve-se depois.
         thumb_path = None
-        if cfg.get("thumb_gen", True):
+        if thumb_pre is not None:
+            thumb_path = Path(thumb_pre) if thumb_pre else None
+        elif cfg.get("thumb_gen", True):
             try:
                 import thumb_pipeline
                 thumb_path = thumb_pipeline.gerar(alias, data_pasta,
@@ -419,19 +588,27 @@ def _disparar_interno(config, alias, canal_idx, data_pasta, video_path, titulo_e
 
         env = dict(os.environ, CHANNEL_ALIAS=canal_yt, PYTHONUTF8="1")
         _log(f"UPLOAD {alias} {data_pasta} row={row} col={col} slot={slot} {tz}")
+        # WRITE-AHEAD: "estou subindo" ANTES de chamar. Se este processo morrer
+        # no meio, a proxima passada ve 'subindo' e NAO re-sobe as cegas.
+        _journal_escrever(alias, data_pasta, "subindo")
         p = subprocess.run(cmd, cwd=str(repo), env=env, capture_output=True, text=True, encoding="utf-8", errors="replace",
                            timeout=int(cfg.get("timeout_seg", 3600)))
         out = (p.stdout or "").strip()
+        _vid_out = _video_id_de(out)
+        if _vid_out:
+            _journal_escrever(alias, data_pasta, "subiu", _vid_out)
         if p.returncode != 0:
             # DEAD-LETTER: pode ter subido e morrido depois (foi o que houve em
             # 06/08). Se ha video_id no stdout/grid, reconcilia; senao registra
             # "falhou" pro upload_daily_check re-tentar — nunca some em silencio.
             vid = _video_id_de(out) or _video_id_do_grid(vps, row, col)
             if vid:
+                _journal_escrever(alias, data_pasta, "subiu", vid)
                 _log(f"rc={p.returncode} MAS existe video {vid} — reconciliando")
                 _reconciliar(config, repo, canal_yt, alias, row, col, data_pasta,
                              vid, thumb_path, slot, tz)
-                return {"ok": True, "skip": "rc!=0 mas reconciliado", "erro": None, "stdout": out}
+                return {"ok": True, "skip": "rc!=0 mas reconciliado", "erro": None,
+                        "stdout": out, "video_id": vid}
             _marcar_falha(config, row, col, f"rc={p.returncode}")
             _abortar(config, alias, data_pasta,
                      f"upload_one rc={p.returncode}: {(p.stderr or out)[-300:]}")
@@ -445,5 +622,6 @@ def _disparar_interno(config, alias, canal_idx, data_pasta, video_path, titulo_e
         # CTA e sem agendamento). O verify le o estado REAL no YouTube e
         # completa thumb/playlist/comentario/pin/agendamento que faltarem.
         _reconciliar(config, repo, canal_yt, alias, row, col, data_pasta,
-                     _video_id_de(out), thumb_path, slot, tz)
-        return {"ok": True, "skip": None, "erro": None, "stdout": out}
+                     _vid_out, thumb_path, slot, tz)
+        return {"ok": True, "skip": None, "erro": None, "stdout": out,
+                "video_id": _vid_out or _video_id_do_grid(vps, row, col)}

@@ -768,23 +768,48 @@ def process_job(config: dict, job: dict) -> bool:
                                 tamanho_mb=size_mb)
 
                 # === GATILHO DE UPLOAD (event-driven) ===
-                # Render OK + MP4 validado -> dispara upload DAQUELE tema, agendando
-                # no slot da PROPRIA data-tema (mata o shift do batch). Feature-flag
-                # em worker_config.json (upload_trigger). NUNCA levanta excecao: o
-                # render ja fechou com sucesso, upload e' extra.
+                # Render OK + MP4 validado -> o tema segue pra publicacao. Dois modos
+                # (worker_config.json > upload_trigger):
+                #   esteira=true  -> ENFILEIRA (write de 1 JSON) e volta pro proximo
+                #                    job na hora. thumb/upload/pin viram estagios do
+                #                    esteira_worker (formato puxado, Piter 30/07).
+                #                    Se o esteira_worker esta MORTO (heartbeat velho),
+                #                    cai no inline — nada fica preso.
+                #   esteira=false -> fluxo INLINE legado (thumb+upload+pin aqui,
+                #                    segurando este worker por ate ~20min).
+                # NUNCA levanta excecao: o render ja fechou com sucesso.
                 try:
                     import upload_trigger
-                    _r = upload_trigger.disparar(
-                        config, alias=tag, canal_idx=canal_idx,
-                        data_pasta=data_pasta, video_path=video_path,
-                        titulo_esperado=job.get("titulo", ""),
-                    )
-                    if _r.get("skip"):
-                        log(f"  [upload] skip: {_r['skip']}")
-                    elif _r.get("ok"):
-                        log(f"  [upload] OK")
-                    elif _r.get("erro"):
-                        log(f"  [upload] FALHOU: {_r['erro']}")
+                    _ucfg = (config.get("upload_trigger") or {})
+                    _alias_up = (tag or "").upper()
+                    _canais_up = [c.strip().upper() for c in (_ucfg.get("canais") or [])]
+                    _no_piloto = _ucfg.get("enabled") and (not _canais_up or _alias_up in _canais_up)
+                    if _ucfg.get("esteira") and _no_piloto:
+                        import esteira
+                        if esteira.worker_vivo():
+                            esteira.enfileirar(_alias_up, data_pasta, video_path,
+                                               titulo=job.get("titulo", ""))
+                            log(f"  [upload] ENFILEIRADO na esteira (etapa=thumb)")
+                        else:
+                            log(f"  [upload] esteira_worker MORTO — caindo pro fluxo inline")
+                            _r = upload_trigger.disparar(
+                                config, alias=tag, canal_idx=canal_idx,
+                                data_pasta=data_pasta, video_path=video_path,
+                                titulo_esperado=job.get("titulo", ""))
+                            log(f"  [upload] inline: ok={_r.get('ok')} skip={_r.get('skip')} "
+                                f"erro={_r.get('erro')}")
+                    else:
+                        _r = upload_trigger.disparar(
+                            config, alias=tag, canal_idx=canal_idx,
+                            data_pasta=data_pasta, video_path=video_path,
+                            titulo_esperado=job.get("titulo", ""),
+                        )
+                        if _r.get("skip"):
+                            log(f"  [upload] skip: {_r['skip']}")
+                        elif _r.get("ok"):
+                            log(f"  [upload] OK")
+                        elif _r.get("erro"):
+                            log(f"  [upload] FALHOU: {_r['erro']}")
                 except Exception as _eut:
                     log(f"  [upload] AVISO trigger falhou (render OK): {_eut}")
 

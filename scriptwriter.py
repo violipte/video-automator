@@ -137,7 +137,68 @@ def salvar_credenciais(creds: list):
 def carregar_temas() -> list:
     return _carregar_json(TEMAS_FILE, [])
 
+# Campos de CONTEUDO que congelam assim que a celula vira video no ar.
+# Os campos de upload (youtube_*, upload_status, uploaded_at, done*) seguem
+# livres — o reconciliador precisa escrever neles.
+_CONGELA_POS_UPLOAD = ("titulo", "tema", "thumb", "roteiro")
+
+
+def _congelar_publicadas(temas) -> list:
+    """Reverte alteracoes de CONTEUDO em celulas que ja viraram video no ar.
+
+    Regra do Piter (30/07): "video postado NAO tem o grid alterado. Se houver
+    alteracao, sera manual (ou solicitado) direto no video no canal."
+
+    POR QUE E' CODIGO: o upload le titulo/thumb do grid NA HORA DE SUBIR
+    (upload_one.py:78) e o reconciliador re-le a cada passada. Trocar o texto de
+    uma celula ja publicada faz a proxima reconciliacao "consertar" o video no ar
+    pro texto novo, sem ninguem pedir. Muta `temas` in-place e devolve a lista do
+    que foi revertido.
+    """
+    if not isinstance(temas, dict):
+        return []
+    novas = temas.get("celulas")
+    if not isinstance(novas, dict):
+        return []
+    disco = _carregar_json(TEMAS_FILE, {})
+    antigas = disco.get("celulas") if isinstance(disco, dict) else None
+    if not isinstance(antigas, dict):
+        return []
+    revertidos = []
+    for key, cel_nova in novas.items():
+        if not isinstance(cel_nova, dict):
+            continue
+        cel_velha = antigas.get(key)
+        if not isinstance(cel_velha, dict) or not cel_velha.get("youtube_video_id"):
+            continue                       # nunca publicou -> pode editar
+        for campo in _CONGELA_POS_UPLOAD:
+            if campo in cel_nova and cel_nova[campo] != cel_velha.get(campo):
+                cel_nova[campo] = cel_velha.get(campo)
+                revertidos.append(f"{key}.{campo}")
+    return revertidos
+
+
 def salvar_temas(temas: list):
+    """Salva o grid inteiro. CELULA JA PUBLICADA E' IMUTAVEL no conteudo.
+
+    O guard mora AQUI e nao no POST /api/temas porque o endpoint NAO e' o unico
+    caminho: o coringa_distribuidor grava direto por `_salvar_temas` -> aqui.
+    Um guard so no endpoint deixaria a distribuicao passar por baixo — que foi
+    exatamente quem contaminou ENO (27/07) e CON (30/07-30/08). Este e' o funil
+    real pro disco.
+
+    Fora do lock de proposito: `_salvar_json` pega o MESMO lock por path e
+    `threading.Lock` nao e' reentrante (pegar aqui = deadlock). A janela de
+    corrida e' irrelevante: isto protege contra edicao humana/distribuidor, nao
+    contra corrida de microssegundos — e o patch atomico de upload nem passa aqui.
+    """
+    try:
+        revertidos = _congelar_publicadas(temas)
+        if revertidos:
+            print(f"[salvar_temas] CONGELADO (video ja publicado): "
+                  f"{', '.join(revertidos[:12])}{' ...' if len(revertidos) > 12 else ''}")
+    except Exception as e:
+        print(f"[salvar_temas] WARN guard de celula publicada falhou: {e}")
     _salvar_json(TEMAS_FILE, temas)
 
 

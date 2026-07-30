@@ -43,6 +43,10 @@ def main():
     ap.add_argument("--publish-utc", required=True, help="ISO8601 UTC do publishAt desejado")
     ap.add_argument("--thumb", default="")
     ap.add_argument("--no-pin", action="store_true")
+    ap.add_argument("--ensure-pin", action="store_true",
+                    help="estagio PIN da esteira: fixa o CTA mesmo quando o comentario "
+                         "JA existia (o fluxo normal so pina comentario recem-postado). "
+                         "Exige unlisted -> acha o comentario -> pina -> reagenda.")
     a = ap.parse_args()
 
     from config import ADSPOWER_PROFILE_ID, ADSPOWER_YT_LANG, PUBLISH_TZ
@@ -103,7 +107,11 @@ def main():
     # --- 3) comentario + pin (exige NAO-private) ---
     # ncom None = indeterminado (private bloqueia a listagem). So da pra saber —
     # e so da pra postar — com o video fora de private.
-    if ncom is None or ncom == 0:
+    # --ensure-pin (estagio PIN da esteira): entra aqui MESMO com comentario
+    # existente, acha o id dele e fixa. REGRA (Piter 30/07): pin falhou ->
+    # 'pin_falhou' no resultado e o video SEGUE agendado; retry e' de quem chamou.
+    pinned = False
+    if ncom is None or ncom == 0 or a.ensure_pin:
         reagendar = False
         try:
             if priv == "private":
@@ -114,25 +122,41 @@ def main():
                 _t.sleep(4)               # propagacao do YouTube
                 ncom = n_comentarios()
                 _p(f"comentarios REAIS (agora visiveis): {ncom}")
-            if ncom == 0:
+            cid = None
+            if not ncom:                  # 0 ou None (comentarios desabilitados dao None)
                 texto = build_comment(pub_local)
                 cid = youtube.post_comment(vid, texto)
                 consertos.append("comentario")
                 _p(f"comentario postado: {cid}")
-                if not a.no_pin:
+            else:
+                _p("comentario ja existia")
+                if a.ensure_pin:
+                    # id do thread == id do comentario top-level (e' o que o pin usa)
                     try:
-                        from lib import adspower
-                        from lib import pin as pin_mod
+                        r = y.commentThreads().list(part="id", videoId=vid,
+                                                    maxResults=1, order="time").execute()
+                        itens = r.get("items") or []
+                        cid = itens[0]["id"] if itens else None
+                        _p(f"comentario existente: {cid}")
+                    except Exception as e:
+                        _p(f"nao achei o id do comentario: {type(e).__name__}: {str(e)[:90]}")
+            if cid and not a.no_pin:
+                try:
+                    # pin_slot(1): serializa com qualquer outro pin da maquina
+                    # (esteira ja e' fila unica; isto protege do daily check junto)
+                    from lib.pinlock import pin_slot
+                    from lib import adspower
+                    from lib import pin as pin_mod
+                    with pin_slot(n_slots=1):
                         cdp = adspower.start_profile(ADSPOWER_PROFILE_ID)
                         try:
                             pin_mod.pin_comment(cdp, vid, cid, lang=ADSPOWER_YT_LANG)
                             consertos.append("pin")
+                            pinned = True
                         finally:
                             adspower.stop_profile(ADSPOWER_PROFILE_ID)
-                    except Exception as e:
-                        _p(f"pin falhou (comentario POSTADO): {type(e).__name__}: {str(e)[:90]}")
-            else:
-                _p("comentario ja existia")
+                except Exception as e:
+                    _p(f"pin falhou (comentario OK, video segue): {type(e).__name__}: {str(e)[:90]}")
         except Exception as e:
             _p(f"comentario falhou: {type(e).__name__}: {str(e)[:110]}")
         finally:
@@ -152,11 +176,36 @@ def main():
             except Exception as e:
                 _p(f"agendamento falhou: {type(e).__name__}: {str(e)[:90]}")
 
+    # --- 5) CONFIRMACAO com backoff ---
+    # `videos.list` do YouTube tem consistencia EVENTUAL: logo depois de um
+    # update ele ainda devolve o estado ANTIGO. Ler uma vez so (o que este
+    # trecho fazia) gerou FALSO NEGATIVO no ENO2 07/08: o video estava
+    # private+agendado certinho, o verify leu 'unlisted/None' e marcou
+    # `incompleto` -> a checagem diaria ia "reconciliar" um video 100% pronto,
+    # mexendo na privacidade dele a toa. So desiste depois de reconferir.
+    ja_passou = pub_utc <= datetime.now(timezone.utc)
+
+    def bateu(p, pa):
+        if ja_passou:
+            return p == "public"          # devia ter publicado sozinho
+        return p == "private" and bool(pa) and pa[:16] == alvo[:16]
+
     priv, pub_at = estado()
-    ok = (priv == "private" and bool(pub_at))
-    _p(f"estado final: privacy={priv} publishAt={pub_at} | consertos={consertos}")
+    if not bateu(priv, pub_at):
+        import time as _t
+        for espera in (3, 5, 8, 12, 20):
+            _p(f"ainda nao propagou (privacy={priv} publishAt={pub_at}) — reconfere em {espera}s")
+            _t.sleep(espera)
+            priv, pub_at = estado()
+            if bateu(priv, pub_at):
+                break
+
+    ok = bateu(priv, pub_at)
+    _p(f"estado final: privacy={priv} publishAt={pub_at} ok={ok} pinned={pinned} "
+       f"| consertos={consertos}")
     print("__VERIFY__" + json.dumps(
-        {"ok": ok, "privacy": priv, "publish_at": pub_at, "consertos": consertos},
+        {"ok": ok, "privacy": priv, "publish_at": pub_at, "consertos": consertos,
+         "pinned": pinned},
         ensure_ascii=False))
 
 

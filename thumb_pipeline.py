@@ -196,23 +196,45 @@ def gerar(canal: str, data_iso: str, timeout_seg: int = 900, n: int = N_VARIANTE
         lote_f = out / "_lote.json"
         lote_f.write_text(json.dumps(lote, ensure_ascii=False, indent=2), encoding="utf-8")
 
+        # PROJETO POR DATA (esteira, Piter 30/07): todos os canais do dia usam o
+        # MESMO projeto do Flow — a sessao/config persiste, e o marcador unico
+        # [CANAL dd-mm vN] no inicio de cada prompt impede o driver de casar
+        # card de um canal com prompt de outro.
+        import esteira
+        proj = esteira.flow_proj_da_data(data_iso)
+
         # LOCK GLOBAL: 1 geracao por vez na maquina (chrome_profile e' unico)
         with _LockFlow() as lk:
             if lk is None:
                 return None       # nao conseguiu a vez -> sobe sem thumb
-            # projeto NOVO dedicado por (data, canal) — sem --proj o driver cria um
-            _log(f"gerando {n} thumbs no Nano Banana (projeto novo) -> {out}")
-            r = subprocess.run([str(VEO_PY), str(AQUI / "thumb_gen" / "thumb_nano.py"),
-                                str(lote_f), str(out), "2"],
-                               capture_output=True, text=True, encoding="utf-8",
+            _log(f"gerando {n} thumbs no Nano Banana (projeto "
+                 f"{proj[:12] + '…' if proj else 'NOVO'}) -> {out}")
+            cmd = [str(VEO_PY), str(AQUI / "thumb_gen" / "thumb_nano.py"),
+                   str(lote_f), str(out), "2"]
+            if proj:
+                cmd.append(proj)
+            r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
                                errors="replace", timeout=timeout_seg,
                                env=dict(os.environ, PYTHONUTF8="1"))
         for ln in (r.stdout or "").splitlines()[-6:]:
             _log(f"  driver| {ln.strip()}")
+        # captura o id do projeto ("projeto: <uuid>" vem do flow_driver) pra
+        # proxima thumb do MESMO dia reusar. Projeto morto/apagado no Flow:
+        # o driver falha, a gente detecta 0 imagens e zera o registro (abaixo).
+        for ln in (r.stdout or "").splitlines():
+            ln = ln.strip()
+            if ln.startswith("projeto: "):
+                esteira.flow_proj_gravar(data_iso, ln.split("projeto: ", 1)[1].strip())
+                break
 
         imgs = sorted(p for p in out.glob(f"{canal}_*.jpg") if p.stat().st_size > 20_000)
         if not imgs:
             _log(f"NENHUMA imagem gerada (rc={r.returncode}) — upload segue SEM thumb")
+            if proj:
+                # projeto reusado pode ter morrido no Flow — zera o registro pra
+                # proxima tentativa do dia criar um projeto novo em vez de
+                # bater no mesmo projeto quebrado pra sempre.
+                esteira.flow_proj_gravar(data_iso, "")
             return None
         _log(f"{len(imgs)} imagens geradas")
         return _revisar(imgs)

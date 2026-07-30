@@ -1309,6 +1309,10 @@ async def salvar_temas_grid(request: Request):
             merged_celulas[key] = {**cel_atual, **novo_cel_clean}
         dados["celulas"] = merged_celulas
 
+    # NOTA: o guard "celula publicada e' imutavel" NAO fica aqui — mora em
+    # scriptwriter.salvar_temas(), que e' o funil real pro disco (o
+    # coringa_distribuidor grava direto, sem passar por este endpoint).
+
     # === PROTECAO ANTI-REGRESSAO: rejeita sobrescrita de canais adaptados com vocab CO1 ===
     # Historico (29/05 -> 01/06 2026): meu fix das 28 celulas ASH/PCC/EOA foi DESFEITO
     # porque o frontend v2 tinha snapshot em cache (anterior ao fix) e fez save (drag/edit).
@@ -1410,15 +1414,21 @@ async def upload_mark(request: Request):
     except (TypeError, ValueError):
         raise HTTPException(400, "row e col (int) sao obrigatorios")
     key = f"{row}_{col}"
+    # thumb_status/pin_status: pendencias da esteira (thumb/pin NUNCA bloqueiam a
+    # publicacao — regra Piter 30/07); o upload_daily_check re-tenta ate limpar.
     CAMPOS_OK = ("youtube_video_id", "youtube_publish_at", "youtube_url",
-                 "upload_status", "uploaded_at")
+                 "upload_status", "uploaded_at", "thumb_status", "pin_status")
     patch = {c: body[c] for c in CAMPOS_OK if body.get(c) is not None}
     if not patch:
         raise HTTPException(400, "nenhum campo de upload valido no payload")
-    if not patch.get("uploaded_at"):
-        patch["uploaded_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    if not patch.get("upload_status"):
-        patch["upload_status"] = "uploaded"
+    # Defaults SO quando o patch e' de upload de fato (traz video_id). Uma marca
+    # de status/pendencia sozinha nao pode ganhar upload_status="uploaded" de
+    # brinde — sobrescreveria "scheduled" e reabriria a porta da duplicata.
+    if patch.get("youtube_video_id"):
+        if not patch.get("uploaded_at"):
+            patch["uploaded_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        if not patch.get("upload_status"):
+            patch["upload_status"] = "uploaded"
     cel = scriptwriter.patch_temas_celula(key, patch)
     return {
         "ok": True,
@@ -1427,6 +1437,64 @@ async def upload_mark(request: Request):
         "titulo": cel.get("titulo", ""),
         "youtube_video_id": cel.get("youtube_video_id", ""),
     }
+
+
+@app.get("/api/upload/status")
+def upload_status(dias: int = 14, canal: str = ""):
+    """Painel do upload: o que subiu, o que falta e o que deu problema.
+
+    Sem isso o `upload_status` só existia dentro do temas.json — o operador
+    não tinha como saber o estado sem abrir o YouTube.
+
+    Estados: scheduled (100% confirmado) · incompleto (no ar, falta algo)
+             · falhou:<motivo> (dead-letter, o daily check re-tenta)
+             · pendente (tem vídeo renderizado mas nunca subiu)
+    """
+    from datetime import date as _date, timedelta as _td
+    temas = scriptwriter.carregar_temas() or {}
+    linhas = temas.get("linhas", []) or []
+    colunas = temas.get("colunas", []) or []
+    celulas = temas.get("celulas", {}) or {}
+    alvo = (canal or "").strip().upper()
+
+    hoje = _date.today()
+    ini, fim = hoje - _td(days=dias), hoje + _td(days=dias)
+    itens, resumo = [], {}
+    for ri, l in enumerate(linhas):
+        try:
+            d, m, y = (l.get("data") or "").split("/")
+            dt = _date(int(y), int(m), int(d))
+        except (ValueError, AttributeError):
+            continue
+        if not (ini <= dt <= fim):
+            continue
+        for ci, col in enumerate(colunas):
+            nome = (col.get("nome") or "").strip().upper()
+            if col.get("tipo") == "coringa" or (alvo and nome != alvo):
+                continue
+            cel = celulas.get(f"{ri}_{ci}") or {}
+            if not cel.get("titulo"):
+                continue
+            st = (cel.get("upload_status") or "").strip()
+            vid = cel.get("youtube_video_id") or ""
+            if not st and not vid:
+                continue          # nunca entrou no fluxo de upload
+            estado = st or "pendente"
+            chave = estado.split(":")[0]
+            resumo[chave] = resumo.get(chave, 0) + 1
+            itens.append({
+                "data": l.get("data"), "canal": nome, "row": ri, "col": ci,
+                "titulo": (cel.get("titulo") or "")[:70],
+                "status": estado,
+                "video_id": vid,
+                "url": cel.get("youtube_url") or (f"https://youtube.com/watch?v={vid}" if vid else ""),
+                "publish_at": cel.get("youtube_publish_at") or "",
+                "thumb_status": cel.get("thumb_status") or "",
+                "pin_status": cel.get("pin_status") or "",
+                "ok": estado == "scheduled",
+            })
+    itens.sort(key=lambda x: (x["data"].split("/")[::-1], x["canal"]))
+    return {"ok": True, "resumo": resumo, "total": len(itens), "itens": itens}
 
 
 # === API: NARRAÇÃO ===
@@ -2775,6 +2843,131 @@ def backlog_reenriquecer(item_id: str):
         return {"ok": False, "erro": "Nada extraido (oEmbed e OCR falharam)"}
     atualizado = backlog_temas_db.atualizar(item_id, **campos)
     return {"ok": True, "item": atualizado, "campos": list(campos.keys())}
+
+
+# === API: NICHE SPY (pesquisa de nichos/canais no YouTube) ===
+# Dados no Supabase (tabelas niche_*). Config: niche_supabase_url/key + youtube_api_keys.
+# NAO usa as chaves genericas supabase_url/key do config (aquelas disparam o sync do grid).
+
+import niche_spy_db  # noqa: E402
+
+
+@app.get("/api/niche-spy/status")
+def niche_status():
+    """Diz se o modulo esta configurado + uso de quota do dia (pra UI avisar)."""
+    cfg_ok = niche_spy_db.configurado()
+    keys = [k.get("id", "?") for k in niche_spy_db._yt_keys()]
+    uso = []
+    if cfg_ok:
+        try:
+            uso = niche_spy_db.uso_hoje()
+        except Exception:
+            uso = []
+    return {"ok": cfg_ok, "youtube_keys": keys, "uso_hoje": uso}
+
+
+@app.get("/api/niche-spy/channels")
+def niche_canais_listar(tier: str = None, nicho: str = None, favorito: bool = None):
+    """Lista canais salvos. Filtros opcionais: tier=S|A|B, nicho, favorito."""
+    try:
+        return {"ok": True, "canais": niche_spy_db.listar_canais(tier=tier, nicho=nicho, favorito=favorito)}
+    except Exception as e:
+        return {"ok": False, "erro": str(e), "canais": []}
+
+
+@app.post("/api/niche-spy/channels")
+async def niche_canal_adicionar(request: Request):
+    """Salva um canal. Body: {url|handle|channel_id, nicho?, tier?, tags?, notas?}.
+
+    Enriquece via YouTube channels.list (1 unidade de quota) se houver key configurada.
+    Sem key, salva com o que veio no body (titulo manual).
+    """
+    body = await request.json()
+    entrada = (body.get("url") or body.get("handle") or body.get("channel_id") or "").strip()
+    if not entrada:
+        return {"ok": False, "erro": "Informe a URL/@handle do canal"}
+
+    meta = None
+    try:
+        meta = niche_spy_db.buscar_canal_yt(entrada)
+    except Exception:
+        meta = None
+
+    if not meta:
+        # fallback sem API: exige ao menos um titulo pra nao salvar linha vazia
+        tipo, valor = niche_spy_db.parse_canal(entrada)
+        if not body.get("titulo"):
+            return {"ok": False, "erro": "Canal nao resolvido (sem YouTube API key). Preencha o titulo manualmente."}
+        meta = {"channel_id": valor if tipo == "id" else (valor or entrada),
+                "handle": valor if tipo == "handle" else None,
+                "titulo": body.get("titulo"),
+                "url": entrada if entrada.startswith("http") else None}
+
+    dados = {**meta,
+             "nicho": body.get("nicho"), "tier": body.get("tier"),
+             "tags": body.get("tags"), "notas": body.get("notas"),
+             "favorito": body.get("favorito", False),
+             "origem": body.get("origem", "manual"),
+             "ref_channel_id": body.get("ref_channel_id")}
+    try:
+        return {"ok": True, "canal": niche_spy_db.salvar_canal(dados), "enriquecido": bool(meta.get("subs"))}
+    except Exception as e:
+        return {"ok": False, "erro": str(e)}
+
+
+@app.put("/api/niche-spy/channels/{canal_id}")
+async def niche_canal_atualizar(canal_id: str, request: Request):
+    """Atualiza campos editaveis: tier, nicho, tags, notas, favorito."""
+    body = await request.json()
+    campos = {k: v for k, v in body.items()
+              if k in ("tier", "nicho", "tags", "notas", "favorito", "titulo")}
+    if not campos:
+        return {"ok": False, "erro": "Nada para atualizar"}
+    try:
+        return {"ok": True, "canal": niche_spy_db.atualizar_canal(canal_id, campos)}
+    except Exception as e:
+        return {"ok": False, "erro": str(e)}
+
+
+@app.delete("/api/niche-spy/channels/{canal_id}")
+def niche_canal_remover(canal_id: str):
+    try:
+        niche_spy_db.remover_canal(canal_id)
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "erro": str(e)}
+
+
+@app.get("/api/niche-spy/templates")
+def niche_templates_listar():
+    try:
+        return {"ok": True, "templates": niche_spy_db.listar_templates()}
+    except Exception as e:
+        return {"ok": False, "erro": str(e), "templates": []}
+
+
+@app.post("/api/niche-spy/templates")
+async def niche_template_salvar(request: Request):
+    """Body: {nome, criterios{}, descricao?}"""
+    body = await request.json()
+    if not (body.get("nome") or "").strip():
+        return {"ok": False, "erro": "Nome obrigatorio"}
+    try:
+        tpl = niche_spy_db.salvar_template(body["nome"].strip(),
+                                           body.get("criterios") or {},
+                                           body.get("descricao"))
+        return {"ok": True, "template": tpl}
+    except Exception as e:
+        return {"ok": False, "erro": str(e)}
+
+
+@app.delete("/api/niche-spy/templates/{tpl_id}")
+def niche_template_remover(tpl_id: str):
+    try:
+        niche_spy_db.remover_template(tpl_id)
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "erro": str(e)}
 
 
 # === API: CORINGA (distribuicao Backlog -> grid Temas) ===

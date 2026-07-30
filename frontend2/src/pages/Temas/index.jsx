@@ -30,6 +30,33 @@ const STATUS_LABEL = {
   'done-auto': 'Concluído (automático)',
 }
 
+// === Status do UPLOAD (upload_trigger grava isso na celula) ===
+// scheduled = 100% fechado (video no ar + thumb + CTA fixado + agendado).
+// Qualquer outro estado significa que algo ficou pendente e precisa de atencao.
+const UPLOAD_KINDS = {
+  scheduled: { icon: '▶', label: 'Agendado no YouTube (fluxo 100% completo)' },
+  incompleto: { icon: '◐', label: 'No ar, mas falta algo (thumb/CTA/pin/agendamento)' },
+  falhou: { icon: '✕', label: 'Upload falhou — vai ser re-tentado na checagem diária' },
+  uploaded: { icon: '↑', label: 'Subiu (legado, antes da confirmação completa)' },
+  fila: { icon: '⏳', label: 'Na esteira (thumb → upload → pin)' },
+}
+
+function getUpload(cel) {
+  const raw = (cel && cel.upload_status ? String(cel.upload_status) : '').trim()
+  if (!raw) return null
+  const kind = raw.split(':')[0]
+  const meta = UPLOAD_KINDS[kind]
+  // Estado desconhecido nunca some da tela: cai como "atencao".
+  return {
+    kind: meta ? kind : 'outro',
+    raw,
+    icon: meta ? meta.icon : '?',
+    label: meta ? meta.label : `Estado não previsto: ${raw}`,
+  }
+}
+
+const UPLOAD_ORDEM = ['scheduled', 'fila', 'uploaded', 'incompleto', 'falhou', 'outro']
+
 // === Filtros de Data (persistidos em localStorage) ===
 const FILTRO_KEY = 'v2:temasFiltro'
 
@@ -78,6 +105,35 @@ function loadFiltro() {
 }
 function saveFiltro(f) {
   try { localStorage.setItem(FILTRO_KEY, JSON.stringify(f)) } catch {}
+}
+
+// Copia texto pra clipboard. Robusto em HTTP non-localhost (onde a app roda no VPS):
+// navigator.clipboard só existe em secure context (https/localhost), então cai pro
+// fallback execCommand('copy') via textarea temporária.
+async function copiarTexto(texto, label = 'Título') {
+  const t = (texto || '').trim()
+  if (!t) { toast.error('Nada pra copiar'); return }
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(t)
+    } else {
+      const ta = document.createElement('textarea')
+      ta.value = t
+      ta.setAttribute('readonly', '')
+      ta.style.position = 'fixed'
+      ta.style.left = '-9999px'
+      ta.style.top = '0'
+      document.body.appendChild(ta)
+      ta.focus()
+      ta.select()
+      const ok = document.execCommand('copy')
+      document.body.removeChild(ta)
+      if (!ok) throw new Error('execCommand falhou')
+    }
+    toast.success(`${label} copiado`)
+  } catch (e) {
+    toast.error('Copiar falhou: ' + e.message)
+  }
 }
 
 export function Temas() {
@@ -201,6 +257,22 @@ export function Temas() {
   const algumExpandido = linhas.some(l => !l.collapsed)
   const toggleAllLabel = algumExpandido ? '⤴ Colapsar' : '⤵ Expandir'
 
+  // Resumo do upload nas linhas visiveis (respeita o filtro de data)
+  const upResumo = {}
+  let upFaltando = 0
+  linhas.forEach((_, ri) => {
+    if (!linhaVisivel[ri]) return
+    colunas.forEach((col, ci) => {
+      if (col.oculta || col.tipo === 'coringa') return
+      const cel = celulas[`${ri}_${ci}`] || {}
+      if (!cel.titulo) return
+      const up = getUpload(cel)
+      if (up) upResumo[up.kind] = (upResumo[up.kind] || 0) + 1
+      else if (cel.done) upFaltando += 1   // renderizado mas sem upload
+    })
+  })
+  const upTotal = Object.values(upResumo).reduce((a, b) => a + b, 0)
+
   return (
     <>
       <PageHeader
@@ -249,17 +321,38 @@ export function Temas() {
         </div>
       </div>
 
+      {/* Painel do upload — so aparece quando ha algo no range */}
+      {(upTotal > 0 || upFaltando > 0) && (
+        <div className="temas-upload-bar">
+          <span className="temas-upload-titulo">Upload</span>
+          {UPLOAD_ORDEM.filter(k => upResumo[k]).map(k => (
+            <span key={k} className={`up-chip up-${k}`} title={(UPLOAD_KINDS[k] || {}).label || k}>
+              <span className="up-chip-icon">{(UPLOAD_KINDS[k] || {}).icon || '?'}</span>
+              {upResumo[k]} {k}
+            </span>
+          ))}
+          {upFaltando > 0 && (
+            <span className="up-chip up-pendente" title="Vídeo renderizado que ainda não subiu">
+              <span className="up-chip-icon">○</span>{upFaltando} sem upload
+            </span>
+          )}
+        </div>
+      )}
+
       <Card padding="none" className="temas-grid-wrap">
         <div className="temas-scroll">
           <table className="temas-grid">
             <thead>
               <tr>
                 <th className="temas-th-data">Data</th>
-                {colunas.map((col, ci) => (
-                  <th key={ci} className={col.tipo === 'coringa' ? 'temas-th-base' : ''}>
-                    {col.nome}
-                  </th>
-                ))}
+                {colunas.map((col, ci) => {
+                  if (col.oculta) return null
+                  return (
+                    <th key={ci} className={col.tipo === 'coringa' ? 'temas-th-base' : ''}>
+                      {col.nome}
+                    </th>
+                  )
+                })}
               </tr>
             </thead>
             <tbody>
@@ -281,11 +374,33 @@ export function Temas() {
                       </div>
                     </td>
                     {colunas.map((col, ci) => {
+                      if (col.oculta) return null
                       const key = `${ri}_${ci}`
                       const cel = celulas[key] || {}
                       const isBase = col.tipo === 'coringa'
                       const isEmpty = !cel.tema && !cel.titulo && !cel.thumb
                       const status = getCellStatus(cel)
+                      const up = getUpload(cel)
+                      const upTitle = up
+                        ? `${up.label}\n${up.raw}` +
+                          (cel.youtube_publish_at ? `\npublica: ${cel.youtube_publish_at.replace('T', ' ').slice(0, 16)} UTC` : '') +
+                          (cel.thumb_status === 'pendente' ? '\n⚠ thumb pendente (checagem diária re-tenta)' : '') +
+                          (cel.pin_status === 'pendente' ? '\n⚠ pin pendente (checagem diária re-tenta)' : '') +
+                          (cel.youtube_url ? '\n(click abre no YouTube)' : '')
+                        : ''
+                      const upBadge = up && (
+                        <span
+                          className={`cell-up-badge up-${up.kind} ${cel.youtube_url ? 'up-clicavel' : ''}`}
+                          title={upTitle}
+                          onClick={(e) => {
+                            if (!cel.youtube_url) return
+                            e.stopPropagation()
+                            window.open(cel.youtube_url, '_blank', 'noopener')
+                          }}
+                        >
+                          {up.icon}
+                        </span>
+                      )
                       return (
                         <td
                           key={ci}
@@ -295,6 +410,7 @@ export function Temas() {
                           {collapsed ? (
                             <div className="cell-status-compact">
                               <span className={`cell-status-dot status-${status}`} title={STATUS_LABEL[status] || ''} />
+                              {upBadge}
                             </div>
                           ) : (
                             <>
@@ -304,6 +420,16 @@ export function Temas() {
                               {isEmpty && <div className="cell-empty">—</div>}
                               {!isEmpty && (
                                 <span className={`cell-status-dot cell-status-corner status-${status}`} title={STATUS_LABEL[status] || ''} />
+                              )}
+                              {upBadge}
+                              {cel.titulo && (
+                                <button
+                                  className="cell-copy-btn"
+                                  title="Copiar título"
+                                  onClick={(e) => { e.stopPropagation(); copiarTexto(cel.titulo, 'Título') }}
+                                >
+                                  📋
+                                </button>
                               )}
                             </>
                           )}
