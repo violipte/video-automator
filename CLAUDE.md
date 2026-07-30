@@ -970,12 +970,61 @@ Templates can store `thumb_config` for AI thumbnail generation:
 
 ---
 
+## Upload Event-Driven (render → thumb → upload → CTA fixado)
+
+Quando um render fecha e o MP4 é validado, o `render_worker` chama
+`upload_trigger.disparar()` e o vídeo se publica sozinho — com a identidade
+travada pela data-tema. Substitui o batch desacoplado (`enqueue.py`/`pool.py`),
+cujo "próximo slot livre" fazia o tema escorregar de dia (caso CO3/CO4).
+
+### Fluxo por vídeo
+```
+render OK + MP4 válido
+  ├─ checagens: col pelo NOME do canal · título == célula · já-uploaded (no-op) · lock por canal
+  ├─ thumb_pipeline.gerar()   → 4 prompts (Prompt Calendar) → Nano Banana 2 16:9 via
+  │                             Playwright/Flow (0 créditos) → pick_best_thumb (Gemini vision)
+  ├─ upload_one.py            → upload unlisted · playlist · comentário (CTA) · pin (RPA) · agenda
+  └─ upload_verify.py         → reconcilia: completa o que faltou · marca o grid
+```
+
+### Arquivos
+| arquivo | papel |
+|---|---|
+| `upload_trigger.py` | gatilho + checagens + `SLOT_MAP` (alias → canal/TZ/slot) + lock por canal |
+| `thumb_pipeline.py` | gera N thumbs e devolve a melhor. **Nunca levanta**: falhou → `None` → sobe sem thumb |
+| `thumb_gen/thumb_nano.py` | monkey-patch da config pra aba **Imagem** e reuso do `veo_driver` |
+| `upload_verify.py` | reconciliador idempotente pós-upload |
+
+### ⚠️ Regras que já custaram bug
+- **`canal_idx` NÃO é a coluna do grid** — é o índice na *ordem da produção* (produzir só o ENO2 dá `canal_idx=0`). A col vem do **nome da coluna**. Confundir publicou um vídeo com título/thumb da BASE.
+- **Thumb nunca bloqueia publicação** (regra do Piter). Timeout 15min; estourou, sobe sem ela.
+- **YouTube não aceita comentário em vídeo `private`** → comentar enquanto `unlisted` e **só depois** agendar. Reconciliar num vídeo já agendado exige: unlisted → comenta → pina → reagenda.
+- **`statistics.commentCount` mente** em vídeo private/unlisted recente (volta 0 com comentários existentes) → contar via `commentThreads().list()`. Confiar no count gerou 3 CTAs duplicados.
+- **`subprocess.run(text=True)` decodifica em cp1252 no Windows** → título com `…`/emoji quebra o `_readerthread` e **mata o processo filho** no meio. Sempre `encoding="utf-8", errors="replace"`.
+- `publishAt` = **data-tema + slot do alias**, nunca recalculado (o "bump" era a origem do shift).
+
+### Credenciais — o Automator NÃO as manuseia
+O `upload_one.py` resolve tudo por `CHANNEL_ALIAS` via `config.py`; o Automator só
+passa a identidade (`--canal --alias --row --col --data --mp4`). Nada de proxy,
+token OAuth ou senha vive neste repo (que é **público**).
+
+| o quê | onde fica | observação |
+|---|---|---|
+| proxy SOCKS5 do canal | Supabase, tabela `canais_yt`, campo `proxy_socks5` | um proxy por canal (IPRoyal) |
+| token OAuth do YouTube | `canais_yt.token_yt_json` + cache `drive-to-youtube/tokens/<ALIAS>_youtube.json` | TTL ~7 dias; expirou → reautorizar |
+| **OAuth client (Google Cloud Console)** | `drive-to-youtube/credentials/<ALIAS>/client_secret.json` | **1 projeto do Console por canal**; fora do git |
+| identidade do canal | `canais_yt`: `channel_id`, `playlist_id`, `publish_tz`, `publish_slots`, `comment_template`, `comment_slug_base` | fonte da verdade dos slots |
+| perfil AdsPower (pin) | `canais_yt.adspower_profile_id` | API local `http://local.adspower.net:50325`; 1 profile por vez |
+| config do gatilho | `worker_config.json` → `upload_trigger` (**gitignored**) | `enabled`, `canais[]`, `dry_run`, `thumb_gen`, `telegram_token/chat_id` |
+
+Canais com credenciais provisionadas: `CON, CO3, DE, EN2, EN3RE, ENO, ENO2, EST, NARC, NPD, TTM, ash`.
+**Onboarding de canal novo:** criar projeto no Google Console + OAuth client → `credentials/<ALIAS>/client_secret.json` → autorizar (gera `tokens/<ALIAS>_youtube.json`) → preencher a linha em `canais_yt` (proxy, playlist, slots, adspower) → adicionar o alias em `SLOT_MAP` (`upload_trigger.py`) e em `canais[]` do `worker_config.json`.
+
 ## Backlog / Pending Items
 
 See `BACKLOG.txt` for the full list. Key pending items by priority:
 
 ### HIGH PRIORITY
-- Upload system (YouTube API, OAuth per channel, proxy, pinned comments)
 - Monitor: detailed render progress (clips count, ETA)
 - Parallel narrations (Etapa B)
 
