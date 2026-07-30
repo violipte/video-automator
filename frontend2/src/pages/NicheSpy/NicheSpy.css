@@ -1,0 +1,98 @@
+/* Niche Spy — segue os tokens do app (tokens.css) */
+.nichespy .ns-warn { color: var(--warn, #e0a800); font-size: 13px; }
+
+/* sub-abas */
+.ns-tabs { display: flex; gap: 6px; margin: 16px 0 18px; flex-wrap: wrap; }
+.ns-tab {
+  background: var(--panel-2); color: var(--text-dim, #9aa4b2);
+  border: 1px solid var(--border, #232a35); border-radius: 10px;
+  padding: 9px 16px; font-size: 14px; cursor: pointer; transition: .15s;
+}
+.ns-tab:hover { color: var(--text, #e6edf3); }
+.ns-tab.active { background: var(--accent); color: #06210f; border-color: var(--accent); font-weight: 600; }
+
+/* form de adicionar */
+.ns-add { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+.ns-input {
+  background: var(--panel-2); color: var(--text, #e6edf3);
+  border: 1px solid var(--border, #232a35); border-radius: 8px;
+  padding: 9px 12px; font-size: 14px; min-width: 130px;
+}
+.ns-input.grow { flex: 1 1 320px; }
+.ns-input.tier-sel { min-width: 100px; }
+.ns-input:focus { outline: none; border-color: var(--accent); }
+
+.ns-btn {
+  background: var(--panel-2); color: var(--text, #e6edf3);
+  border: 1px solid var(--border, #232a35); border-radius: 8px;
+  padding: 9px 14px; font-size: 14px; cursor: pointer;
+}
+.ns-btn:hover { border-color: var(--accent); }
+.ns-btn.primary { background: var(--accent); color: #06210f; border-color: var(--accent); font-weight: 600; }
+.ns-btn.danger { color: #ff6b6b; padding: 4px 9px; }
+.ns-btn:disabled { opacity: .6; cursor: default; }
+
+/* filtros */
+.ns-filtros { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+.ns-check { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-dim, #9aa4b2); }
+.ns-count {
+  font-size: 12px; color: var(--text-dim, #9aa4b2);
+  background: var(--panel-2); padding: 3px 9px; border-radius: 20px;
+}
+
+/* tabela */
+.ns-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.ns-table th {
+  text-align: left; padding: 9px 10px; font-size: 12px; font-weight: 600;
+  color: var(--text-dim, #9aa4b2); text-transform: uppercase; letter-spacing: .4px;
+  border-bottom: 1px solid var(--border, #232a35);
+}
+.ns-table td { padding: 10px; border-bottom: 1px solid var(--border, #232a35); vertical-align: middle; }
+.ns-table tbody tr:hover { background: var(--panel-2); }
+
+.ns-canal { display: flex; align-items: center; gap: 10px; }
+.ns-canal img { width: 34px; height: 34px; border-radius: 50%; object-fit: cover; }
+.ns-canal strong { display: block; }
+.ns-handle { font-size: 12px; color: var(--text-dim, #9aa4b2); }
+
+.ns-fav { background: none; border: none; font-size: 17px; cursor: pointer; color: #8a94a6; opacity: .35; }
+.ns-fav.on { color: #ffc83d; opacity: 1; }
+
+.ns-tier {
+  background: var(--panel-2); border: 1px solid var(--border, #232a35);
+  border-radius: 6px; padding: 3px 7px; font-weight: 700; cursor: pointer; color: var(--text, #e6edf3);
+}
+.ns-tier.tS { color: #ffc83d; border-color: #ffc83d66; }
+.ns-tier.tA { color: #4ade80; border-color: #4ade8066; }
+.ns-tier.tB { color: #60a5fa; border-color: #60a5fa66; }
+
+.ns-notas { max-width: 220px; font-size: 13px; color: var(--text-dim, #9aa4b2); }
+.ns-acoes { display: flex; gap: 6px; align-items: center; white-space: nowrap; }
+.link-pill {
+  background: var(--panel-2); border: 1px solid var(--border, #232a35);
+  border-radius: 20px; padding: 4px 11px; font-size: 12px;
+  color: var(--text, #e6edf3); text-decoration: none;
+}
+.link-pill:hover { border-color: var(--accent); color: var(--accent); }
+.ns-dim { color: var(--text-dim, #9aa4b2); opacity: .7; }
+
+/* estados */
+.ns-vazio { padding: 40px; text-align: center; color: var(--text-dim, #9aa4b2); }
+.ns-erro {
+  background: #ff6b6b1a; border: 1px solid #ff6b6b55; color: #ff9b9b;
+  border-radius: 8px; padding: 10px 14px; margin-bottom: 12px; font-size: 13px;
+}
+.ns-aviso {
+  background: var(--panel-2); border: 1px solid var(--border, #232a35);
+  border-left: 3px solid #ffc83d; border-radius: 8px; padding: 14px 18px; margin-bottom: 16px;
+}
+.ns-aviso p { margin: 6px 0 0; font-size: 13px; color: var(--text-dim, #9aa4b2); }
+.ns-aviso code, .ns-placeholder code {
+  background: var(--panel); padding: 1px 5px; border-radius: 4px; font-size: 12px;
+}
+.ns-placeholder { padding: 6px 2px; }
+.ns-placeholder h3 { font-size: 14px; margin: 18px 0 6px; }
+.ns-placeholder p { font-size: 13px; margin: 4px 0; }
+.ns-passos { font-size: 13px; color: var(--text-dim, #9aa4b2); padding-left: 20px; line-height: 1.8; }
+.ns-tpls { list-style: none; padding: 0; font-size: 13px; }
+.ns-tpls li { padding: 7px 0; border-bottom: 1px solid var(--border, #232a35); }
