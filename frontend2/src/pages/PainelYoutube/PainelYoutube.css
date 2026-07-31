@@ -83,3 +83,14 @@
 .py-check { flex-direction: row; align-items: center; gap: 8px; margin-top: 16px; }
 @media (max-width: 720px) { .py-grid2 { grid-template-columns: 1fr; } }
 .py-campo-full { grid-column: 1 / -1; }
+
+/* --- fusao Cadastro Canal (31/07): abas internas do modal + campos de producao --- */
+.py-abas-modal { padding: 0 16px; margin-top: 4px; border-bottom: 1px solid var(--border); }
+.py-nota { font-size: var(--text-xs); color: var(--text-sec); margin: 2px 0 10px; }
+.py-toggle { display: flex; gap: 6px; }
+.py-toggle button {
+  flex: 1; padding: 6px 0; border-radius: 8px; cursor: pointer;
+  background: var(--panel); border: 1px solid var(--border);
+  color: var(--text-sec); font-size: var(--text-sm);
+}
+.py-toggle button.on { border-color: var(--accent); color: var(--accent); font-weight: var(--fw-medium); }

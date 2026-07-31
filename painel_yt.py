@@ -122,7 +122,58 @@ _CAMPOS_OK = {
     # Piter 31/07: nº do pedido do gmail/canal comprado + dump raw de infos
     # (colunas criadas via Management API em 31/07)
     "pedido_num", "raw_info",
+    # Piter 31/07 (fusao Cadastro Canal x Painel): config de PRODUCAO do canal
+    # (nicho, motor, tier, hook, voz, visual, trilha, CTA). JSONB.
+    "producao",
 }
+
+# ---------------------------------------------------- producao (fusao 31/07)
+# A config de producao mora em canais_yt.producao (JSONB). Enquanto essa coluna
+# nao existir no schema, cai num JSON local — a aba funciona igual e MIGRA
+# sozinha na primeira gravacao depois que a coluna nascer (sem retrabalho).
+# Criar a coluna:  ALTER TABLE canais_yt ADD COLUMN producao jsonb;
+_PROD_PATH = Path(__file__).parent / "producao_canais.json"
+_tem_col_producao: bool | None = None
+
+
+def _col_producao_existe() -> bool:
+    """Checa UMA vez se canais_yt.producao existe (cacheado no processo)."""
+    global _tem_col_producao
+    if _tem_col_producao is None:
+        try:
+            _sb("GET", "/canais_yt", params={"select": "producao", "limit": 1})
+            _tem_col_producao = True
+        except Exception:
+            _tem_col_producao = False
+    return _tem_col_producao
+
+
+def _prod_local() -> dict:
+    try:
+        return json.loads(_PROD_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _prod_local_gravar(alias: str, dados) -> None:
+    todos = _prod_local()
+    todos[alias] = dados
+    _PROD_PATH.write_text(json.dumps(todos, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def _injetar_producao(canal: dict) -> dict:
+    """No modo fallback, a producao vem do JSON local (a coluna nao existe)."""
+    if not _col_producao_existe():
+        canal["producao"] = _prod_local().get(canal.get("alias")) or {}
+        canal["producao_local"] = True   # UI avisa que ainda nao esta no Supabase
+    return canal
+
+
+def _desviar_producao(patch: dict, alias: str) -> dict:
+    """Sem a coluna, `producao` sai do patch do Supabase e vai pro JSON local."""
+    if "producao" in patch and not _col_producao_existe():
+        _prod_local_gravar(alias, patch.pop("producao"))
+    return patch
 
 
 def _montar_patch(body: dict, atual: dict | None) -> dict:
@@ -214,7 +265,7 @@ def _videos_do_grid(runs: list):
 def listar_canais(x_painel_key: str = Header(None)):
     _auth(x_painel_key)
     rows = _sb("GET", "/canais_yt", params={"order": "ordem.asc.nullslast,alias.asc"})
-    return {"ok": True, "canais": [_mascarar(c) for c in rows or []]}
+    return {"ok": True, "canais": [_injetar_producao(_mascarar(c)) for c in rows or []]}
 
 
 @router.get("/canais/{alias}")
@@ -223,7 +274,7 @@ def obter_canal(alias: str, x_painel_key: str = Header(None)):
     rows = _sb("GET", "/canais_yt", params={"alias": f"eq.{alias}"})
     if not rows:
         raise HTTPException(404, f"canal '{alias}' nao existe")
-    return {"ok": True, "canal": _mascarar(rows[0])}
+    return {"ok": True, "canal": _injetar_producao(_mascarar(rows[0]))}
 
 
 @router.post("/canais")
@@ -232,7 +283,7 @@ async def criar_canal(request: Request, x_painel_key: str = Header(None)):
     body = await request.json()
     if not (body.get("alias") and body.get("nome_youtube")):
         raise HTTPException(400, "alias e nome_youtube sao obrigatorios")
-    novo = _montar_patch(body, None)
+    novo = _desviar_producao(_montar_patch(body, None), body["alias"])
     novo.setdefault("status", "ativo")
     novo.setdefault("timezone", body.get("timezone") or "UTC")
     owner = _cfg().get("owner_id")
@@ -249,12 +300,12 @@ async def editar_canal(alias: str, request: Request, x_painel_key: str = Header(
     rows = _sb("GET", "/canais_yt", params={"alias": f"eq.{alias}"})
     if not rows:
         raise HTTPException(404, f"canal '{alias}' nao existe")
-    patch = _montar_patch(body, rows[0])
-    if not patch:
-        raise HTTPException(400, "nenhum campo valido no payload")
+    patch = _desviar_producao(_montar_patch(body, rows[0]), alias)
+    if not patch:   # so producao no payload (modo local) — ja foi gravada
+        return {"ok": True, "canal": _injetar_producao(_mascarar(rows[0]))}
     upd = _sb("PATCH", "/canais_yt", body=patch,
               params={"alias": f"eq.{alias}"}, prefer="return=representation")
-    return {"ok": True, "canal": _mascarar(upd[0])}
+    return {"ok": True, "canal": _injetar_producao(_mascarar(upd[0]))}
 
 
 @router.get("/dashboard")

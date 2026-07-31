@@ -261,57 +261,6 @@ def deletar_template(template_id: str):
     return {"ok": True}
 
 
-# === API: CADASTRO DE CANAL (formulário de debut — 28/07/2026) ===
-# Respostas alimentam: coluna do grid, templates.json, pipeline, style_card VidMator.
-
-CADASTROS_FILE = BASE_DIR / "cadastros_canais.json"
-_cadastros_lock = threading.Lock()
-
-
-def _carregar_cadastros() -> dict:
-    if CADASTROS_FILE.exists():
-        with open(CADASTROS_FILE, encoding="utf-8") as f:
-            return json.load(f)
-    return {}
-
-
-def _salvar_cadastros(cads: dict):
-    with open(CADASTROS_FILE, "w", encoding="utf-8") as f:
-        json.dump(cads, f, ensure_ascii=False, indent=2)
-
-
-@app.get("/api/cadastros-canal")
-def listar_cadastros_canal():
-    cads = _carregar_cadastros()
-    return sorted(cads.values(), key=lambda c: c.get("criado_em") or "", reverse=True)
-
-
-@app.post("/api/cadastros-canal")
-async def salvar_cadastro_canal(request: Request):
-    dados = await request.json()
-    cid = dados.get("id") or str(uuid.uuid4())[:8]
-    dados["id"] = cid
-    agora = datetime.now().isoformat()
-    dados["atualizado_em"] = agora
-    with _cadastros_lock:
-        cads = _carregar_cadastros()
-        dados["criado_em"] = (cads.get(cid) or {}).get("criado_em") or agora
-        cads[cid] = dados
-        _salvar_cadastros(cads)
-    return dados
-
-
-@app.delete("/api/cadastros-canal/{cid}")
-def deletar_cadastro_canal(cid: str):
-    with _cadastros_lock:
-        cads = _carregar_cadastros()
-        if cid not in cads:
-            raise HTTPException(404, "Cadastro não encontrado")
-        del cads[cid]
-        _salvar_cadastros(cads)
-    return {"ok": True}
-
-
 # === API: REGRAS ===
 
 @app.get("/api/rules/{idioma}")

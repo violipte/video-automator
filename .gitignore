@@ -93,3 +93,6 @@ afiliados_html/
 base_temas_export.html
 _esteira/
 painel_yt_config.json
+
+# config de producao por canal (fallback enquanto canais_yt.producao nao existe)
+producao_canais.json
