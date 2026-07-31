@@ -171,57 +171,213 @@ function CanaisSalvos() {
   )
 }
 
-/* ---------------- Sub-aba 2: Buscar Nichos (precisa de YouTube API key) ---------------- */
+/* -------- Tabela de resultados (compartilhada pelas abas Buscar e Similares) -------- */
+function Resultados({ canais, mostrarSimilaridade }) {
+  const [salvos, setSalvos] = useState({})   // channel_id -> 'salvando' | 'ok' | 'erro'
+
+  async function salvar(c, tier) {
+    setSalvos((s) => ({ ...s, [c.channel_id]: 'salvando' }))
+    try {
+      await api.post('/api/niche-spy/channels', {
+        url: c.url, titulo: c.titulo, tier,
+        origem: mostrarSimilaridade ? 'similar' : 'busca',
+      })
+      setSalvos((s) => ({ ...s, [c.channel_id]: 'ok' }))
+    } catch {
+      setSalvos((s) => ({ ...s, [c.channel_id]: 'erro' }))
+    }
+  }
+
+  if (!canais?.length) return null
+  return (
+    <table className="ns-table ns-res">
+      <thead>
+        <tr>
+          <th></th><th>Canal</th>
+          {mostrarSimilaridade && <th>Sim.</th>}
+          <th>Inscritos</th><th>Views/vídeo</th><th>V/sub</th><th>Vídeos</th><th>Salvar como</th>
+        </tr>
+      </thead>
+      <tbody>
+        {canais.map((c) => (
+          <tr key={c.channel_id}>
+            <td>{c.thumb_url && <img className="ns-thumb" src={c.thumb_url} alt="" />}</td>
+            <td>
+              <a href={c.url} target="_blank" rel="noreferrer" className="ns-link"><strong>{c.titulo}</strong></a>
+              {c.motivo && <div className="ns-dim ns-motivo">{c.motivo}</div>}
+              {c.videos_exemplo?.length > 0 && (
+                <div className="ns-dim ns-motivo">{c.videos_exemplo[0].titulo}</div>
+              )}
+            </td>
+            {mostrarSimilaridade && (
+              <td><span className={`ns-sim ${(c.similaridade || 0) >= 85 ? 'alta' : ''}`}>{c.similaridade ?? '—'}</span></td>
+            )}
+            <td>{fmt(c.subs)}</td>
+            <td>{fmt(c.views_por_video)}</td>
+            <td title="views por inscrito — acima de 100 costuma indicar alcance além da base">{c.views_por_sub ?? '—'}</td>
+            <td>{fmt(c.videos_count)}</td>
+            <td>
+              {salvos[c.channel_id] === 'ok'
+                ? <span className="ns-ok">✓ salvo</span>
+                : salvos[c.channel_id] === 'salvando'
+                  ? <span className="ns-dim">…</span>
+                  : TIERS.map((t) => (
+                    <button key={t} className={`ns-tierbtn t${t}`} onClick={() => salvar(c, t)} title={`Salvar como tier ${t}`}>{t}</button>
+                  ))}
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
+}
+
+/* ---------------- Sub-aba 2: Buscar Nichos ---------------- */
+const CRIT_VAZIO = { q: '', min_subs: '', max_subs: '', min_views_video: '', dias: '', idioma: 'en', order: 'viewCount' }
+
 function BuscarNichos({ semKey }) {
+  const [crit, setCrit] = useState(CRIT_VAZIO)
   const [tpls, setTpls] = useState([])
-  useEffect(() => { api.get('/api/niche-spy/templates').then((r) => setTpls(r.templates || [])).catch(() => {}) }, [])
+  const [res, setRes] = useState(null)
+  const [carregando, setCarregando] = useState(false)
+  const [erro, setErro] = useState('')
+
+  const carregarTpls = () => api.get('/api/niche-spy/templates').then((r) => setTpls(r.templates || [])).catch(() => {})
+  useEffect(() => { carregarTpls() }, [])
+
+  const set = (k) => (e) => setCrit({ ...crit, [k]: e.target.value })
+
+  async function buscar(forcar = false) {
+    if (!crit.q.trim()) { setErro('Informe uma palavra-chave'); return }
+    setCarregando(true); setErro(''); setRes(null)
+    try {
+      const limpos = Object.fromEntries(Object.entries(crit).filter(([, v]) => v !== '' && v != null))
+      const r = await api.post('/api/niche-spy/search', { criterios: limpos, forcar })
+      if (!r.ok) setErro(r.erro || 'Falha na busca'); else setRes(r)
+    } catch (e) { setErro(e.message) } finally { setCarregando(false) }
+  }
+
+  async function salvarTpl() {
+    const nome = prompt('Nome do template de pesquisa:')
+    if (!nome?.trim()) return
+    const limpos = Object.fromEntries(Object.entries(crit).filter(([, v]) => v !== '' && v != null))
+    try { await api.post('/api/niche-spy/templates', { nome: nome.trim(), criterios: limpos }); carregarTpls() }
+    catch (e) { setErro(e.message) }
+  }
+
+  async function removerTpl(id) {
+    if (!confirm('Remover este template?')) return
+    try { await api.delete(`/api/niche-spy/templates/${id}`); carregarTpls() } catch (e) { setErro(e.message) }
+  }
 
   return (
     <>
-      {semKey && (
-        <div className="ns-aviso">
-          <strong>🔑 Aguardando YouTube Data API key.</strong>
-          <p>A busca por critérios precisa da API do YouTube (pedida ao Claude do Link Tracker).
-             Assim que a key entrar em <code>config.json → youtube_api_keys</code>, esta aba fica ativa.</p>
-          <p className="ns-dim">Nota de quota: <code>search.list</code> custa 100 unidades (limite 10.000/dia por projeto),
-             então as buscas ficam em cache no Supabase pra não desperdiçar.</p>
+      {semKey && <div className="ns-aviso"><strong>🔑 Sem YouTube API key.</strong>
+        <p>Adicione em <code>config.json → youtube_api_keys</code> para ativar a busca.</p></div>}
+
+      <div className="ns-form ns-busca">
+        <input className="ns-input ns-q" placeholder="Palavra-chave (ex: unsolved mysteries documentary)"
+               value={crit.q} onChange={set('q')} onKeyDown={(e) => e.key === 'Enter' && buscar()} />
+        <input className="ns-input" type="number" placeholder="Inscritos mín." value={crit.min_subs} onChange={set('min_subs')} />
+        <input className="ns-input" type="number" placeholder="Inscritos máx." value={crit.max_subs} onChange={set('max_subs')} />
+        <input className="ns-input" type="number" placeholder="Views/vídeo mín." value={crit.min_views_video} onChange={set('min_views_video')} />
+        <select className="ns-input" value={crit.dias} onChange={set('dias')}>
+          <option value="">Qualquer período</option>
+          <option value="30">Últimos 30 dias</option>
+          <option value="90">Últimos 90 dias</option>
+          <option value="180">Últimos 6 meses</option>
+          <option value="365">Último ano</option>
+        </select>
+        <select className="ns-input" value={crit.idioma} onChange={set('idioma')}>
+          <option value="">Qualquer idioma</option>
+          <option value="en">Inglês</option><option value="pt">Português</option>
+          <option value="es">Espanhol</option><option value="de">Alemão</option>
+        </select>
+        <select className="ns-input" value={crit.order} onChange={set('order')}>
+          <option value="viewCount">Mais vistos</option>
+          <option value="relevance">Relevância</option>
+          <option value="date">Mais recentes</option>
+        </select>
+        <button className="btn-primary" onClick={() => buscar(false)} disabled={carregando || semKey}>
+          {carregando ? 'Buscando…' : '🔎 Buscar'}
+        </button>
+        <button className="btn-ghost" onClick={salvarTpl} title="Salvar estes critérios como template">💾 Template</button>
+      </div>
+
+      {tpls.length > 0 && (
+        <div className="ns-tplbar">
+          <span className="ns-dim">Templates:</span>
+          {tpls.map((t) => (
+            <span key={t.id} className="ns-chip">
+              <button onClick={() => setCrit({ ...CRIT_VAZIO, ...(t.criterios || {}) })}>{t.nome}</button>
+              <button className="ns-x" onClick={() => removerTpl(t.id)} title="Remover">×</button>
+            </span>
+          ))}
         </div>
       )}
-      <div className="ns-placeholder">
-        <h3>Critérios de busca</h3>
-        <p className="ns-dim">Palavra-chave · faixa de inscritos · faixa de views · período · idioma/país · ordenação.
-           Resultados viram cards com métricas e botão “salvar como canal espionado”.</p>
-        <h3>Templates de pesquisa {tpls.length > 0 && <span className="ns-count">{tpls.length}</span>}</h3>
-        {tpls.length === 0
-          ? <p className="ns-dim">Nenhum template salvo ainda. Você poderá salvar combinações de critérios e reutilizar.</p>
-          : <ul className="ns-tpls">{tpls.map((t) => <li key={t.id}><strong>{t.nome}</strong> <span className="ns-dim">{t.descricao}</span></li>)}</ul>}
-      </div>
+
+      {erro && <div className="ns-erro">{erro}</div>}
+      {res && (
+        <>
+          <div className="ns-resumo">
+            <strong>{res.canais.length}</strong> canais no filtro <span className="ns-dim">(de {res.total_bruto} encontrados)</span>
+            {res.cache && <span className="ns-cache" title="Resultado veio do cache (12h) — não gastou quota">⚡ cache</span>}
+            {res.cache && <button className="btn-ghost ns-mini" onClick={() => buscar(true)}>refazer (gasta 100 un.)</button>}
+          </div>
+          <Resultados canais={res.canais} />
+        </>
+      )}
     </>
   )
 }
 
 /* ---------------- Sub-aba 3: Canais Similares (finder por referência) ---------------- */
 function CanaisSimilares({ semKey }) {
+  const [url, setUrl] = useState('')
+  const [nBuscas, setNBuscas] = useState(3)
+  const [res, setRes] = useState(null)
+  const [carregando, setCarregando] = useState(false)
+  const [erro, setErro] = useState('')
+
+  async function buscar() {
+    if (!url.trim()) { setErro('Cole o link do canal de referência'); return }
+    setCarregando(true); setErro(''); setRes(null)
+    try {
+      const r = await api.post('/api/niche-spy/similar', { url: url.trim(), n_buscas: Number(nBuscas) })
+      if (!r.ok) setErro(r.erro || 'Falha na busca'); else setRes(r)
+    } catch (e) { setErro(e.message) } finally { setCarregando(false) }
+  }
+
   return (
     <>
-      {semKey && (
-        <div className="ns-aviso">
-          <strong>🔑 Aguardando YouTube Data API key.</strong>
-          <p>O finder por canal de referência também depende da API.</p>
-        </div>
-      )}
-      <div className="ns-placeholder">
-        <h3>Como vai funcionar</h3>
-        <ol className="ns-passos">
-          <li>Você cola um <strong>canal de referência</strong> (um que você curtiu).</li>
-          <li>O sistema lê os vídeos recentes dele e <strong>extrai os temas/padrões</strong> (via LLM).</li>
-          <li>Busca no YouTube por esses termos e <strong>agrega os canais</strong> que aparecem.</li>
-          <li>Filtra por métricas e <strong>pontua a semelhança</strong> com o canal-ref.</li>
-          <li>Você favorita / salva com tier os que valerem a pena.</li>
-        </ol>
-        <p className="ns-dim">⚠ O YouTube não tem endpoint oficial de “canais relacionados”
-           (o <code>relatedToVideoId</code> foi descontinuado em 2023) — por isso a abordagem é heurística.</p>
+      {semKey && <div className="ns-aviso"><strong>🔑 Sem YouTube API key.</strong>
+        <p>Adicione em <code>config.json → youtube_api_keys</code> para ativar.</p></div>}
+
+      <div className="ns-form">
+        <input className="ns-input ns-q" placeholder="Canal de referência (link ou @handle)"
+               value={url} onChange={(e) => setUrl(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && buscar()} />
+        <select className="ns-input" value={nBuscas} onChange={(e) => setNBuscas(e.target.value)}
+                title="Cada busca custa 100 unidades de quota">
+          <option value="2">2 buscas (200 un.)</option>
+          <option value="3">3 buscas (300 un.)</option>
+          <option value="4">4 buscas (400 un.)</option>
+        </select>
+        <button className="btn-primary" onClick={buscar} disabled={carregando || semKey}>
+          {carregando ? 'Analisando…' : '🧬 Achar similares'}
+        </button>
       </div>
+      {carregando && <p className="ns-dim">Lendo os vídeos do canal, extraindo os temas e cruzando com a busca — leva ~30s.</p>}
+      {erro && <div className="ns-erro">{erro}</div>}
+
+      {res && (
+        <>
+          <div className="ns-resumo">
+            Referência: <strong>{res.referencia?.titulo}</strong> <span className="ns-dim">({fmt(res.referencia?.subs)} inscritos)</span>
+            {res.queries?.length > 0 && <span className="ns-dim"> · temas: {res.queries.map((q) => `“${q}”`).join(', ')}</span>}
+          </div>
+          <Resultados canais={res.canais} mostrarSimilaridade />
+        </>
+      )}
     </>
   )
 }

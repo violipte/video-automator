@@ -2973,6 +2973,37 @@ def niche_template_remover(tpl_id: str):
         return {"ok": False, "erro": str(e)}
 
 
+@app.post("/api/niche-spy/search")
+async def niche_buscar(request: Request):
+    """Busca canais por criterios. CARO: search.list = 100 unidades (cota 10k/dia).
+    Body: {criterios:{q, min_subs, max_subs, min_views_video, dias, idioma, pais, order}, forcar?}
+    Resultado fica em cache 12h; `forcar:true` ignora o cache."""
+    body = await request.json()
+    try:
+        import niche_search
+        return niche_search.buscar(body.get("criterios") or body, forcar=bool(body.get("forcar")))
+    except Exception as e:
+        return {"ok": False, "erro": str(e), "canais": []}
+
+
+@app.post("/api/niche-spy/similar")
+async def niche_similares(request: Request):
+    """Canais parecidos com um canal de referencia. CARO: n_buscas x 100 unidades.
+    Body: {url, n_buscas?, min_subs?, max_subs?}"""
+    body = await request.json()
+    url = (body.get("url") or "").strip()
+    if not url:
+        return {"ok": False, "erro": "Informe o link/@handle do canal de referencia", "canais": []}
+    try:
+        import niche_search
+        return niche_search.similares(url,
+                                      n_buscas=int(body.get("n_buscas") or 3),
+                                      min_subs=body.get("min_subs"),
+                                      max_subs=body.get("max_subs"))
+    except Exception as e:
+        return {"ok": False, "erro": str(e), "canais": []}
+
+
 # === API: CORINGA (distribuicao Backlog -> grid Temas) ===
 
 import coringa_distribuidor  # noqa: E402

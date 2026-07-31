@@ -18,6 +18,8 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+sys.stdout.reconfigure(encoding="utf-8")   # console do Windows e cp1252 -> quebra em emoji
+
 CONFIG = Path(__file__).parent / "config.json"
 API = "https://www.googleapis.com/youtube/v3"
 

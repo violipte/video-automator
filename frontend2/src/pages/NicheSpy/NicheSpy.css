@@ -96,3 +96,30 @@
 .ns-passos { font-size: 13px; color: var(--text-dim, #9aa4b2); padding-left: 20px; line-height: 1.8; }
 .ns-tpls { list-style: none; padding: 0; font-size: 13px; }
 .ns-tpls li { padding: 7px 0; border-bottom: 1px solid var(--border, #232a35); }
+
+/* ---- busca / similares ---- */
+.ns-busca { flex-wrap: wrap; }
+.ns-q { flex: 1 1 320px; min-width: 260px; }
+.ns-tplbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: -4px 0 14px; }
+.ns-chip { display: inline-flex; align-items: center; background: #1b2330; border: 1px solid #2a3444; border-radius: 14px; overflow: hidden; }
+.ns-chip button { background: none; border: 0; color: #cfe3ff; padding: 4px 10px; cursor: pointer; font-size: 12px; }
+.ns-chip button:hover { background: #23304a; }
+.ns-chip .ns-x { color: #7b8794; padding: 4px 8px; border-left: 1px solid #2a3444; }
+.ns-chip .ns-x:hover { color: #ff6b6b; background: #2a1c1c; }
+
+.ns-resumo { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 6px 0 12px; font-size: 13px; }
+.ns-cache { background: #1e3a2a; color: #6ee7a8; border-radius: 10px; padding: 2px 8px; font-size: 11px; }
+.ns-mini { font-size: 11px; padding: 3px 8px; }
+.ns-erro { background: #2a1c1c; border: 1px solid #5b2b2b; color: #ff9b9b; padding: 10px 12px; border-radius: 8px; margin-bottom: 12px; }
+
+.ns-res td { vertical-align: middle; }
+.ns-thumb { width: 44px; height: 44px; border-radius: 50%; object-fit: cover; display: block; }
+.ns-motivo { font-size: 11px; line-height: 1.35; margin-top: 2px; max-width: 380px; }
+.ns-sim { display: inline-block; min-width: 30px; text-align: center; background: #223047; color: #9fc0ff; border-radius: 10px; padding: 2px 6px; font-size: 12px; font-weight: 600; }
+.ns-sim.alta { background: #1e3a2a; color: #6ee7a8; }
+.ns-ok { color: #6ee7a8; font-size: 12px; }
+.ns-tierbtn { width: 24px; height: 24px; margin-right: 3px; border-radius: 6px; border: 1px solid #2a3444; background: #1b2330; color: #cfe3ff; cursor: pointer; font-weight: 700; font-size: 11px; }
+.ns-tierbtn:hover { border-color: #4a90d9; }
+.ns-tierbtn.tS:hover { background: #3a2a12; border-color: #d9a441; color: #ffd479; }
+.ns-tierbtn.tA:hover { background: #14304a; border-color: #4a90d9; }
+.ns-tierbtn.tB:hover { background: #22303a; }
