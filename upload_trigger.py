@@ -390,10 +390,14 @@ def rodar_pin(config: dict, alias: str, data_iso: str, video_id: str,
                "--video-id", video_id, "--publish-utc", pub, "--ensure-pin"]
         if comment_id:
             cmd += ["--comment-id", comment_id]
+        # PIN_CONCURRENCY: cap GLOBAL de pins simultaneos (pinlock, entre
+        # processos). AdsPower aguenta varios profiles abertos (Piter 31/07);
+        # o cap so limita a rajada de automacao. Ajuste em worker_config.json.
+        pin_cc = str(int(cfg.get("pin_concurrency", 3)))
         r = subprocess.run(cmd, cwd=str(repo), capture_output=True, text=True,
                            encoding="utf-8", errors="replace", timeout=1200,
                            env=dict(os.environ, CHANNEL_ALIAS=canal_yt,
-                                    PYTHONUTF8="1", PIN_CONCURRENCY="1"))
+                                    PYTHONUTF8="1", PIN_CONCURRENCY=pin_cc))
         res = {}
         for ln in (r.stdout or "").splitlines():
             if ln.startswith("[verify]"):

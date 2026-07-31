@@ -48,11 +48,26 @@ def _path(alias: str, data_iso: str) -> Path:
     return TAREFAS / f"{alias.upper()}_{data_iso}.json"
 
 
+def _retry_win(fn, tentativas: int = 40, espera: float = 0.05):
+    """Windows: unlink/replace falham com WinError 32 se OUTRO thread estiver
+    com o arquivo aberto pra leitura naquele instante — e os loops da esteira
+    escaneiam as tarefas o tempo todo. Leituras duram milissegundos; insistir
+    ~2s resolve na pratica. Levanta a ultima excecao se nao resolver."""
+    ultima = None
+    for _ in range(tentativas):
+        try:
+            return fn()
+        except PermissionError as e:
+            ultima = e
+            time.sleep(espera)
+    raise ultima
+
+
 def _write_atomic(path: Path, obj: dict):
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(f".tmp{os.getpid()}")
     tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=1), encoding="utf-8")
-    os.replace(str(tmp), str(path))
+    _retry_win(lambda: os.replace(str(tmp), str(path)))
 
 
 def carregar(alias: str, data_iso: str) -> dict | None:
@@ -74,7 +89,13 @@ def salvar(task: dict):
         ativo = _path(alias, data_iso)
         if task.get("etapa") in ("done", "falha"):
             _write_atomic(FEITAS / ativo.name, task)
-            ativo.unlink(missing_ok=True)
+            try:
+                _retry_win(lambda: ativo.unlink(missing_ok=True))
+            except PermissionError:
+                # leitor persistente segurou o arquivo por >2s (raro). O
+                # registro em feitas/ ja existe -> pendentes() detecta o
+                # fantasma pelo 'criado' igual e se auto-cura na proxima.
+                _log(f"unlink de {ativo.name} bloqueado — feitas/ ja tem o registro")
         else:
             _write_atomic(ativo, task)
 
@@ -107,15 +128,30 @@ def enfileirar(alias: str, data_iso: str, video_path: str, titulo: str = "") -> 
 
 
 def pendentes(etapa: str | None = None) -> list[dict]:
-    """Tarefas ativas, mais antigas primeiro (FIFO real da esteira)."""
+    """Tarefas ativas, mais antigas primeiro (FIFO real da esteira).
+
+    AUTO-CURA de fantasma (WinError 32): se o unlink do salvar() ficou
+    bloqueado por um leitor, sobra em tarefas/ uma copia velha de tarefa que
+    JA terminou (feitas/ tem registro com o MESMO 'criado'). Aqui o fantasma
+    e' filtrado E removido — nunca volta pra fila."""
     if not TAREFAS.exists():
         return []
     out = []
     for p in TAREFAS.glob("*.json"):
         try:
-            out.append(json.loads(p.read_text(encoding="utf-8")))
+            t = json.loads(p.read_text(encoding="utf-8"))
         except Exception:
             continue
+        feita = FEITAS / p.name
+        if feita.exists():
+            try:
+                f = json.loads(feita.read_text(encoding="utf-8"))
+                if f.get("criado") == t.get("criado"):
+                    p.unlink(missing_ok=True)     # fantasma — limpa e pula
+                    continue
+            except (OSError, json.JSONDecodeError):
+                pass
+        out.append(t)
     if etapa:
         out = [t for t in out if t.get("etapa") == etapa]
     out.sort(key=lambda t: t.get("criado") or "")

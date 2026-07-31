@@ -37,6 +37,46 @@ def _p(m):
     print(f"[verify] {m}", flush=True)
 
 
+from contextlib import contextmanager
+
+
+@contextmanager
+def _lock_profile(profile_id: str, espera_max: int = 1200):
+    """Lock POR PROFILE do AdsPower, entre processos. Dois pins no MESMO profile
+    ao mesmo tempo se atropelam (o stop de um mata a sessao do outro no meio) —
+    CO3/CO4 dividem profile, e o daily check pode rodar junto da esteira.
+    Profiles DIFERENTES rodam em paralelo livremente (cap = pin_slot)."""
+    import os
+    import tempfile
+    import time as _t
+    p = Path(tempfile.gettempdir()) / f"pin_profile_{profile_id}.lock"
+    t0 = _t.time()
+    fd = None
+    while fd is None:
+        try:
+            fd = os.open(str(p), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode())
+        except FileExistsError:
+            try:
+                idade = _t.time() - p.stat().st_mtime
+            except OSError:
+                idade = 0
+            if idade > 900:                     # pin leva ~2min; >15min = orfao
+                p.unlink(missing_ok=True)
+                continue
+            if _t.time() - t0 > espera_max:
+                raise TimeoutError(f"profile {profile_id} ocupado ha {espera_max}s")
+            _t.sleep(5)
+    try:
+        yield
+    finally:
+        try:
+            os.close(fd)
+            p.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def _achar_cta_proprio(y, vid: str, texto_esperado: str):
     """Fallback pra celula ANTIGA sem youtube_comment_id: acha o commentID do
     NOSSO CTA. Dupla checagem — autor == o proprio canal E o texto bate com o
@@ -179,19 +219,30 @@ def main():
                             _p("CTA proprio NAO encontrado — nao pino as cegas")
             if cid and not a.no_pin:
                 try:
-                    # pin_slot(1): serializa com qualquer outro pin da maquina
-                    # (esteira ja e' fila unica; isto protege do daily check junto)
+                    # PARALELIZACAO (Piter 31/07): o AdsPower aguenta varios
+                    # profiles ABERTOS (o operador usa assim manualmente) — quem
+                    # precisa de blindagem e' a automacao:
+                    #   pin_slot()        -> cap GLOBAL (PIN_CONCURRENCY, 3-5)
+                    #   _lock_profile     -> NUNCA 2 automacoes no MESMO profile
+                    #                        (CO3/CO4 dividem; daily + esteira)
+                    #   ja_estava_aberto  -> se o PITER esta usando o profile,
+                    #                        nao fecha na mao dele no final
                     from lib.pinlock import pin_slot
                     from lib import adspower
                     from lib import pin as pin_mod
-                    with pin_slot(n_slots=1):
-                        cdp = adspower.start_profile(ADSPOWER_PROFILE_ID)
-                        try:
-                            pin_mod.pin_comment(cdp, vid, cid, lang=ADSPOWER_YT_LANG)
-                            consertos.append("pin")
-                            pinned = True
-                        finally:
-                            adspower.stop_profile(ADSPOWER_PROFILE_ID)
+                    with pin_slot():
+                        with _lock_profile(ADSPOWER_PROFILE_ID):
+                            ja_estava_aberto = adspower.is_active(ADSPOWER_PROFILE_ID)
+                            cdp = adspower.start_profile(ADSPOWER_PROFILE_ID)
+                            try:
+                                pin_mod.pin_comment(cdp, vid, cid, lang=ADSPOWER_YT_LANG)
+                                consertos.append("pin")
+                                pinned = True
+                            finally:
+                                if ja_estava_aberto:
+                                    _p("profile ja estava aberto (uso manual?) — NAO fecho")
+                                else:
+                                    adspower.stop_profile(ADSPOWER_PROFILE_ID)
                 except Exception as e:
                     _p(f"pin falhou (comentario OK, video segue): {type(e).__name__}: {str(e)[:90]}")
         except Exception as e:

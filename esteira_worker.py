@@ -1,9 +1,9 @@
 """Consumidor da esteira (formato PUXADO, Piter 30/07).
 
     render (4 workers) -> [fila] -> THUMB -> [fila] -> UPLOAD -> [fila] -> PIN -> done
-                                    1 por vez         paralelo entre       1 por vez
-                                    (Flow/Chrome)     canais, serial       (AdsPower)
-                                                      DENTRO do canal
+                                    1 por vez         paralelo entre       paralelo por
+                                    (Flow/Chrome)     canais, serial       canal, cap 3-5
+                                                      DENTRO do canal      (AdsPower)
 
 Threads deste processo:
   - thumb_loop : consome etapa='thumb' em FIFO, UM por vez (chrome_profile do
@@ -11,8 +11,11 @@ Threads deste processo:
   - upload_loop: agrupa etapa='upload' por canal YouTube; 1 thread por canal
                  (CO3/CO4 = mesmo canal = mesma thread). Canais diferentes sobem
                  em paralelo — cada um agenda na PROPRIA data+slot.
-  - pin_loop   : consome etapa='pin' em FIFO, UM por vez (AdsPower nao aguenta
-                 concorrencia). upload_verify --ensure-pin.
+  - pin_loop   : espelho do upload — 1 thread por canal, cap global
+                 pin_concurrency (3-5). O AdsPower aguenta varios profiles
+                 abertos (Piter 31/07); as blindagens da automacao sao o
+                 throttle da Local API + lock por profile + este cap.
+                 upload_verify --ensure-pin.
 
 REGRAS DE OURO (Piter 30/07): thumb e pin NUNCA seguram a esteira.
   thumb falhou -> thumb_status='pendente', tema SEGUE pro upload sem thumb.
@@ -91,9 +94,41 @@ def _marcar(cfg: dict, t: dict, **campos):
         _log(f"marca {t['alias']} {t['data']} falhou ({type(e).__name__}) — segue")
 
 
+def _recarregar(t: dict, etapa: str):
+    """Re-le a tarefa do disco e confirma que AINDA esta na etapa esperada.
+
+    Fecha a corrida do salvar(): tarefa done e' escrita em feitas/ E DEPOIS
+    apagada de tarefas/ — um scan que caiu nessa janela le o arquivo velho e
+    re-processaria a tarefa (visto no teste do pool 31/07: pin duplo do ASH).
+    Na janela os DOIS arquivos existem, entao a checagem decisiva e': se ha um
+    registro em feitas/ com o MESMO 'criado', ESTA instancia ja terminou.
+    ('criado' novo = tarefa re-enfileirada de verdade — essa pode rodar.)
+    None = alguem ja processou; o chamador desiste em silencio."""
+    nome = f"{t['alias'].upper()}_{t['data']}.json"
+    ativo = esteira.TAREFAS / nome
+    try:
+        atual = json.loads(ativo.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None                       # ja movida/apagada
+    if atual.get("etapa") != etapa:
+        return None
+    feita = esteira.FEITAS / nome
+    if feita.exists():
+        try:
+            f = json.loads(feita.read_text(encoding="utf-8"))
+            if f.get("criado") == atual.get("criado"):
+                return None               # mesma instancia ja concluida (janela do move)
+        except (OSError, json.JSONDecodeError):
+            pass
+    return atual
+
+
 # ================================================================ THUMB (fila 1)
 def _thumb_task(cfg: dict, t: dict, fila_n: int = 1):
     """Processa UMA tarefa do estagio thumb. Sempre avanca pra 'upload'."""
+    t = _recarregar(t, "thumb")
+    if t is None:
+        return
     _log(f"THUMB {t['alias']} {t['data']} (fila={fila_n})")
     _marcar(cfg, t, upload_status="fila:thumb")
     thumb = None
@@ -136,6 +171,9 @@ _canais_lock = threading.Lock()
 
 def _upload_task(cfg: dict, t: dict, fila_n: int = 1):
     """Processa UM upload. ok -> etapa 'pin'; falha -> 'falha' (dead-letter)."""
+    t = _recarregar(t, "upload")
+    if t is None:
+        return
     _log(f"UPLOAD {t['alias']} {t['data']} (fila={fila_n})")
     _marcar(cfg, t, upload_status="fila:upload")
     r = ut.disparar_esteira(cfg, t["alias"], t["data"], t["video_path"],
@@ -211,6 +249,9 @@ def upload_loop():
 def _pin_task(cfg: dict, t: dict, fila_n: int = 1):
     """Processa UMA tarefa do estagio pin. Nunca segura o tema alem de
     PIN_MAX_TENTATIVAS — video ja esta agendado (regra de ouro)."""
+    t = _recarregar(t, "pin")
+    if t is None:
+        return
     agora = time.time()
     vid = t.get("video_id") or ""
     if not vid:
@@ -250,19 +291,52 @@ def _pin_task(cfg: dict, t: dict, fila_n: int = 1):
     esteira.salvar(t)
 
 
+# PARALELIZACAO (Piter 31/07): o AdsPower aguenta varios profiles ABERTOS —
+# quem precisava de blindagem era a automacao (throttle da Local API +
+# lock por profile no verify + cap global pin_slot). Com as blindagens no
+# lugar, o pin espelha o upload: 1 thread por CANAL (CO3/CO4 = mesmo canal =
+# mesmo profile = mesma thread), cap global de pin_concurrency (default 3).
+_pins_ativos: set = set()
+_pins_lock = threading.Lock()
+
+
+def _pins_prontos() -> list:
+    agora = time.time()
+    return [t for t in esteira.pendentes("pin")
+            if float(t.get("nao_antes") or 0) <= agora]
+
+
+def _pin_canal(canal_yt: str):
+    """Drena TODOS os pins pendentes deste canal, FIFO, e sai."""
+    try:
+        while True:
+            fila = [t for t in _pins_prontos()
+                    if ut.SLOT_MAP.get(t["alias"], ("?",))[0] == canal_yt]
+            if not fila:
+                return
+            _pin_task(_config(), fila[0], len(fila))
+    finally:
+        with _pins_lock:
+            _pins_ativos.discard(canal_yt)
+
+
 def pin_loop():
     while True:
         try:
-            agora = time.time()
-            fila = [t for t in esteira.pendentes("pin")
-                    if float(t.get("nao_antes") or 0) <= agora]
-            if not fila:
-                time.sleep(CICLO_SEG)
-                continue
-            _pin_task(_config(), fila[0], len(fila))
+            cap = int((_config().get("upload_trigger") or {}).get("pin_concurrency", 3))
+            for t in _pins_prontos():
+                canal_yt = ut.SLOT_MAP.get(t["alias"], (None,))[0]
+                if not canal_yt:
+                    continue          # _pin_task marca pendente na sua vez
+                with _pins_lock:
+                    if canal_yt in _pins_ativos or len(_pins_ativos) >= cap:
+                        continue      # canal ja em pin, ou cap global cheio
+                    _pins_ativos.add(canal_yt)
+                threading.Thread(target=_pin_canal, args=(canal_yt,),
+                                 daemon=True, name=f"pin-{canal_yt}").start()
         except Exception as e:
             _log(f"pin_loop erro ({type(e).__name__}: {e}) — continua")
-            time.sleep(CICLO_SEG)
+        time.sleep(CICLO_SEG)
 
 
 # ================================================================ main
