@@ -1103,6 +1103,10 @@ See `BACKLOG.txt` for the full list. Key pending items by priority:
   - `thumb_status`/`pin_status` = `pendente` são pendências que o daily re-tenta (vídeo JÁ está agendado)
   - Referência visual: badges/chips já implementados na grade do Temas (`UPLOAD_KINDS` em
     `frontend2/src/pages/Temas/index.jsx` + CSS `up-*` em `Temas.css`) — reusar o vocabulário
+  - Referência de UX (app do amigo do Piter, `C:\Users\Piter Piter\Downloads\youtube-publish-app`):
+    dashboard React em :8600 com `historico[]` passo-a-passo por publicação (drawer), barra de
+    progresso do upload, botões Retry/Cancelar por item e chip de saúde (API ok / modo / watchDir).
+    Vale copiar o desenho — não o código (é Node/TS, o nosso é o mesmo React do frontend2)
   - NÃO mexer em `upload_one.py` / `upload_trigger.py` / `esteira*.py` sem alinhar (ownership: sessão esteira)
 - Monitor: detailed render progress (clips count, ETA)
 - Parallel narrations (Etapa B)

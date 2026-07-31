@@ -24,6 +24,7 @@ render_worker so enfileira se o heartbeat estiver fresco; senao cai no fluxo
 inline legado (nada fica preso se este processo morrer).
 """
 import json
+import re
 import threading
 import time
 import urllib.request
@@ -37,6 +38,18 @@ AQUI = Path(__file__).parent
 CICLO_SEG = 15
 PIN_MAX_TENTATIVAS = 2
 PIN_RETRY_SEG = 600          # espera entre a 1a e a 2a tentativa de pin
+
+# Erro TRANSITORIO de upload (rede/proxy/lock) -> re-tenta AQUI com backoff em
+# vez de dead-letter direto (absorvido do youtube-publish-app, espec C2/C6 do
+# amigo do Piter). Sem isto, um blip de proxy custava 1 DIA (daily check).
+# NAO entram: "journal: estado indeterminado" (precisa C1/humano), mp4/titulo
+# invalidos (re-tentar nao conserta) e rc!=0 do upload_one (o journal 'subindo'
+# bloqueia retry cego de qualquer forma — e' a protecao anti-duplicata).
+UPLOAD_TRANSIENT_RE = re.compile(
+    r"canal ocupado|timeout|timed out|10060|10054|ECONN|EAI_AGAIN|urlopen|"
+    r"network|proxy|socket|HTTP.?5\d\d|\b429\b|temporar", re.I)
+UPLOAD_MAX_TENTATIVAS = 4
+UPLOAD_BACKOFF_SEG = (120, 240, 480, 900)   # 2 -> 4 -> 8 -> 15 min
 
 
 def _log(m):
@@ -131,23 +144,40 @@ def _upload_task(cfg: dict, t: dict, fila_n: int = 1):
     if r.get("ok"):
         t["video_id"] = r.get("video_id") or ""
         t["etapa"] = "pin"
+        t.pop("nao_antes", None)     # zera backoff de retry anterior
         _log(f"  upload OK ({t['video_id'] or 'id no grid'}) -> fila do pin")
         # pendencia de thumb fica REGISTRADA no grid pro daily re-tentar
         if t.get("thumb_status") == "pendente":
             _marcar(cfg, t, thumb_status="pendente")
     else:
-        # dead-letter ja registrado pelo trigger (falhou:*)
-        t["erro"] = r.get("erro") or "upload falhou"
-        t["etapa"] = "falha"
-        _log(f"  upload FALHOU: {t['erro']}")
+        erro = r.get("erro") or "upload falhou"
+        t["erro"] = erro
+        n = int((t.get("tentativas") or {}).get("upload", 0)) + 1
+        t.setdefault("tentativas", {})["upload"] = n
+        if UPLOAD_TRANSIENT_RE.search(erro) and n < UPLOAD_MAX_TENTATIVAS:
+            espera = UPLOAD_BACKOFF_SEG[min(n - 1, len(UPLOAD_BACKOFF_SEG) - 1)]
+            t["nao_antes"] = time.time() + espera
+            _log(f"  upload falhou TRANSITORIO ({erro[:60]}) — re-tento em "
+                 f"{espera // 60}min (tentativa {n}/{UPLOAD_MAX_TENTATIVAS})")
+        else:
+            # dead-letter ja registrado pelo trigger (falhou:*); daily re-tenta
+            t["etapa"] = "falha"
+            _log(f"  upload FALHOU terminal: {erro}")
     esteira.salvar(t)
+
+
+def _uploads_prontos() -> list:
+    """etapa='upload' cujo backoff (nao_antes) ja venceu."""
+    agora = time.time()
+    return [t for t in esteira.pendentes("upload")
+            if float(t.get("nao_antes") or 0) <= agora]
 
 
 def _upload_canal(canal_yt: str):
     """Drena TODOS os uploads pendentes deste canal, FIFO, e sai."""
     try:
         while True:
-            fila = [t for t in esteira.pendentes("upload")
+            fila = [t for t in _uploads_prontos()
                     if ut.SLOT_MAP.get(t["alias"], ("?",))[0] == canal_yt]
             if not fila:
                 return
@@ -160,7 +190,7 @@ def _upload_canal(canal_yt: str):
 def upload_loop():
     while True:
         try:
-            for t in esteira.pendentes("upload"):
+            for t in _uploads_prontos():
                 canal_yt = ut.SLOT_MAP.get(t["alias"], (None,))[0]
                 if not canal_yt:
                     t["erro"], t["etapa"] = "alias sem SLOT_MAP", "falha"
@@ -235,17 +265,45 @@ def pin_loop():
 
 
 # ================================================================ main
+def _instancia_unica():
+    """Lock de instancia (C7 do youtube-publish-app): 2 esteira_workers vivos
+    (ex.: um manual + um do watchdog) pegariam a MESMA tarefa ao mesmo tempo.
+    O_CREAT|O_EXCL atomico; lock de processo morto (heartbeat frio) e' roubado."""
+    import os
+    import sys
+    lock = esteira.DIR / "worker.lock"
+    esteira.DIR.mkdir(parents=True, exist_ok=True)
+    for _ in range(2):
+        try:
+            fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode())
+            os.close(fd)
+            return
+        except FileExistsError:
+            if esteira.worker_vivo(120):     # dono do lock esta batendo coracao
+                _log("ja existe um esteira_worker VIVO — saindo (instancia unica)")
+                sys.exit(0)
+            _log("lock de instancia orfao (heartbeat frio) — assumindo")
+            lock.unlink(missing_ok=True)
+    _log("nao consegui o lock de instancia — saindo")
+    sys.exit(1)
+
+
 def main():
+    _instancia_unica()
     _log("=== esteira_worker up ===")
     for fn in (thumb_loop, upload_loop, pin_loop):
         threading.Thread(target=fn, daemon=True, name=fn.__name__).start()
     ultimo_prune = 0.0
-    while True:
-        esteira.bater_coracao()
-        if time.time() - ultimo_prune > 86400:
-            esteira.limpar_feitas(30)
-            ultimo_prune = time.time()
-        time.sleep(10)
+    try:
+        while True:
+            esteira.bater_coracao()
+            if time.time() - ultimo_prune > 86400:
+                esteira.limpar_feitas(30)
+                ultimo_prune = time.time()
+            time.sleep(10)
+    finally:
+        (esteira.DIR / "worker.lock").unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
