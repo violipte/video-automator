@@ -67,7 +67,7 @@ def _publico(repo: Path, canal_yt: str, video_id: str):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply", action="store_true")
-    ap.add_argument("--canais", default="", help="CSV; vazio = todos do SLOT_MAP")
+    ap.add_argument("--canais", default="", help="CSV; vazio = todos do cadastro (painel/SLOT_MAP)")
     a = ap.parse_args()
 
     cfg = _cfg()
@@ -83,7 +83,7 @@ def main():
     falhou, incompleto, nao_publicou, ok = [], [], [], 0
     thumb_pend, pin_pend, fila_presa = [], [], []
 
-    for alias, (canal_yt, tz, slot) in ut.SLOT_MAP.items():
+    for alias, (canal_yt, tz, slot) in ut.slot_map(cfg).items():
         if filtro and alias not in filtro:
             continue
         col = col_de.get(alias)
@@ -177,7 +177,7 @@ def main():
         if filtro and al not in filtro:
             continue
         col = col_de.get(al)
-        slot_info = ut.SLOT_MAP.get(al)
+        slot_info = ut.slot_map(cfg).get(al)
         if col is None or not slot_info or not vid:
             continue
         canal_yt, tz, slot = slot_info

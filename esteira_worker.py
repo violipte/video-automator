@@ -217,7 +217,7 @@ def _upload_canal(canal_yt: str):
     try:
         while True:
             fila = [t for t in _uploads_prontos()
-                    if ut.SLOT_MAP.get(t["alias"], ("?",))[0] == canal_yt]
+                    if ut.slot_map(_config()).get(t["alias"], ("?",))[0] == canal_yt]
             if not fila:
                 return
             _upload_task(_config(), fila[0], len(fila))
@@ -230,9 +230,9 @@ def upload_loop():
     while True:
         try:
             for t in _uploads_prontos():
-                canal_yt = ut.SLOT_MAP.get(t["alias"], (None,))[0]
+                canal_yt = ut.slot_map(_config()).get(t["alias"], (None,))[0]
                 if not canal_yt:
-                    t["erro"], t["etapa"] = "alias sem SLOT_MAP", "falha"
+                    t["erro"], t["etapa"] = "alias sem slot (cadastro do canal)", "falha"
                     esteira.salvar(t)
                     continue
                 with _canais_lock:
@@ -312,7 +312,7 @@ def _pin_canal(canal_yt: str):
     try:
         while True:
             fila = [t for t in _pins_prontos()
-                    if ut.SLOT_MAP.get(t["alias"], ("?",))[0] == canal_yt]
+                    if ut.slot_map(_config()).get(t["alias"], ("?",))[0] == canal_yt]
             if not fila:
                 return
             _pin_task(_config(), fila[0], len(fila))
@@ -328,7 +328,7 @@ def pin_loop():
             # maximo 5 por vez. O cap le do config a cada ciclo (muda sem restart).
             cap = int((_config().get("upload_trigger") or {}).get("pin_concurrency", 5))
             for t in _pins_prontos():
-                canal_yt = ut.SLOT_MAP.get(t["alias"], (None,))[0]
+                canal_yt = ut.slot_map(_config()).get(t["alias"], (None,))[0]
                 if not canal_yt:
                     continue          # _pin_task marca pendente na sua vez
                 with _pins_lock:

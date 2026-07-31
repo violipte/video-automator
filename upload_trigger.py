@@ -34,8 +34,11 @@ from datetime import datetime
 from pathlib import Path
 
 # alias -> (canal_alias do drive-to-youtube, timezone, slot HH:MM)
-# Fonte: handoff §4. CO3/CO4 = MESMO canal, 2 aliases, 2 slots (mapa TRAVADO
-# aqui pra matar o embaralhamento: CO3=01:00 AM, CO4=13:00 PM).
+# ⚠️ FALLBACK ESTATICO. A fonte de verdade dos horarios e' o CADASTRO DO CANAL
+# no Painel Youtube (Supabase: automator_aliases + publish_slots + timezone) —
+# ver slot_map(). Piter edita o horario na aba e a esteira ACOMPANHA (31/07).
+# Este dict so' entra se o painel estiver inacessivel E nao houver cache em
+# disco — o upload nunca fica sem horario. CO3/CO4 = MESMO canal, 2 slots.
 SLOT_MAP = {
     "CON":  ("CON",  "America/Phoenix",     "12:40"),
     "CO3":  ("CO3",  "America/Phoenix",     "01:00"),
@@ -48,6 +51,78 @@ SLOT_MAP = {
     "ENO2": ("ENO2", "UTC",                 "15:00"),
     "ENO":  ("ENO",  "America/Sao_Paulo",   "14:15"),
 }
+
+_SLOT_CACHE = {"ts": 0.0, "map": None}
+_SLOT_TTL_SEG = 600                       # re-le o painel a cada 10min
+_SLOT_DISCO = Path(__file__).parent / "_esteira" / "slot_map_cache.json"
+
+
+def _slots_do_painel(vps: str) -> dict:
+    """Monta {ALIAS: (canal_yt, tz, HH:MM)} do cadastro dos canais no painel.
+    slot_idx = posicao do alias em automator_aliases (mesma regra do upload_one)."""
+    import urllib.request
+    with urllib.request.urlopen(f"{vps.rstrip('/')}/api/painel-yt/canais", timeout=20) as r:
+        d = json.loads(r.read().decode("utf-8"))
+    out = {}
+    for c in d.get("canais") or []:
+        canal_yt = (c.get("alias") or "").strip()
+        tz = (c.get("timezone") or "").strip()
+        aliases = c.get("automator_aliases") or []
+        slots = c.get("publish_slots") or []
+        if not canal_yt or not tz:
+            continue
+        for i, a in enumerate(aliases):
+            if i >= len(slots):
+                break
+            s = slots[i] or {}
+            try:
+                hhmm = f"{int(s.get('hour')):02d}:{int(s.get('minute')):02d}"
+            except (TypeError, ValueError):
+                continue
+            out[a.strip().upper()] = (canal_yt, tz, hhmm)
+    return out
+
+
+def slot_map(config: dict | None = None) -> dict:
+    """Horarios de publicacao — FONTE = cadastro do canal no Painel Youtube.
+
+    Piter cadastra/edita o horario na aba normalmente; a esteira acompanha em
+    ate 10min (TTL do cache). Ordem: painel -> cache em disco (ultimo bom) ->
+    SLOT_MAP hardcoded. O merge parte do fallback e SOBRESCREVE com o painel:
+    canal novo cadastrado la ja entra; painel fora do ar nao muda nada."""
+    agora = time.time()
+    if _SLOT_CACHE["map"] is not None and agora - _SLOT_CACHE["ts"] < _SLOT_TTL_SEG:
+        return _SLOT_CACHE["map"]
+    vps = ((config or {}).get("vps_url") or "").strip()
+    do_painel = {}
+    if vps:
+        try:
+            do_painel = _slots_do_painel(vps)
+        except Exception as e:
+            _log(f"slot_map: painel indisponivel ({type(e).__name__}) — cache/fallback")
+    if do_painel:
+        try:
+            _SLOT_DISCO.parent.mkdir(parents=True, exist_ok=True)
+            _SLOT_DISCO.write_text(json.dumps(do_painel, ensure_ascii=False), encoding="utf-8")
+        except OSError:
+            pass
+        # visibilidade: horario mudou na aba? loga a divergencia vs fallback
+        for a, novo in do_painel.items():
+            velho = SLOT_MAP.get(a)
+            if velho and (tuple(novo)[1:] != tuple(velho)[1:]):
+                _log(f"slot_map: {a} agora {novo[2]} {novo[1]} (painel; fallback era "
+                     f"{velho[2]} {velho[1]})")
+    else:
+        try:
+            do_painel = {k: tuple(v) for k, v in
+                         json.loads(_SLOT_DISCO.read_text(encoding="utf-8")).items()}
+            _log(f"slot_map: usando cache em disco ({len(do_painel)} aliases)")
+        except (OSError, json.JSONDecodeError, TypeError):
+            do_painel = {}
+    final = dict(SLOT_MAP)
+    final.update({k: tuple(v) for k, v in do_painel.items()})
+    _SLOT_CACHE.update(ts=agora, map=final)
+    return final
 
 LOCK_DIR = Path(os.environ.get("TEMP", ".")) / "automator_upload_locks"
 LOCK_STALE_SEG = 7200  # 2h: lock mais velho que isso e' orfao (worker morreu)
@@ -376,7 +451,7 @@ def rodar_pin(config: dict, alias: str, data_iso: str, video_id: str,
     try:
         cfg = _cfg(config)
         repo = Path(cfg.get("repo") or "F:/Canal Dark/Apps Rapidos/drive-to-youtube")
-        canal_yt, tz, slot = SLOT_MAP[alias]
+        canal_yt, tz, slot = slot_map(config)[alias]
         pub = _publish_utc(data_iso, tz, slot)
         vps = (config.get("vps_url") or "").strip()
         comment_id = ""
@@ -476,10 +551,12 @@ def _disparar_interno(config, alias, canal_idx, data_pasta, video_path, titulo_e
     if canais_on and alias not in canais_on:
         return {"ok": False, "skip": f"{alias} fora do piloto", "erro": None, "stdout": ""}
 
-    if alias not in SLOT_MAP:
-        _abortar(config, alias, data_pasta, f"alias sem slot definido (SLOT_MAP)")
+    smap = slot_map(config)
+    if alias not in smap:
+        _abortar(config, alias, data_pasta,
+                 "alias sem slot definido (cadastro do canal no painel / SLOT_MAP)")
         return {"ok": False, "erro": "alias sem slot", "skip": None, "stdout": ""}
-    canal_yt, tz, slot = SLOT_MAP[alias]
+    canal_yt, tz, slot = smap[alias]
 
     # --- checagem 1: MP4 existe e tem tamanho ---
     vp = Path(video_path)
