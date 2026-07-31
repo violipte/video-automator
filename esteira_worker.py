@@ -2,7 +2,7 @@
 
     render (4 workers) -> [fila] -> THUMB -> [fila] -> UPLOAD -> [fila] -> PIN -> done
                                     1 por vez         paralelo entre       paralelo por
-                                    (Flow/Chrome)     canais, serial       canal, cap 3-5
+                                    (Flow/Chrome)     canais, serial       canal, MAX 5
                                                       DENTRO do canal      (AdsPower)
 
 Threads deste processo:
@@ -11,10 +11,11 @@ Threads deste processo:
   - upload_loop: agrupa etapa='upload' por canal YouTube; 1 thread por canal
                  (CO3/CO4 = mesmo canal = mesma thread). Canais diferentes sobem
                  em paralelo — cada um agenda na PROPRIA data+slot.
-  - pin_loop   : espelho do upload — 1 thread por canal, cap global
-                 pin_concurrency (3-5). O AdsPower aguenta varios profiles
-                 abertos (Piter 31/07); as blindagens da automacao sao o
-                 throttle da Local API + lock por profile + este cap.
+  - pin_loop   : espelho do upload — 1 thread por canal, PARALELO com cap
+                 global pin_concurrency = 5 (regra Piter 31/07, validada com
+                 teste real: 5 profiles + automacao CDP, 0 erros). O AdsPower
+                 aguenta varios profiles abertos; as blindagens da automacao
+                 sao o throttle da Local API + lock por profile + este cap.
                  upload_verify --ensure-pin.
 
 REGRAS DE OURO (Piter 30/07): thumb e pin NUNCA seguram a esteira.
@@ -323,7 +324,9 @@ def _pin_canal(canal_yt: str):
 def pin_loop():
     while True:
         try:
-            cap = int((_config().get("upload_trigger") or {}).get("pin_concurrency", 3))
+            # REGRA (Piter 31/07, validada com teste real 5/5): pin PARALELO,
+            # maximo 5 por vez. O cap le do config a cada ciclo (muda sem restart).
+            cap = int((_config().get("upload_trigger") or {}).get("pin_concurrency", 5))
             for t in _pins_prontos():
                 canal_yt = ut.SLOT_MAP.get(t["alias"], (None,))[0]
                 if not canal_yt:

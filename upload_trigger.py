@@ -391,9 +391,9 @@ def rodar_pin(config: dict, alias: str, data_iso: str, video_id: str,
         if comment_id:
             cmd += ["--comment-id", comment_id]
         # PIN_CONCURRENCY: cap GLOBAL de pins simultaneos (pinlock, entre
-        # processos). AdsPower aguenta varios profiles abertos (Piter 31/07);
-        # o cap so limita a rajada de automacao. Ajuste em worker_config.json.
-        pin_cc = str(int(cfg.get("pin_concurrency", 3)))
+        # processos). REGRA (Piter 31/07): pin paralelo, MAXIMO 5 por vez —
+        # validado com teste real (5 profiles + automacao CDP, 0 erros).
+        pin_cc = str(int(cfg.get("pin_concurrency", 5)))
         r = subprocess.run(cmd, cwd=str(repo), capture_output=True, text=True,
                            encoding="utf-8", errors="replace", timeout=1200,
                            env=dict(os.environ, CHANNEL_ALIAS=canal_yt,
