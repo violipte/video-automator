@@ -784,7 +784,11 @@ def process_job(config: dict, job: dict) -> bool:
                     _alias_up = (tag or "").upper()
                     _canais_up = [c.strip().upper() for c in (_ucfg.get("canais") or [])]
                     _no_piloto = _ucfg.get("enabled") and (not _canais_up or _alias_up in _canais_up)
-                    if _ucfg.get("esteira") and _no_piloto:
+                    # Esteira: enfileira TODO canal renderizado (Piter 31/07) — a
+                    # THUMB e' gerada pra todos (canal sem upload automatico pega
+                    # a thumb em Exports/{data}/Thumbs/ pro upload manual); o
+                    # estagio de UPLOAD e' quem pula quem esta fora do piloto.
+                    if _ucfg.get("esteira") and _ucfg.get("enabled"):
                         import esteira
                         if esteira.worker_vivo():
                             esteira.enfileirar(_alias_up, data_pasta, video_path,

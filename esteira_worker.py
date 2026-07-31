@@ -171,9 +171,19 @@ _canais_lock = threading.Lock()
 
 
 def _upload_task(cfg: dict, t: dict, fila_n: int = 1):
-    """Processa UM upload. ok -> etapa 'pin'; falha -> 'falha' (dead-letter)."""
+    """Processa UM upload. ok -> etapa 'pin'; falha -> 'falha' (dead-letter).
+    Canal FORA do piloto de upload: a thumb ja foi gerada (e copiada pros
+    Exports) — aqui o tema fecha como thumb_only, sem subir nada (Piter 31/07:
+    thumb pra todos, upload automatico so' pros canais do piloto)."""
     t = _recarregar(t, "upload")
     if t is None:
+        return
+    canais_up = [c.strip().upper() for c in
+                 ((cfg.get("upload_trigger") or {}).get("canais") or [])]
+    if canais_up and t["alias"].upper() not in canais_up:
+        t["etapa"], t["nota"] = "done", "thumb_only (canal fora do upload automatico)"
+        _log(f"UPLOAD {t['alias']} {t['data']}: fora do piloto — thumb_only, DONE")
+        esteira.salvar(t)
         return
     _log(f"UPLOAD {t['alias']} {t['data']} (fila={fila_n})")
     _marcar(cfg, t, upload_status="fila:upload")

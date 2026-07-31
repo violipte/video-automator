@@ -106,44 +106,137 @@ def _lookup(canal: str, data_br: str) -> dict:
         return json.loads(r.read().decode("utf-8"))
 
 
-def _montar_lote(canal: str, data_br: str, n: int) -> list:
-    """N prompts = template do canal + N cenas distintas do pool + textos da célula."""
-    look = _lookup(canal, data_br)
-    if not look.get("ok"):
-        raise RuntimeError(f"lookup falhou: {str(look)[:120]}")
-    thumb_txt = (look.get("thumb") or "").strip()
-    if not thumb_txt:
-        raise RuntimeError("célula sem texto de thumb")
-    cima, baixo = _split2(thumb_txt)
+# ------------------------------------------------- Calendar (fonte dos modos)
+# REGRA (Piter 31/07): os 3 modos do Prompt Calendar (normal/llm/compose) sao
+# usados e precisam funcionar AQUI exatamente como funcionam LA. Por isso o
+# pipeline fala com o PROPRIO Calendar (:8889) — templates live, llm-generate
+# (keys/cache do lado dele) e compose (fontes/bg do lado dele). Nada e'
+# reimplementado; o backup local so' segura a barra se o servico cair.
+CALENDAR = "http://85.239.243.215:8889"
 
-    d = json.loads(TEMPLATES.read_text(encoding="utf-8"))
+# canal do grid -> nome do template no Calendar (excecoes; default = o proprio alias)
+TEMPLATE_DE = {"CO1": "CO", "CO2": "CO"}
+
+
+def _template_do_calendar(nome: str) -> dict:
+    """Template LIVE do Calendar (edicao la vale aqui na hora); fallback local."""
+    try:
+        with urllib.request.urlopen(f"{CALENDAR}/api/templates", timeout=15) as r:
+            d = json.loads(r.read().decode("utf-8"))
+    except Exception as e:
+        _log(f"Calendar indisponivel ({type(e).__name__}) — usando backup local")
+        d = json.loads(TEMPLATES.read_text(encoding="utf-8"))
     items = d if isinstance(d, list) else (d.get("templates") or list(d.values()))
     t = next((x for x in items if isinstance(x, dict)
-              and (x.get("name") or x.get("nome")) == canal), None)
+              and (x.get("name") or x.get("nome")) == nome), None)
     if not t:
-        raise RuntimeError(f"template '{canal}' não existe no prompt-mixer-backup.json")
+        raise RuntimeError(f"template '{nome}' nao existe no Calendar")
+    return t
+
+
+def _modo(t: dict) -> str:
+    if t.get("compose"):
+        return "compose"
+    return (t.get("mode") or "normal").strip().lower()
+
+
+def _marcar_prompt(p: str, marca: str) -> str:
+    """Marcador unico no inicio: o veo_driver casa card<->prompt pelos 70
+    primeiros chars — sem isso o casamento TROCA os arquivos (visto em 05/08)."""
+    return (f"PROMPT: {marca} " + p[len("PROMPT: "):]) if p.startswith("PROMPT: ") else f"{marca} {p}"
+
+
+def _lote_normal(canal: str, t: dict, thumb_txt: str, data_br: str, n: int) -> list:
+    """Modo NORMAL: substituicao mecanica. Pool de cenas quando existe; sem
+    pool = cena EMBUTIDA no proprio prompt (ASH/CO3/CO4) — repete o prompt e a
+    variacao vem do sampling do Nano Banana."""
+    cima, baixo = _split2(thumb_txt)
     base = t.get("prompt") or ""
     v = t.get("vars") or {}
     cenas = list(v.get("cena") or [])
     chars = list(v.get("character") or [])
-    if not cenas:
-        raise RuntimeError(f"template '{canal}' sem pool de cena")
-
-    escolhidas = random.sample(cenas, min(n, len(cenas)))
     character = chars[0] if chars else ""
+    if cenas:
+        escolhidas = random.sample(cenas, min(n, len(cenas)))
+    else:
+        escolhidas = [None] * n           # cena ja embutida no prompt base
     dd, mm = data_br[:2], data_br[3:5]
     lote = []
     for i, cena in enumerate(escolhidas, 1):
-        p = (base.replace("[CENA]", cena).replace("[CHARACTER]", character)
-                 .replace("[TEXTO DE CIMA]", cima).replace("[TEXTO DE BAIXO]", baixo))
-        # MARCADOR ÚNICO no início: o veo_driver casa card<->prompt pelos 70
-        # primeiros chars. O template é igual nas N variantes (a cena muda no
-        # meio) -> sem isso o casamento TROCA os arquivos (visto em 05/08).
-        marca = f"[{canal} {dd}-{mm} v{i}]"
-        p = (f"PROMPT: {marca} " + p[len("PROMPT: "):]) if p.startswith("PROMPT: ") else f"{marca} {p}"
-        lote.append({"tipo": "imagem", "arquivo": f"{canal}_{dd}{mm}_v{i}.jpg", "prompt": p})
-    _log(f"{len(lote)} prompts | linha1={cima!r} linha2={baixo!r}")
+        p = base
+        if cena is not None:
+            p = p.replace("[CENA]", cena)
+        p = (p.replace("[CHARACTER]", character)
+              .replace("[TEXTO DE CIMA]", cima).replace("[TEXTO DE BAIXO]", baixo))
+        lote.append({"tipo": "imagem", "arquivo": f"{canal}_{dd}{mm}_v{i}.jpg",
+                     "prompt": _marcar_prompt(p, f"[{canal} {dd}-{mm} v{i}]")})
+    _log(f"normal: {len(lote)} prompts ({'pool ' + str(len(cenas)) if cenas else 'cena embutida'}) "
+         f"| linha1={cima!r} linha2={baixo!r}")
     return lote
+
+
+def _lote_llm(canal: str, tpl_nome: str, look: dict, data_br: str, n: int) -> list:
+    """Modo LLM: o Calendar compoe o prompt final (template = system prompt,
+    titulo+thumb = user; keys em llm-keys.json DO LADO DELE). 1a chamada usa o
+    cache do Calendar; as demais vao com force=true — temperatura 0.8 da a
+    variacao entre as N. Split de subtitulo (\\n) e' do Calendar, nao daqui."""
+    dd, mm = data_br[:2], data_br[3:5]
+    lote = []
+    for i in range(1, n + 1):
+        body = json.dumps({"canal": canal, "data": data_br,
+                           "titulo": look.get("titulo") or "",
+                           "thumb": look.get("thumb") or "",
+                           "template_name": tpl_nome,
+                           "force": i > 1}).encode()
+        req = urllib.request.Request(f"{CALENDAR}/api/llm-generate", data=body,
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=180) as r:
+            res = json.loads(r.read().decode("utf-8"))
+        p = (res.get("prompt") or "").strip()
+        if not p:
+            raise RuntimeError(f"llm-generate voltou vazio (v{i})")
+        lote.append({"tipo": "imagem", "arquivo": f"{canal}_{dd}{mm}_v{i}.jpg",
+                     "prompt": _marcar_prompt(p, f"[{canal} {dd}-{mm} v{i}]")})
+        _log(f"llm v{i}: prompt de {len(p)} chars"
+             + (" (cache do Calendar)" if res.get("cached") else f" ({res.get('elapsed_s')}s)"))
+    return lote
+
+
+def _compose_thumb(canal: str, tpl_nome: str, thumb_txt: str, data_br: str, out: Path):
+    """Modo COMPOSE: o Calendar monta o PNG final (bg+fonte+gradiente do lado
+    dele) — sem Nano Banana e sem revisor (deterministico). Devolve o Path."""
+    txt = (thumb_txt or "").replace("\r\n", "\n").strip()
+    if "\n" in txt:
+        line1, line2 = (s.strip() for s in txt.split("\n", 1))
+    else:
+        line1, line2 = txt, ""
+    body = json.dumps({"canal": canal, "data": data_br, "line1": line1,
+                       "line2": line2, "template_name": tpl_nome}).encode()
+    req = urllib.request.Request(f"{CALENDAR}/api/compose-thumb", data=body,
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        png = r.read()
+    if len(png) < 10_000:
+        raise RuntimeError(f"compose voltou {len(png)} bytes")
+    dd, mm = data_br[:2], data_br[3:5]
+    p = out / f"{canal}_{dd}{mm}_compose.png"
+    p.write_bytes(png)
+    _log(f"compose: PNG pronto ({len(png) // 1024}KB) — sem Nano Banana/revisor")
+    return p
+
+
+def _publicar_em_exports(canal: str, data_iso: str, thumb: Path):
+    """Copia a escolhida pra pasta do dia nos Exports — canal SEM upload
+    automatico pega a thumb pronta ali pro upload manual (Piter 31/07)."""
+    try:
+        import shutil
+        dest_dir = Path("F:/Canal Dark/Automator Exports") / data_iso / "Thumbs"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / f"{canal}{thumb.suffix}"
+        shutil.copy2(str(thumb), str(dest))
+        _log(f"thumb copiada pra {dest}")
+    except Exception as e:
+        _log(f"copia pros Exports falhou ({type(e).__name__}: {e}) — thumb segue em {thumb}")
 
 
 def _revisar(paths: list):
@@ -181,10 +274,12 @@ def _revisar(paths: list):
 
 
 def gerar(canal: str, data_iso: str, timeout_seg: int = 900, n: int = N_VARIANTES):
-    """Gera N thumbs, revisa e devolve o Path da melhor. None se qualquer coisa falhar.
+    """Gera a thumb do tema NO MODO DO CANAL (normal/llm/compose, igual ao
+    Calendar), revisa quando ha variantes e devolve o Path da melhor — ja
+    copiada pra Automator Exports/{data}/Thumbs/ (upload manual pega la).
+    None se qualquer coisa falhar. NUNCA levanta: thumb nao bloqueia publicacao.
 
-    canal: alias do grid (ex 'ENO2') · data_iso: 'YYYY-MM-DD'
-    NUNCA levanta: thumb não pode bloquear publicação.
+    canal: alias do grid (ex 'ENO2', 'CO1') · data_iso: 'YYYY-MM-DD'
     """
     try:
         y, m, d = data_iso.split("-")
@@ -192,7 +287,28 @@ def gerar(canal: str, data_iso: str, timeout_seg: int = 900, n: int = N_VARIANTE
         out = RAIZ / "veo_clips" / "thumbs" / f"{data_iso}_{canal}"
         out.mkdir(parents=True, exist_ok=True)
 
-        lote = _montar_lote(canal, data_br, n)
+        look = _lookup(canal, data_br)
+        if not look.get("ok"):
+            raise RuntimeError(f"lookup falhou: {str(look)[:120]}")
+        thumb_txt = (look.get("thumb") or "").strip()
+        if not thumb_txt:
+            raise RuntimeError("célula sem texto de thumb")
+
+        tpl_nome = TEMPLATE_DE.get(canal.upper(), canal)
+        t = _template_do_calendar(tpl_nome)
+        modo = _modo(t)
+        _log(f"{canal} {data_br}: modo {modo.upper()} (template {tpl_nome})")
+
+        # COMPOSE: o Calendar devolve o PNG final — nao passa por Nano Banana.
+        if modo == "compose":
+            p = _compose_thumb(canal, tpl_nome, thumb_txt, data_br, out)
+            _publicar_em_exports(canal, data_iso, p)
+            return p
+
+        if modo == "llm":
+            lote = _lote_llm(canal, tpl_nome, look, data_br, n)
+        else:
+            lote = _lote_normal(canal, t, thumb_txt, data_br, n)
         lote_f = out / "_lote.json"
         lote_f.write_text(json.dumps(lote, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -237,7 +353,10 @@ def gerar(canal: str, data_iso: str, timeout_seg: int = 900, n: int = N_VARIANTE
                 esteira.flow_proj_gravar(data_iso, "")
             return None
         _log(f"{len(imgs)} imagens geradas")
-        return _revisar(imgs)
+        best = _revisar(imgs)
+        if best:
+            _publicar_em_exports(canal, data_iso, best)
+        return best
     except Exception as e:
         _log(f"FALHOU ({type(e).__name__}: {e}) — upload segue SEM thumb (regra de ouro)")
         return None

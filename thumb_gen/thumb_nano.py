@@ -33,6 +33,7 @@ def configurar_imagem(page, modelo="Nano Banana 2", aspecto="16:9", dur=None, sa
     Tolerante: o popup do Flow flakeia e a config PERSISTE por projeto; cada
     passo falha em silencio pra nao abortar o lote.
     """
+    _dispensar_avisos(page)   # anuncio do Flow pode estar na frente do seletor
     fd._seletor_modelo_btn(page).click()
     fd._pausa()
     # aba Imagem
@@ -73,7 +74,44 @@ def configurar_imagem(page, modelo="Nano Banana 2", aspecto="16:9", dur=None, sa
     fd._pausa(0.3, 0.7)
 
 
+def _dispensar_avisos(page):
+    """Popups de ANUNCIO do Flow ('Tools Community Gallery is Live!' etc.)
+    bloqueiam a UI e derrubam o driver (visto 31/07, ASH 04/08). Google solta
+    um novo a cada feature — dispensa generica por texto de botao, best-effort,
+    em qualquer idioma que eles usem."""
+    try:
+        page.keyboard.press("Escape")
+        fd._pausa(0.2, 0.4)
+    except Exception:
+        pass
+    for pat in (r"Comece j[aá]", r"Come[cç]ar", r"Got it", r"Entendi", r"Start",
+                r"Dismiss", r"Continuar", r"Fechar", r"Close", r"^OK$"):
+        try:
+            b = page.get_by_role("button", name=re.compile(pat, re.I)).first
+            if b.is_visible(timeout=700):
+                b.click(timeout=2000)
+                print(f"  aviso do Flow dispensado (botao ~/{pat}/)")
+                fd._pausa(0.3, 0.6)
+        except Exception:
+            pass
+
+
+_abrir_orig = fd._abrir_projeto
+
+
+def _abrir_robusto(page, proj_id=None):
+    """_abrir_projeto com auto-cura: falhou (popup na frente?) -> dispensa
+    avisos e re-tenta UMA vez."""
+    try:
+        return _abrir_orig(page, proj_id)
+    except Exception as e:
+        print(f"  _abrir_projeto falhou ({type(e).__name__}) — dispensando avisos e re-tentando")
+        _dispensar_avisos(page)
+        return _abrir_orig(page, proj_id)
+
+
 # --- troca a config de video pela de imagem e roda o driver do outro Claude ---
+fd._abrir_projeto = _abrir_robusto
 fd.configurar_video = configurar_imagem
 
 argv = ["veo_driver", "--lote", LOTE, "--out", OUT,
