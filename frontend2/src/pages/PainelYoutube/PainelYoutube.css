@@ -16,8 +16,9 @@
 .py-vazio { padding: 28px; text-align: center; color: var(--text-muted); }
 .py-mut { color: var(--text-muted); }
 .py-warn-txt { color: #f5b942; }
-.py-secao { margin: 18px 0 8px; font-size: 13px; text-transform: uppercase;
-  letter-spacing: 0.05em; color: var(--text-muted); }
+.py-secao { margin: 20px 0 10px; padding-bottom: 5px; font-size: 12px;
+  text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted);
+  border-bottom: 1px solid var(--border); }
 
 .py-barra { display: flex; justify-content: space-between; align-items: center;
   gap: 10px; margin-bottom: 10px; }
@@ -76,11 +77,56 @@
 .py-modal-pe { display: flex; justify-content: flex-end; gap: 8px;
   padding: 12px 18px; border-top: 1px solid var(--border); }
 
-.py-grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; }
-.py-campo { display: flex; flex-direction: column; gap: 3px; font-size: 12px; }
-.py-campo > span { color: var(--text-muted); }
-.py-campo input, .py-campo select, .py-campo textarea { font-size: 13px; }
+.py-grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 16px; }
+.py-campo { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.py-campo > span { color: var(--text-muted); line-height: 1.3; }
+
+/* Caixas VISIVEIS (Piter 31/07): antes os inputs herdavam do tema um visual
+   transparente/sem borda e "sumiam" no fundo do modal — so o focus aparecia. */
+.py-campo input:not([type="checkbox"]),
+.py-campo select,
+.py-campo textarea,
+.py-barra input,
+.py-gate-linha input {
+  width: 100%;
+  box-sizing: border-box;
+  font-size: 13px;
+  font-family: inherit;
+  padding: 8px 10px;
+  color: var(--text);
+  /* tons EXPLICITOS: --panel-3/--border do tema tem ~7 pts de luminancia sobre
+     o fundo do modal — invisiveis. Branco translucido funciona em qualquer
+     fundo escuro e mantem a caixa visivel sem "acender" o modal. */
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: var(--radius-sm);
+  outline: none;
+  transition: border-color var(--t-fast), background var(--t-fast), box-shadow var(--t-fast);
+}
+.py-campo input:not([type="checkbox"]):hover,
+.py-campo select:hover,
+.py-campo textarea:hover {
+  border-color: rgba(255, 255, 255, 0.32);
+}
+.py-campo input:not([type="checkbox"]):focus,
+.py-campo select:focus,
+.py-campo textarea:focus,
+.py-barra input:focus,
+.py-gate-linha input:focus {
+  border-color: var(--accent);
+  background: rgba(255, 255, 255, 0.09);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.py-campo input::placeholder,
+.py-campo textarea::placeholder { color: var(--text-muted); opacity: 0.55; }
+.py-campo textarea { resize: vertical; min-height: 64px; line-height: 1.45; }
+.py-campo select { cursor: pointer; }
+.py-campo select option { background: var(--panel); color: var(--text); }
+
 .py-check { flex-direction: row; align-items: center; gap: 8px; margin-top: 16px; }
+.py-check input[type="checkbox"] {
+  width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer;
+}
 @media (max-width: 720px) { .py-grid2 { grid-template-columns: 1fr; } }
 .py-campo-full { grid-column: 1 / -1; }
 
