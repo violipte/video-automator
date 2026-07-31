@@ -1416,8 +1416,11 @@ async def upload_mark(request: Request):
     key = f"{row}_{col}"
     # thumb_status/pin_status: pendencias da esteira (thumb/pin NUNCA bloqueiam a
     # publicacao — regra Piter 30/07); o upload_daily_check re-tenta ate limpar.
+    # youtube_comment_id: commentID do CTA (regra Piter 31/07 — pin SEMPRE pelo
+    # commentID via &lc=<id>, nunca "o comentario mais recente").
     CAMPOS_OK = ("youtube_video_id", "youtube_publish_at", "youtube_url",
-                 "upload_status", "uploaded_at", "thumb_status", "pin_status")
+                 "upload_status", "uploaded_at", "thumb_status", "pin_status",
+                 "youtube_comment_id")
     patch = {c: body[c] for c in CAMPOS_OK if body.get(c) is not None}
     if not patch:
         raise HTTPException(400, "nenhum campo de upload valido no payload")

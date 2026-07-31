@@ -228,7 +228,8 @@ def _pin_task(cfg: dict, t: dict, fila_n: int = 1):
     t.setdefault("tentativas", {})["pin"] = n
     _log(f"PIN {t['alias']} {t['data']} vid={vid} (tentativa {n}, fila={fila_n})")
     _marcar(cfg, t, upload_status="fila:pin")
-    res = ut.rodar_pin(cfg, t["alias"], t["data"], vid)
+    row, col = _row_col_cache(cfg, t)     # pin SEMPRE pelo commentID do grid
+    res = ut.rodar_pin(cfg, t["alias"], t["data"], vid, row=row, col=col)
     if res.get("pinned"):
         t["pin_status"], t["etapa"] = "ok", "done"
         _marcar(cfg, t, upload_status="scheduled", pin_status="ok")

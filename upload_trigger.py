@@ -323,10 +323,16 @@ def _reconciliar(config, repo: Path, canal_yt: str, alias: str, row: int, col: i
         # divergencia chegue a existir.
         import urllib.request
         status_final = "scheduled" if res.get("ok") else "incompleto"
-        body = json.dumps({"row": row, "col": col, "youtube_video_id": video_id,
-                           "youtube_publish_at": res.get("publish_at") or pub,
-                           "youtube_url": f"https://youtube.com/watch?v={video_id}",
-                           "upload_status": status_final}).encode()
+        campos = {"row": row, "col": col, "youtube_video_id": video_id,
+                  "youtube_publish_at": res.get("publish_at") or pub,
+                  "youtube_url": f"https://youtube.com/watch?v={video_id}",
+                  "upload_status": status_final}
+        # commentID do CTA persiste no grid: REGRA (Piter 31/07) — pin e' SEMPRE
+        # pelo commentID (&lc=<id> poe o comentario em highlight), nunca "o mais
+        # recente". Gravado aqui, qualquer retry futuro pina o certo pra sempre.
+        if res.get("comment_id"):
+            campos["youtube_comment_id"] = res["comment_id"]
+        body = json.dumps(campos).encode()
         marcou = False
         for tentativa, espera in enumerate((0, 3, 8, 20, 45), 1):
             if espera:
@@ -355,11 +361,16 @@ def _reconciliar(config, repo: Path, canal_yt: str, alias: str, row: int, col: i
         _log(f"reconciliacao falhou ({type(e).__name__}: {e}) — video ja esta no ar")
 
 
-def rodar_pin(config: dict, alias: str, data_iso: str, video_id: str) -> dict:
+def rodar_pin(config: dict, alias: str, data_iso: str, video_id: str,
+              row: int = -1, col: int = -1) -> dict:
     """Estagio PIN da esteira: fixa o CTA de um video JA agendado.
 
-    upload_verify --ensure-pin faz: unlisted -> acha o comentario -> pina
-    (AdsPower, pin_slot(1)) -> reagenda -> confirma com backoff.
+    REGRA (Piter 31/07): pin e' SEMPRE pelo commentID — lido do grid
+    (youtube_comment_id) e passado ao verify, que navega &lc=<id> (comentario
+    em highlight). Sem id no grid (celula antiga), o verify resolve 1x por
+    autor+texto e o id volta persistido.
+
+    upload_verify --ensure-pin faz: unlisted -> pina -> reagenda -> confirma.
     Retorna o dict do __VERIFY__ ({"pinned": bool, ...}); {} se nem rodou.
     NUNCA levanta — pin nao pode derrubar nada (video ja esta agendado)."""
     try:
@@ -367,9 +378,18 @@ def rodar_pin(config: dict, alias: str, data_iso: str, video_id: str) -> dict:
         repo = Path(cfg.get("repo") or "F:/Canal Dark/Apps Rapidos/drive-to-youtube")
         canal_yt, tz, slot = SLOT_MAP[alias]
         pub = _publish_utc(data_iso, tz, slot)
+        vps = (config.get("vps_url") or "").strip()
+        comment_id = ""
+        if row >= 0 and col >= 0 and vps:
+            try:
+                comment_id = (_buscar_celula(vps, row, col) or {}).get("youtube_comment_id") or ""
+            except Exception:
+                pass
         py = repo / "venv" / "Scripts" / "python.exe"
         cmd = [str(py), "-u", str(Path(__file__).parent / "upload_verify.py"),
                "--video-id", video_id, "--publish-utc", pub, "--ensure-pin"]
+        if comment_id:
+            cmd += ["--comment-id", comment_id]
         r = subprocess.run(cmd, cwd=str(repo), capture_output=True, text=True,
                            encoding="utf-8", errors="replace", timeout=1200,
                            env=dict(os.environ, CHANNEL_ALIAS=canal_yt,
@@ -380,6 +400,20 @@ def rodar_pin(config: dict, alias: str, data_iso: str, video_id: str) -> dict:
                 _log(ln)
             elif ln.startswith("__VERIFY__"):
                 res = json.loads(ln[len("__VERIFY__"):])
+        # celula antiga: o verify resolveu o commentID por autor+texto -> persiste
+        # agora, pra TODO pin futuro ja vir com o id certo do grid.
+        cid_novo = res.get("comment_id")
+        if cid_novo and cid_novo != comment_id and row >= 0 and col >= 0 and vps:
+            try:
+                import urllib.request
+                body = json.dumps({"row": row, "col": col,
+                                   "youtube_comment_id": cid_novo}).encode()
+                req = urllib.request.Request(f"{vps}/api/upload/mark", data=body,
+                                             headers={"Content-Type": "application/json"})
+                urllib.request.urlopen(req, timeout=30).read()
+                _log(f"commentID persistido no grid: {cid_novo}")
+            except Exception as e:
+                _log(f"persistencia do commentID falhou ({type(e).__name__}) — segue")
         return res
     except Exception as e:
         _log(f"rodar_pin falhou ({type(e).__name__}: {e}) — video segue agendado")

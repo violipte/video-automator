@@ -37,6 +37,32 @@ def _p(m):
     print(f"[verify] {m}", flush=True)
 
 
+def _achar_cta_proprio(y, vid: str, texto_esperado: str):
+    """Fallback pra celula ANTIGA sem youtube_comment_id: acha o commentID do
+    NOSSO CTA. Dupla checagem — autor == o proprio canal E o texto bate com o
+    inicio do build_comment (45 chars normalizados). Devolve o thread id (que
+    e' o id do comentario top-level, o mesmo que o pin.py usa no &lc=).
+    None se nao achar com certeza — melhor nao pinar do que pinar o errado."""
+    def norm(s):
+        return " ".join((s or "").lower().split())
+    assinatura = norm(texto_esperado)[:45]
+    if not assinatura:
+        return None
+    try:
+        meu = y.channels().list(part="id", mine=True).execute()["items"][0]["id"]
+        r = y.commentThreads().list(part="snippet", videoId=vid,
+                                    maxResults=50, order="time").execute()
+        for it in r.get("items") or []:
+            top = (it.get("snippet") or {}).get("topLevelComment") or {}
+            sn = top.get("snippet") or {}
+            autor = ((sn.get("authorChannelId") or {}).get("value")) or ""
+            if autor == meu and norm(sn.get("textOriginal")).startswith(assinatura):
+                return it.get("id")
+    except Exception as e:
+        _p(f"_achar_cta_proprio falhou: {type(e).__name__}: {str(e)[:90]}")
+    return None
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--video-id", required=True)
@@ -47,6 +73,12 @@ def main():
                     help="estagio PIN da esteira: fixa o CTA mesmo quando o comentario "
                          "JA existia (o fluxo normal so pina comentario recem-postado). "
                          "Exige unlisted -> acha o comentario -> pina -> reagenda.")
+    ap.add_argument("--comment-id", default="",
+                    help="commentID do CTA vindo do grid (youtube_comment_id). REGRA DO "
+                         "PITER (31/07): o pin e' SEMPRE pelo commentID — o pin.py navega "
+                         "watch?v=X&lc=<id> e fixa o comentario em highlight. NUNCA "
+                         "'o mais recente' (fixaria comentario de espectador em video "
+                         "ja publico). Sem este arg, resolve 1x por autor+texto e persiste.")
     a = ap.parse_args()
 
     from config import ADSPOWER_PROFILE_ID, ADSPOWER_YT_LANG, PUBLISH_TZ
@@ -111,6 +143,7 @@ def main():
     # existente, acha o id dele e fixa. REGRA (Piter 30/07): pin falhou ->
     # 'pin_falhou' no resultado e o video SEGUE agendado; retry e' de quem chamou.
     pinned = False
+    cid = None
     if ncom is None or ncom == 0 or a.ensure_pin:
         reagendar = False
         try:
@@ -122,7 +155,6 @@ def main():
                 _t.sleep(4)               # propagacao do YouTube
                 ncom = n_comentarios()
                 _p(f"comentarios REAIS (agora visiveis): {ncom}")
-            cid = None
             if not ncom:                  # 0 ou None (comentarios desabilitados dao None)
                 texto = build_comment(pub_local)
                 cid = youtube.post_comment(vid, texto)
@@ -131,15 +163,20 @@ def main():
             else:
                 _p("comentario ja existia")
                 if a.ensure_pin:
-                    # id do thread == id do comentario top-level (e' o que o pin usa)
-                    try:
-                        r = y.commentThreads().list(part="id", videoId=vid,
-                                                    maxResults=1, order="time").execute()
-                        itens = r.get("items") or []
-                        cid = itens[0]["id"] if itens else None
-                        _p(f"comentario existente: {cid}")
-                    except Exception as e:
-                        _p(f"nao achei o id do comentario: {type(e).__name__}: {str(e)[:90]}")
+                    # 1º: o commentID persistido no grid (caminho normal, sempre certo)
+                    if a.comment_id:
+                        cid = a.comment_id
+                        _p(f"pin pelo commentID do grid: {cid}")
+                    else:
+                        # fallback UNICO (celula antiga sem youtube_comment_id):
+                        # acha o NOSSO CTA — autor tem que ser o proprio canal E o
+                        # texto bater com o build_comment. Nunca "o mais recente":
+                        # em video ja publico isso fixaria comentario de espectador.
+                        cid = _achar_cta_proprio(y, vid, build_comment(pub_local))
+                        if cid:
+                            _p(f"CTA achado por autor+texto (sera persistido): {cid}")
+                        else:
+                            _p("CTA proprio NAO encontrado — nao pino as cegas")
             if cid and not a.no_pin:
                 try:
                     # pin_slot(1): serializa com qualquer outro pin da maquina
@@ -203,9 +240,11 @@ def main():
     ok = bateu(priv, pub_at)
     _p(f"estado final: privacy={priv} publishAt={pub_at} ok={ok} pinned={pinned} "
        f"| consertos={consertos}")
+    # comment_id sai no resultado pro trigger PERSISTIR no grid (youtube_comment_id):
+    # e' ele que garante que qualquer pin futuro use o &lc=<id> certo, pra sempre.
     print("__VERIFY__" + json.dumps(
         {"ok": ok, "privacy": priv, "publish_at": pub_at, "consertos": consertos,
-         "pinned": pinned},
+         "pinned": pinned, "comment_id": cid or a.comment_id or None},
         ensure_ascii=False))
 
 

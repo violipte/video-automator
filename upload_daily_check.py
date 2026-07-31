@@ -224,12 +224,15 @@ def main():
         else:
             _log("  thumb segue pendente (proxima rodada re-tenta)")
 
-    # 1d) PIN pendente -> ensure-pin (unlisted -> pina -> reagenda)
+    # 1d) PIN pendente -> ensure-pin (unlisted -> pina -> reagenda).
+    # row/col vao junto: o pin e' SEMPRE pelo commentID do grid (regra Piter
+    # 31/07) — video pode ja estar PUBLICO aqui, e "o mais recente" fixaria
+    # comentario de espectador.
     for alias, canal_yt, row, col, data_iso, vid, tz, slot, _ in pin_pend:
         if not vid:
             continue
         _log(f"re-tentando PIN {alias} {data_iso}...")
-        res = ut.rodar_pin(cfg, alias, data_iso, vid)
+        res = ut.rodar_pin(cfg, alias, data_iso, vid, row=row, col=col)
         if res.get("pinned"):
             _mark(row, col, pin_status="ok")
             _log("  pin pendente RESOLVIDO")
