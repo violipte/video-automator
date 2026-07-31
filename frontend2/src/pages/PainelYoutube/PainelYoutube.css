@@ -82,3 +82,4 @@
 .py-campo input, .py-campo select, .py-campo textarea { font-size: 13px; }
 .py-check { flex-direction: row; align-items: center; gap: 8px; margin-top: 16px; }
 @media (max-width: 720px) { .py-grid2 { grid-template-columns: 1fr; } }
+.py-campo-full { grid-column: 1 / -1; }

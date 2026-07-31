@@ -29,7 +29,7 @@ export function Canais() {
         <table className="py-tabela">
           <thead>
             <tr>
-              <th>#</th><th>Alias</th><th>Nome YouTube</th><th>Status</th>
+              <th>#</th><th>Alias</th><th>#Order</th><th>Nome YouTube</th><th>Status</th>
               <th>Proxy</th><th>Token</th><th>AdsPower</th><th>TZ</th><th>Slots</th>
             </tr>
           </thead>
@@ -38,6 +38,7 @@ export function Canais() {
               <tr key={c.id} onClick={() => setEditando(c)} className="py-linha-click">
                 <td>{c.ordem ?? '—'}</td>
                 <td><strong>{c.alias}</strong></td>
+                <td>{c.pedido_num || <span className="py-mut">—</span>}</td>
                 <td>{c.nome_youtube}</td>
                 <td><span className={`py-chip ${STATUS_CORES[c.status] || ''}`}>{c.status}</span></td>
                 <td>{c.proxy_socks5?.host
@@ -71,7 +72,7 @@ const CAMPOS_TEXTO = [
   ['adspower_profile_id', 'Profile AdsPower'], ['playlist_id', 'Playlist ID'],
   ['drive_folder_id', 'Pasta do Drive'], ['timezone', 'Timezone (ex America/Phoenix)'],
   ['yt_lang', 'Idioma (ex en)'], ['category_id', 'Categoria (ex 22)'],
-  ['telefone', 'Telefone'], ['notes', 'Notas'],
+  ['telefone', 'Telefone'], ['pedido_num', '#Order (nº pedido gmail/canal comprado)'],
 ]
 
 function CanalModal({ canal, onClose, onSaved }) {
@@ -92,6 +93,8 @@ function CanalModal({ canal, onClose, onSaved }) {
     try {
       const body = {}
       for (const [k] of CAMPOS_TEXTO) body[k] = f[k] ?? null
+      body.notes = f.notes ?? null
+      body.raw_info = f.raw_info ?? null
       body.status = f.status
       body.ordem = f.ordem === '' || f.ordem == null ? null : Number(f.ordem)
       body.enable_pin_rpa = !!f.enable_pin_rpa
@@ -141,6 +144,17 @@ function CanalModal({ canal, onClose, onSaved }) {
                      onChange={e => set('enable_pin_rpa', e.target.checked)} />
               <span>Pin via RPA (AdsPower)</span>
             </label>
+          </div>
+
+          <h4 className="py-secao">Notas & Raw</h4>
+          <div className="py-grid2">
+            <label className="py-campo py-campo-full"><span>Obs / Notas</span>
+              <textarea rows={4} value={f.notes ?? ''}
+                        onChange={e => set('notes', e.target.value)} /></label>
+            <label className="py-campo py-campo-full">
+              <span>Informações RAW (dump do pedido: emails, senhas antigas, o que vier)</span>
+              <textarea rows={6} value={f.raw_info ?? ''}
+                        onChange={e => set('raw_info', e.target.value)} /></label>
           </div>
 
           <h4 className="py-secao">Proxy SOCKS5</h4>

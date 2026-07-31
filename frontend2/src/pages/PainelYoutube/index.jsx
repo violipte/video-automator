@@ -149,19 +149,35 @@ function fmtData(s) {
   return s.replace('T', ' ').slice(0, 16)
 }
 
+function resumoVideosRun(r) {
+  // "qual video e' aquele": data de publicacao + titulo (Piter 31/07 — run so
+  // com canal+inicio nao diz nada). 1 video = caso normal; >1 = "+N".
+  const vs = r.videos || []
+  if (!vs.length) return <span className="py-mut">—</span>
+  const v = vs[0]
+  const dataPub = v.publish_at_utc ? v.publish_at_utc.slice(0, 10).split('-').reverse().join('/') : '?'
+  return (
+    <span title={vs.map(x => `${x.publish_at_utc?.slice(0, 10) || '?'} · ${x.titulo || ''}`).join('\n')}>
+      <strong>{dataPub}</strong>
+      <span className="py-mut"> · {(v.titulo || '').slice(0, 42)}{vs.length > 1 ? ` +${vs.length - 1}` : ''}</span>
+    </span>
+  )
+}
+
 function TabelaRuns({ runs }) {
   if (!runs?.length) return <div className="py-vazio">nenhum run</div>
   return (
     <div className="py-tabela-wrap">
       <table className="py-tabela">
-        <thead><tr><th>Canal</th><th>Início</th><th>Status</th><th>Planejados</th><th>OK</th><th>Falhas</th><th>Máquina</th></tr></thead>
+        <thead><tr><th>Canal</th><th>Vídeo (data · título)</th><th>Início</th><th>Status</th><th>OK</th><th>Falhas</th><th>Máquina</th></tr></thead>
         <tbody>
           {runs.map(r => (
             <tr key={r.id}>
               <td><strong>{r.canais_yt?.alias || r.canal_id?.slice(0, 8)}</strong></td>
+              <td className="py-titulo-cel">{resumoVideosRun(r)}</td>
               <td>{fmtData(r.started_at)}</td>
               <td><span className={`py-chip ${ST_RUN[r.status] || ''}`}>{r.status}</span></td>
-              <td>{r.videos_planned}</td><td>{r.videos_completed}</td><td>{r.videos_failed}</td>
+              <td>{r.videos_completed}/{r.videos_planned}</td><td>{r.videos_failed}</td>
               <td className="py-mut">{r.machine_hostname || '—'}</td>
             </tr>
           ))}

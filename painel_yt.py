@@ -119,6 +119,9 @@ _CAMPOS_OK = {
     "thumbnail_template", "prompt_template_name", "ai_engine", "source",
     "automator_aliases", "video_layout", "yt_lang", "publish_slots",
     "timezone", "status", "enable_pin_rpa", "notes",
+    # Piter 31/07: nº do pedido do gmail/canal comprado + dump raw de infos
+    # (colunas criadas via Management API em 31/07)
+    "pedido_num", "raw_info",
 }
 
 
@@ -138,6 +141,72 @@ def _montar_patch(body: dict, atual: dict | None) -> dict:
         novo["pass"] = p.get("pass") or atual_p.get("pass") or ""
         patch["proxy_socks5"] = novo
     return patch
+
+
+def _anexar_videos(runs: list) -> list:
+    """Anexa a cada run os videos dele. `videos.run_id` NUNCA e' preenchido
+    pelo pipeline (checado no dado real 31/07) — o join direto volta vazio.
+    Casamos por CANAL + JANELA DE TEMPO: video criado entre o inicio e o fim
+    do run (com 60s de folga) e' daquele run."""
+    from datetime import datetime, timedelta, timezone as _tz
+
+    def _dt(s):
+        try:
+            return datetime.fromisoformat((s or "").replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    inicios = [d for d in (_dt(r.get("started_at")) for r in runs) if d]
+    if not inicios:
+        return runs
+    corte = (min(inicios) - timedelta(minutes=2)).isoformat()
+    vids = _sb("GET", "/videos", params={
+        "select": "canal_id,titulo,publish_at_utc,stage,created_at",
+        "created_at": f"gte.{corte}", "order": "created_at.asc",
+        "limit": 500}) or []
+    agora = datetime.now(_tz.utc)
+    folga = timedelta(seconds=60)
+    for r in runs:
+        ini = _dt(r.get("started_at"))
+        fim = _dt(r.get("finished_at")) or agora
+        r["videos"] = [] if not ini else [
+            v for v in vids
+            if v.get("canal_id") == r.get("canal_id")
+            and (dv := _dt(v.get("created_at"))) is not None
+            and ini - folga <= dv <= fim + folga
+        ]
+    _videos_do_grid(runs)
+    return runs
+
+
+def _videos_do_grid(runs: list):
+    """Fallback pros runs SEM linha na tabela videos (fluxo automator nao cria):
+    o cli_args do run carrega `--tema-row/--tema-col` — a CELULA do grid. O
+    temas.json mora nesta VPS -> data e titulo saem de graca."""
+    pend = [r for r in runs if not r.get("videos") and r.get("cli_args")]
+    if not pend:
+        return
+    try:
+        import scriptwriter
+        t = scriptwriter.carregar_temas() or {}
+    except Exception:
+        return
+    linhas, cel = t.get("linhas") or [], t.get("celulas") or {}
+    for r in pend:
+        args = [str(a) for a in (r.get("cli_args") or [])]
+        row = col = None
+        for i, a in enumerate(args[:-1]):
+            if a == "--tema-row":
+                row = int(args[i + 1]) if args[i + 1].isdigit() else None
+            elif a == "--tema-col":
+                col = int(args[i + 1]) if args[i + 1].isdigit() else None
+        if row is None or col is None or row >= len(linhas):
+            continue
+        data_br = (linhas[row].get("data") or "").strip()
+        c = cel.get(f"{row}_{col}") or {}
+        iso = "-".join(reversed(data_br.split("/"))) if data_br.count("/") == 2 else None
+        r["videos"] = [{"canal_id": r.get("canal_id"), "titulo": c.get("titulo") or "",
+                        "publish_at_utc": iso, "stage": None, "origem": "grid"}]
 
 
 # ---------------------------------------------------------------- rotas
@@ -195,8 +264,8 @@ def dashboard(x_painel_key: str = Header(None)):
         "select": "id,alias,nome_youtube,status,ordem,adspower_profile_id,"
                   "playlist_id,timezone,proxy_socks5,token_yt_json",
         "order": "ordem.asc.nullslast,alias.asc"}) or []]
-    runs = _sb("GET", "/runs", params={
-        "select": "*,canais_yt(alias)", "order": "started_at.desc", "limit": 10}) or []
+    runs = _anexar_videos(_sb("GET", "/runs", params={
+        "select": "*,canais_yt(alias)", "order": "started_at.desc", "limit": 10}) or [])
     videos = _sb("GET", "/videos", params={
         "select": "*,canais_yt(alias)", "order": "created_at.desc", "limit": 15}) or []
     alerts = _sb("GET", "/alerts", params={
@@ -210,9 +279,9 @@ def dashboard(x_painel_key: str = Header(None)):
 @router.get("/runs")
 def listar_runs(limit: int = 50, x_painel_key: str = Header(None)):
     _auth(x_painel_key)
-    rows = _sb("GET", "/runs", params={
+    rows = _anexar_videos(_sb("GET", "/runs", params={
         "select": "*,canais_yt(alias)", "order": "started_at.desc",
-        "limit": min(limit, 200)}) or []
+        "limit": min(limit, 200)}) or [])
     return {"ok": True, "runs": rows}
 
 
