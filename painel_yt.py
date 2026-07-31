@@ -43,12 +43,20 @@ def _cfg() -> dict:
     return _cfg_cache
 
 
-def _auth(x_painel_key: str | None):
+def _auth(x_painel_key: str | None, sensivel: bool = False):
+    """Piter 31/07: SEM senha na aba. `painel_key` no config virou OPCIONAL —
+    ausente = rotas abertas (mesma postura do resto do Automator, que nao tem
+    auth). Excecao: rotas `sensivel=True` (aquecimento — devolve SENHAS de
+    contas Google em texto puro) ficam BLOQUEADAS enquanto nao houver chave;
+    liberar isso pra internet nao e' opcao. Os demais segredos seguem
+    write-only/mascarados independente de chave."""
     chave = (_cfg().get("painel_key") or "").strip()
-    if not chave:
-        raise HTTPException(503, "painel_yt_config.json ausente/incompleto na VPS")
-    if (x_painel_key or "").strip() != chave:
-        raise HTTPException(401, "X-Painel-Key invalida")
+    if chave:
+        if (x_painel_key or "").strip() != chave:
+            raise HTTPException(401, "X-Painel-Key invalida")
+        return
+    if sensivel:
+        raise HTTPException(403, "rota sensivel: exige painel_key configurada na VPS")
 
 
 # ---------------------------------------------------------------- Supabase REST
@@ -243,7 +251,7 @@ _AQ_CHAVES = ("emails", "cells", "creds", "proxies")
 
 @router.get("/aquecimento")
 def aquecimento_get(x_painel_key: str = Header(None)):
-    _auth(x_painel_key)
+    _auth(x_painel_key, sensivel=True)   # creds em texto puro — nunca sem chave
     rows = _sb("GET", "/aquecimento_state", params={"id": "eq.1"})
     data = (rows[0].get("data") if rows else None) or {}
     return {"ok": True, "data": {k: data.get(k) or ({} if k in ("cells", "creds") else [])
@@ -252,7 +260,7 @@ def aquecimento_get(x_painel_key: str = Header(None)):
 
 @router.put("/aquecimento")
 async def aquecimento_put(request: Request, x_painel_key: str = Header(None)):
-    _auth(x_painel_key)
+    _auth(x_painel_key, sensivel=True)   # creds em texto puro — nunca sem chave
     body = await request.json()
     data = body.get("data") if isinstance(body, dict) else None
     if not isinstance(data, dict):

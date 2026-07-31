@@ -14,9 +14,19 @@ const ABAS = ['Dashboard', 'Canais', 'Grade', 'Runs', 'Vídeos', 'Aquecimento', 
 
 export function PainelYoutube() {
   const [aba, setAba] = useState('Dashboard')
-  const [temKey, setTemKey] = useState(() => !!getKey())
+  // Piter 31/07: sem senha. O gate SO aparece se o backend devolver 401
+  // (i.e., se uma painel_key for configurada de novo na VPS no futuro).
+  const [gate, setGate] = useState(null)   // null=verificando · false=livre · true=pede chave
+  useEffect(() => {
+    pfetch('/api/painel-yt/canais')
+      .then(() => setGate(false))
+      .catch(e => setGate(e.status === 401))
+  }, [])
 
-  if (!temKey) return <KeyGate onOk={() => setTemKey(true)} />
+  if (gate === null) return (
+    <><PageHeader title="Painel Youtube" /><div className="py-vazio">conectando…</div></>
+  )
+  if (gate) return <KeyGate onOk={() => setGate(false)} />
 
   return (
     <>
