@@ -68,6 +68,14 @@ TEMP_DIR.mkdir(exist_ok=True)
 app = FastAPI(title="Video Automator")
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
+# Painel Youtube nativo (bridge pro Supabase do drive-to-youtube).
+# Toda rota exige X-Painel-Key; segredos sao write-only (ver painel_yt.py).
+try:
+    from painel_yt import router as _painel_yt_router
+    app.include_router(_painel_yt_router)
+except Exception as _e_pyt:
+    print(f"[app] painel_yt indisponivel: {_e_pyt}")
+
 # Servir arquivos estáticos (uploads de imagens, etc)
 _static_dir = BASE_DIR / "static"
 _static_dir.mkdir(exist_ok=True)

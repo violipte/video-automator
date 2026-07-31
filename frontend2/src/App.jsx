@@ -10,6 +10,7 @@ import { Log } from './pages/Log'
 import { Config } from './pages/Config'
 import { CadastroCanal } from './pages/CadastroCanal'
 import { NicheSpy } from './pages/NicheSpy'
+import { PainelYoutube } from './pages/PainelYoutube'
 
 const BASENAME = import.meta.env.BASE_URL.replace(/\/$/, '') || '/'
 
@@ -26,6 +27,7 @@ export default function App() {
           <Route path="/vidmator"  element={<VidMator />} />
           <Route path="/cadastro-canal" element={<CadastroCanal />} />
           <Route path="/niche-spy" element={<NicheSpy />} />
+          <Route path="/painel-youtube" element={<PainelYoutube />} />
           <Route path="/log"       element={<Log />} />
           <Route path="/config"    element={<Config />} />
           <Route path="/showcase"  element={<Showcase />} />

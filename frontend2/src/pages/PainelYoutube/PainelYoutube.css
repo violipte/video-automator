@@ -1,0 +1,84 @@
+/* Painel Youtube — tema alinhado ao frontend2 (vars do tema global) */
+
+.py-abas { display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; }
+.py-aba {
+  padding: 6px 14px; font-size: 13px; border-radius: var(--radius-sm);
+  border: 1px solid var(--border); background: var(--panel-2); cursor: pointer;
+  color: var(--text-muted); transition: all var(--t-fast);
+}
+.py-aba:hover { border-color: var(--accent); color: var(--text); }
+.py-aba-on { background: var(--accent-soft); border-color: var(--accent); color: var(--text); font-weight: 600; }
+
+.py-gate { max-width: 520px; }
+.py-gate-linha { display: flex; gap: 8px; margin-top: 10px; }
+.py-gate-linha input { flex: 1; }
+
+.py-vazio { padding: 28px; text-align: center; color: var(--text-muted); }
+.py-mut { color: var(--text-muted); }
+.py-warn-txt { color: #f5b942; }
+.py-secao { margin: 18px 0 8px; font-size: 13px; text-transform: uppercase;
+  letter-spacing: 0.05em; color: var(--text-muted); }
+
+.py-barra { display: flex; justify-content: space-between; align-items: center;
+  gap: 10px; margin-bottom: 10px; }
+.py-barra input { max-width: 260px; }
+
+.py-btn {
+  padding: 5px 12px; font-size: 13px; border-radius: var(--radius-sm);
+  border: 1px solid var(--border); background: var(--panel-3); cursor: pointer;
+}
+.py-btn:hover { border-color: var(--accent); }
+.py-btn-primario { background: var(--accent-soft); border-color: var(--accent); font-weight: 600; }
+
+.py-tabela-wrap { overflow-x: auto; }
+.py-tabela { width: 100%; border-collapse: collapse; font-size: 13px; }
+.py-tabela th { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border);
+  color: var(--text-muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+.py-tabela td { padding: 7px 10px; border-bottom: 1px solid var(--border); }
+.py-linha-click { cursor: pointer; }
+.py-linha-click:hover td { background: var(--panel-2); }
+.py-titulo-cel { max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.py-chip { padding: 2px 9px; border-radius: 999px; font-size: 11px; border: 1px solid transparent; }
+.py-ok   { background: rgba(34,197,94,0.15);  color: #22c55e; border-color: rgba(34,197,94,0.4); }
+.py-warn { background: rgba(245,185,66,0.15); color: #f5b942; border-color: rgba(245,185,66,0.4); }
+.py-err  { background: rgba(239,68,68,0.15);  color: #ef4444; border-color: rgba(239,68,68,0.4); }
+.py-info { background: rgba(59,130,246,0.15); color: #60a5fa; border-color: rgba(59,130,246,0.4); }
+.py-mut.py-chip, .py-chip.py-mut { background: var(--panel-3); color: var(--text-muted); border-color: var(--border); }
+
+.py-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px; margin-bottom: 14px; }
+.py-stat { padding: 14px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--panel-2); text-align: center; }
+.py-stat-ruim { border-color: rgba(239,68,68,0.5); }
+.py-stat-n { font-size: 26px; font-weight: 700; }
+.py-stat-ruim .py-stat-n { color: #ef4444; }
+.py-stat-rot { font-size: 11px; color: var(--text-muted); margin-top: 3px; }
+
+.py-alert { display: flex; justify-content: space-between; align-items: center; gap: 10px;
+  padding: 9px 12px; margin-bottom: 6px; border-radius: var(--radius-sm);
+  border: 1px solid var(--border); background: var(--panel-2); font-size: 13px; }
+.py-alert-critical { border-left: 3px solid #ef4444; }
+.py-alert-warning  { border-left: 3px solid #f5b942; }
+.py-alert-info     { border-left: 3px solid #60a5fa; }
+.py-alert-success  { border-left: 3px solid #22c55e; }
+.py-alert-lido { opacity: 0.55; }
+
+/* modal do canal */
+.py-modal-fundo { position: fixed; inset: 0; background: rgba(0,0,0,0.55);
+  display: flex; align-items: center; justify-content: center; z-index: 50; }
+.py-modal { width: min(860px, 94vw); max-height: 88vh; display: flex; flex-direction: column;
+  background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius-md); }
+.py-modal-cab { display: flex; justify-content: space-between; align-items: center;
+  padding: 14px 18px; border-bottom: 1px solid var(--border); }
+.py-modal-cab h3 { margin: 0; }
+.py-modal-corpo { padding: 14px 18px; overflow-y: auto; }
+.py-modal-pe { display: flex; justify-content: flex-end; gap: 8px;
+  padding: 12px 18px; border-top: 1px solid var(--border); }
+
+.py-grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; }
+.py-campo { display: flex; flex-direction: column; gap: 3px; font-size: 12px; }
+.py-campo > span { color: var(--text-muted); }
+.py-campo input, .py-campo select, .py-campo textarea { font-size: 13px; }
+.py-check { flex-direction: row; align-items: center; gap: 8px; margin-top: 16px; }
+@media (max-width: 720px) { .py-grid2 { grid-template-columns: 1fr; } }
