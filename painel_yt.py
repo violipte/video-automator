@@ -161,6 +161,28 @@ def _prod_local_gravar(alias: str, dados) -> None:
     _PROD_PATH.write_text(json.dumps(todos, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
+def _migrar_producao_local() -> int:
+    """Assim que canais_yt.producao existir, sobe o que ficou no JSON local e
+    aposenta o arquivo. Roda sozinho na primeira listagem (idempotente): sem a
+    coluna sai em O(1) pelo cache; com a coluna e arquivo vazio, idem."""
+    if not _col_producao_existe():
+        return 0
+    locais = _prod_local()
+    if not locais:
+        return 0
+    migrados = 0
+    for alias, dados in list(locais.items()):
+        try:
+            _sb("PATCH", "/canais_yt", body={"producao": dados},
+                params={"alias": f"eq.{alias}"})
+        except Exception:
+            continue          # fica no arquivo e tenta de novo depois
+        locais.pop(alias)
+        migrados += 1
+    _PROD_PATH.write_text(json.dumps(locais, ensure_ascii=False, indent=1), encoding="utf-8")
+    return migrados
+
+
 def _injetar_producao(canal: dict) -> dict:
     """No modo fallback, a producao vem do JSON local (a coluna nao existe)."""
     if not _col_producao_existe():
@@ -264,6 +286,7 @@ def _videos_do_grid(runs: list):
 @router.get("/canais")
 def listar_canais(x_painel_key: str = Header(None)):
     _auth(x_painel_key)
+    _migrar_producao_local()   # no-op ate a coluna nascer; depois migra uma vez
     rows = _sb("GET", "/canais_yt", params={"order": "ordem.asc.nullslast,alias.asc"})
     return {"ok": True, "canais": [_injetar_producao(_mascarar(c)) for c in rows or []]}
 
