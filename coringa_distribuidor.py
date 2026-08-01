@@ -834,23 +834,29 @@ def cascade_ash_pcc_eoa_todas_datas() -> dict:
                 continue
         except Exception:
             continue
-        narc = celulas.get(f"{ri}_{canal_idx['NARC']}", {}) or {}
-        npd = celulas.get(f"{ri}_{canal_idx['NPD']}", {}) or {}
-        # ASH <- NARC (passa tema+titulo+thumb da fonte ja adaptada)
-        ash_cel = celulas.get(f"{ri}_{canal_idx['ASH']}", {}) or {}
-        if narc.get("titulo") and not (ash_cel.get("titulo") or "").strip():
-            cascades.append((ri, "ASH", "NARC",
-                             narc.get("tema", ""), narc.get("titulo", ""), narc.get("thumb", "")))
-        # PCC <- NARC
-        pcc_cel = celulas.get(f"{ri}_{canal_idx['PCC']}", {}) or {}
-        if narc.get("titulo") and not (pcc_cel.get("titulo") or "").strip():
-            cascades.append((ri, "PCC", "NARC",
-                             narc.get("tema", ""), narc.get("titulo", ""), narc.get("thumb", "")))
-        # EOA <- NPD
-        eoa_cel = celulas.get(f"{ri}_{canal_idx['EOA']}", {}) or {}
-        if npd.get("titulo") and not (eoa_cel.get("titulo") or "").strip():
-            cascades.append((ri, "EOA", "NPD",
-                             npd.get("tema", ""), npd.get("titulo", ""), npd.get("thumb", "")))
+        # OFFSET "EM CRUZ" (Piter 31/07): o derivado NUNCA repete o tema da fonte
+        # no MESMO dia — ASH pega o NARC de D-1, PCC o de D-2, EOA o NPD de D-1.
+        # Antes era mesmo-dia: NARC=ASH=PCC e NPD=EOA identicos em toda data
+        # (so mudava a entidade). Fallback pro mesmo dia SO se a row anterior
+        # nao existir/estiver vazia (inicio de grid): melhor repetir que vazio.
+        def _fonte_offset(canal_fonte, offset):
+            ci_f = canal_idx[canal_fonte]
+            for cand in (ri - offset, ri):
+                if cand < 0:
+                    continue
+                c = celulas.get(f"{cand}_{ci_f}", {}) or {}
+                if (c.get("titulo") or "").strip():
+                    return c
+            return {}
+        for destino, canal_fonte, off in (("ASH", "NARC", 1), ("PCC", "NARC", 2),
+                                          ("EOA", "NPD", 1)):
+            dest_cel = celulas.get(f"{ri}_{canal_idx[destino]}", {}) or {}
+            if (dest_cel.get("titulo") or "").strip():
+                continue
+            f = _fonte_offset(canal_fonte, off)
+            if f:
+                cascades.append((ri, destino, canal_fonte,
+                                 f.get("tema", ""), f.get("titulo", ""), f.get("thumb", "")))
 
     if not cascades:
         return {"ok": True, "processadas": 0, "msg": "Nada a adaptar (todas ja preenchidas ou fonte vazia)"}
@@ -1457,16 +1463,19 @@ def processar_co_em_cruz() -> dict:
     # Combinado com _validar_adaptacao: rejeita gravar se output ainda tem vocab CO1.
     cascade_novos_results = {}
     erros_novos = []
-    novos_targets = []  # (row, canal_destino, canal_fonte)
-    # NARC -> ASH e PCC
+    # OFFSET "EM CRUZ" (Piter 31/07): ASH <- NARC de D-1, PCC <- NARC de D-2,
+    # EOA <- NPD de D-1 (antes era mesmo-dia -> 3 canais com o MESMO tema).
+    novos_targets = []  # (row, canal_destino, canal_fonte, offset_dias)
     for ri in (dia_x, dia_x1):
-        novos_targets.append((ri, "ASH", "NARC"))
-        novos_targets.append((ri, "PCC", "NARC"))
-    # NPD -> EOA
-    for ri in (dia_x, dia_x1):
-        novos_targets.append((ri, "EOA", "NPD"))
+        novos_targets.append((ri, "ASH", "NARC", 1))
+        novos_targets.append((ri, "PCC", "NARC", 2))
+        novos_targets.append((ri, "EOA", "NPD", 1))
 
-    for ri, canal, canal_fonte in novos_targets:
+    # snapshot do grid pra resolver fontes em rows JA distribuidas antes deste batch
+    with _temas_lock:
+        _snap_celulas = (_carregar_temas().get("celulas", {}) or {})
+
+    for ri, canal, canal_fonte, _off in novos_targets:
         if canal not in canal_idx:
             print(f"[coringa-novos] {canal} nao existe no grid, pulando")
             continue
@@ -1479,11 +1488,25 @@ def processar_co_em_cruz() -> dict:
             print(f"[coringa-novos] {canal} row {ri} ja preenchido, pulando")
             continue
 
-        # FONTE: resultado JA ADAPTADO de NARC/NPD (NAO o item raw do backlog)
-        fonte_res = cascade_results.get((ri, canal_idx.get(canal_fonte, -1)))
+        # FONTE: resultado JA ADAPTADO de NARC/NPD (NAO o item raw do backlog),
+        # com OFFSET: tenta a row D-offset (deste batch OU ja gravada no grid);
+        # fallback = mesmo dia (inicio de grid / fonte anterior vazia).
+        ci_f = canal_idx.get(canal_fonte, -1)
+        fonte_res = None
+        for cand in (ri - _off, ri):
+            if cand < 0:
+                continue
+            fonte_res = cascade_results.get((cand, ci_f))
+            if fonte_res:
+                break
+            cg = _snap_celulas.get(f"{cand}_{ci_f}", {}) or {}
+            if (cg.get("titulo") or "").strip():
+                fonte_res = {"tema": cg.get("tema", ""), "titulo": cg.get("titulo", ""),
+                             "thumb": cg.get("thumb", "")}
+                break
         if not fonte_res:
             erros_novos.append({"canal": canal, "row": ri,
-                                "erro": f"fonte {canal_fonte} sem resultado adaptado pra essa row"})
+                                "erro": f"fonte {canal_fonte} sem resultado adaptado (nem D-{_off} nem D0)"})
             print(f"[coringa-novos] {canal} row {ri} ABORTADO: fonte {canal_fonte} nao adaptada antes")
             continue
         src_tema = fonte_res.get("tema", "")
