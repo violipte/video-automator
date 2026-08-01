@@ -68,7 +68,16 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("--canais", default="", help="CSV; vazio = todos do cadastro (painel/SLOT_MAP)")
+    ap.add_argument("--jitter", action="store_true",
+                    help="espera aleatoria 0-20min antes de comecar (rodadas agendadas; "
+                         "cadencia fixa e' assinatura de robo — Piter 01/08)")
     a = ap.parse_args()
+    if a.jitter:
+        import random as _rd
+        import time as _tm
+        _esp = _rd.uniform(0, 1200)
+        _log(f"jitter: aguardando {_esp / 60:.1f}min antes da rodada")
+        _tm.sleep(_esp)
 
     cfg = _cfg()
     repo = Path((cfg.get("upload_trigger") or {}).get("repo")

@@ -413,6 +413,7 @@ def _reconciliar(config, repo: Path, canal_yt: str, alias: str, row: int, col: i
         # recente". Gravado aqui, qualquer retry futuro pina o certo pra sempre.
         if res.get("comment_id"):
             campos["youtube_comment_id"] = res["comment_id"]
+            _cid_local_gravar(alias, data_iso, res["comment_id"])
         body = json.dumps(campos).encode()
         marcou = False
         for tentativa, espera in enumerate((0, 3, 8, 20, 45), 1):
@@ -442,6 +443,70 @@ def _reconciliar(config, repo: Path, canal_yt: str, alias: str, row: int, col: i
         _log(f"reconciliacao falhou ({type(e).__name__}: {e}) — video ja esta no ar")
 
 
+def _achar_no_canal_por_titulo(cfg: dict, canal_yt: str, titulo: str) -> str:
+    """C1: procura o video nos uploads RECENTES do canal comparando o titulo do
+    grid (normalizado, prefixo de 50 chars — o YouTube pode truncar/encodar).
+    Retorna o video_id ou ''. Nunca levanta."""
+    if not titulo:
+        return ""
+    try:
+        repo = Path(cfg.get("repo") or "F:/Canal Dark/Apps Rapidos/drive-to-youtube")
+        p = subprocess.run(
+            [str(repo / "venv" / "Scripts" / "python.exe"), "-u",
+             str(Path(__file__).parent / "c1_listar_uploads.py")],
+            cwd=str(repo), capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=180,
+            env=dict(os.environ, CHANNEL_ALIAS=canal_yt, PYTHONUTF8="1"))
+        def norm(t):
+            return " ".join((t or "").lower().split())[:50]
+        alvo = norm(titulo)
+        for ln in (p.stdout or "").splitlines():
+            if not ln.startswith("__V__"):
+                continue
+            vid, _, tit = ln[len("__V__"):].partition("	")
+            if vid and norm(tit) == alvo:
+                return vid
+    except Exception as e:
+        _log(f"C1: busca por titulo falhou ({type(e).__name__}) — segue pro dead-letter")
+    return ""
+
+
+def _cid_local_gravar(alias: str, data_iso: str, cid: str):
+    """CommentID em registro LOCAL (aprovado Piter 01/08): grava no arquivo da
+    tarefa da esteira (disco, sem rede) na hora — fecha a ultima janela de
+    duplicata se o VPS cair entre o post e a marcacao. Best-effort."""
+    if not cid:
+        return
+    try:
+        import esteira as _est
+        nome = f"{alias.upper()}_{data_iso}.json"
+        for pasta in (_est.TAREFAS, _est.FEITAS):
+            fp = pasta / nome
+            if fp.exists():
+                t = json.loads(fp.read_text(encoding="utf-8"))
+                if t.get("youtube_comment_id_local") != cid:
+                    t["youtube_comment_id_local"] = cid
+                    fp.write_text(json.dumps(t, ensure_ascii=False, indent=1), encoding="utf-8")
+                return
+    except Exception:
+        pass
+
+
+def _cid_local_ler(alias: str, data_iso: str) -> str:
+    """Fallback de leitura do commentID local quando o grid nao tem."""
+    try:
+        import esteira as _est
+        nome = f"{alias.upper()}_{data_iso}.json"
+        for pasta in (_est.TAREFAS, _est.FEITAS):
+            fp = pasta / nome
+            if fp.exists():
+                return (json.loads(fp.read_text(encoding="utf-8"))
+                        .get("youtube_comment_id_local") or "")
+    except Exception:
+        pass
+    return ""
+
+
 def rodar_pin(config: dict, alias: str, data_iso: str, video_id: str,
               row: int = -1, col: int = -1) -> dict:
     """Estagio PIN da esteira: fixa o CTA de um video JA agendado.
@@ -466,6 +531,12 @@ def rodar_pin(config: dict, alias: str, data_iso: str, video_id: str,
                 comment_id = (_buscar_celula(vps, row, col) or {}).get("youtube_comment_id") or ""
             except Exception:
                 pass
+        if not comment_id:
+            # registro LOCAL (aprovado Piter 01/08): grid vazio/inacessivel nao
+            # pode significar "sem CTA" — a tarefa da esteira guarda o cid em disco
+            comment_id = _cid_local_ler(alias, data_iso)
+            if comment_id:
+                _log(f"commentID recuperado do registro LOCAL da tarefa: {comment_id}")
         py = repo / "venv" / "Scripts" / "python.exe"
         cmd = [str(py), "-u", str(Path(__file__).parent / "upload_verify.py"),
                f"--video-id={video_id}", f"--publish-utc={pub}", "--ensure-pin"]
@@ -497,6 +568,7 @@ def rodar_pin(config: dict, alias: str, data_iso: str, video_id: str,
                                              headers={"Content-Type": "application/json"})
                 urllib.request.urlopen(req, timeout=30).read()
                 _log(f"commentID persistido no grid: {cid_novo}")
+                _cid_local_gravar(alias, data_iso, cid_novo)
             except Exception as e:
                 _log(f"persistencia do commentID falhou ({type(e).__name__}) — segue")
         return res
@@ -637,14 +709,20 @@ def _disparar_interno(config, alias, canal_idx, data_pasta, video_path, titulo_e
         return {"ok": True, "skip": "journal: ja subiu (grid ressincronizado)",
                 "erro": None, "stdout": "", "video_id": vid_j}
     if est_j == "subindo":
-        # O processo anterior morreu ENTRE o inicio e o fim do upload. Nao da pra
-        # saber se o YouTube recebeu. Subir agora pode DUPLICAR; nao subir apenas
-        # atrasa. Escolha deliberada: nao sobe, marca dead-letter e pede olho humano.
-        _marcar_falha(config, row, col, "upload anterior morreu no meio")
-        _abortar(config, alias, data_pasta,
-                 f"upload anterior morreu NO MEIO (journal={_journal_path(alias, data_pasta).name}). "
-                 f"Confira o canal: se o video NAO esta la, apague o journal e re-dispare.")
-        return {"ok": False, "erro": "journal: estado indeterminado", "skip": None, "stdout": ""}
+        # C1 (aprovado Piter 01/08, apos 3 adocoes manuais no MESMO dia): antes
+        # do dead-letter, procura o video NO CANAL pelo titulo do grid.
+        #   achou  -> ADOTA (reconciliador completa agenda/CTA/pin/grid)
+        #   sumiu  -> upload nao chegou: apaga o journal e SEGUE pro upload
+        vid_c1 = _achar_no_canal_por_titulo(cfg, canal_yt, (cel.get("titulo") or "").strip())
+        if vid_c1:
+            _log(f"C1: video de {alias} {data_pasta} ACHADO no canal por titulo ({vid_c1}) — adotando")
+            _journal_escrever(alias, data_pasta, "subiu", vid_c1)
+            _reconciliar(config, Path(cfg.get("repo") or ""), canal_yt, alias, row, col,
+                         data_pasta, vid_c1, thumb_r, slot, tz)
+            return {"ok": True, "skip": "C1: adotado por titulo", "erro": None,
+                    "stdout": "", "video_id": vid_c1}
+        _log(f"C1: video de {alias} {data_pasta} NAO esta no canal — journal limpo, upload segue")
+        _journal_path(alias, data_pasta).unlink(missing_ok=True)
 
     # --- checagem 3: titulo do grid bate com o que foi renderizado ---
     tit_grid = (cel.get("titulo") or "").strip()
