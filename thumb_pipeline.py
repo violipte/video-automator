@@ -207,9 +207,13 @@ def _compose_thumb(canal: str, tpl_nome: str, thumb_txt: str, data_br: str, out:
     dele) — sem Nano Banana e sem revisor (deterministico). Devolve o Path."""
     txt = (thumb_txt or "").replace("\r\n", "\n").strip()
     if "\n" in txt:
+        # \n na celula = quebra EXPLICITA do operador — respeita
         line1, line2 = (s.strip() for s in txt.split("\n", 1))
     else:
-        line1, line2 = txt, ""
+        # regra do Calendar (splitThumbText do index.html): quebra SIMETRICA no
+        # espaco mais perto do meio — linha 1 branca, linha 2 gradiente. Mandar
+        # tudo na linha 1 saia com fonte mirrada e sem gradiente (Piter 31/07).
+        line1, line2 = _split2(txt)
     body = json.dumps({"canal": canal, "data": data_br, "line1": line1,
                        "line2": line2, "template_name": tpl_nome}).encode()
     req = urllib.request.Request(f"{CALENDAR}/api/compose-thumb", data=body,
