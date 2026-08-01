@@ -51,6 +51,17 @@ _LOCK = Path(os.environ.get("TEMP", ".")) / "automator_upload_locks" / "flow_chr
 _LOCK_STALE = 1800   # 30min: geracao de 4 thumbs leva ~2-3min; mais que isso e' orfao
 
 
+def _pid_vivo(pid: int) -> bool:
+    """True se o processo existe (Windows). NAO usar os.kill(pid, 0) — no
+    Windows qualquer sinal != CTRL_* TERMINA o processo."""
+    try:
+        out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                             capture_output=True, text=True, timeout=10)
+        return str(pid) in (out.stdout or "")
+    except Exception:
+        return True   # na duvida, assume vivo (nao rouba)
+
+
 class _LockFlow:
     def __init__(self, espera_max=900):
         self.espera_max = espera_max
@@ -70,8 +81,19 @@ class _LockFlow:
                     idade = time.time() - _LOCK.stat().st_mtime
                 except OSError:
                     idade = 0
-                if idade > _LOCK_STALE:
-                    _log(f"lock do Flow orfao ({idade/60:.0f}min) — roubando")
+                # orfao por IDADE (>30min) OU por DONO MORTO (worker reciclado/
+                # crashado no meio da geracao — 01/08: lock ficou 15min preso e a
+                # espera de 900s desistiu antes do stale de 1800s; NARC sem thumb)
+                dono_morto = False
+                if idade > 60:               # da 1min pro dono escrever/rodar
+                    try:
+                        pid = int((_LOCK.read_text().split() or ["0"])[0])
+                        dono_morto = pid > 0 and not _pid_vivo(pid)
+                    except (OSError, ValueError):
+                        pass
+                if idade > _LOCK_STALE or dono_morto:
+                    _log(f"lock do Flow orfao ({idade/60:.0f}min"
+                         f"{', dono morto' if dono_morto else ''}) — roubando")
                     _LOCK.unlink(missing_ok=True)
                     continue
                 if not avisou:
