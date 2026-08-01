@@ -80,6 +80,33 @@ def main():
     col_de = {(c.get("nome") or "").strip().upper(): i for i, c in enumerate(colunas)}
     agora = datetime.now(timezone.utc)
 
+    # Rede de seguranca: tarefa de canal MANUAL morta como "alias sem slot"
+    # (bug do upload_loop corrigido 01/08; worker antigo ainda pode gerar ate'
+    # reciclar) — fecha como thumb_only e limpa o badge do grid.
+    import glob as _glob
+    for _f in _glob.glob(str(Path(__file__).parent / "_esteira" / "*" / "*.json")):
+        try:
+            _t = json.loads(open(_f, encoding="utf-8").read())
+        except Exception:
+            continue
+        if _t.get("etapa") == "falha" and "sem slot" in str(_t.get("erro", "")):
+            _t["etapa"], _t["nota"], _t["erro"] = (
+                "done", "thumb_only (canal fora do upload automatico)", "")
+            open(_f, "w", encoding="utf-8").write(
+                json.dumps(_t, ensure_ascii=False, indent=1))
+            if a.apply and _t.get("row", -1) >= 0:
+                try:
+                    import urllib.request as _ur
+                    _body = json.dumps({"row": _t["row"], "col": _t["col"],
+                                        "upload_status": ""}).encode()
+                    _req = _ur.Request(
+                        "http://85.239.243.215:8500/api/upload/mark",
+                        data=_body, headers={"Content-Type": "application/json"})
+                    _ur.urlopen(_req, timeout=30).read()
+                except Exception as _e:
+                    _log(f"reparo sem-slot: badge nao limpou ({type(_e).__name__}) — segue")
+            _log(f"reparo sem-slot: {_t.get('alias')} {_t.get('data')} -> done thumb_only")
+
     falhou, incompleto, nao_publicou, ok = [], [], [], 0
     thumb_pend, pin_pend, fila_presa = [], [], []
 
