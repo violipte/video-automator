@@ -40,8 +40,14 @@ import upload_trigger as ut
 
 AQUI = Path(__file__).parent
 CICLO_SEG = 15
-PIN_MAX_TENTATIVAS = 2
-PIN_RETRY_SEG = 600          # espera entre a 1a e a 2a tentativa de pin
+# JANELA DE PROCESSAMENTO do YouTube (evidencia 01/08, screenshot NPD 05/08):
+# ate ~20-40min pos-upload o watch mostra "We're processing this video" e NEM
+# RENDERIZA a secao de comentarios -> pin impossivel (falhava com timeout/menu
+# vazio). Mesma descoberta do youtube-publish-app (delay 12-15min pos-upload).
+# 1a tentativa em T+12min; retries a cada 15min; 3 tentativas = cobre T+42min.
+PIN_DELAY_POS_UPLOAD_SEG = 720
+PIN_MAX_TENTATIVAS = 3
+PIN_RETRY_SEG = 900
 
 # Erro TRANSITORIO de upload (rede/proxy/lock) -> re-tenta AQUI com backoff em
 # vez de dead-letter direto (absorvido do youtube-publish-app, espec C2/C6 do
@@ -196,8 +202,10 @@ def _upload_task(cfg: dict, t: dict, fila_n: int = 1):
     if r.get("ok"):
         t["video_id"] = r.get("video_id") or ""
         t["etapa"] = "pin"
-        t.pop("nao_antes", None)     # zera backoff de retry anterior
-        _log(f"  upload OK ({t['video_id'] or 'id no grid'}) -> fila do pin")
+        # pin so DEPOIS da janela de processamento do YouTube (ver constante)
+        t["nao_antes"] = time.time() + PIN_DELAY_POS_UPLOAD_SEG
+        _log(f"  upload OK ({t['video_id'] or 'id no grid'}) -> pin em "
+             f"{PIN_DELAY_POS_UPLOAD_SEG // 60}min (janela de processamento)")
         # pendencia de thumb fica REGISTRADA no grid pro daily re-tentar
         if t.get("thumb_status") == "pendente":
             _marcar(cfg, t, thumb_status="pendente")
