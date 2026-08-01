@@ -334,13 +334,19 @@ def _marcar_falha(config: dict, row: int, col: int, motivo: str):
 
 
 def _publish_utc(data_iso: str, tz_nome: str, slot: str) -> str:
-    """publishAt DETERMINISTICO = data-tema + slot do alias, no TZ do canal -> ISO UTC."""
+    """publishAt DETERMINISTICO = data-tema + slot do alias, no TZ do canal -> ISO UTC.
+
+    ⚠️ SEM fallback silencioso pra UTC: o Python do Windows precisa do pacote
+    `tzdata` — sem ele o ZoneInfo falha e o fallback antigo agendou TODOS os
+    canais nao-UTC de 05/08 com horas de atraso/adiantamento (01/08, CON 12:40Z
+    em vez de 19:40Z etc.). Melhor ABORTAR o upload (dead-letter ruidoso) do
+    que agendar errado em silencio."""
     from datetime import timezone as _tz
-    try:
-        from zoneinfo import ZoneInfo
-        tzi = ZoneInfo(tz_nome)
-    except Exception:
+    from zoneinfo import ZoneInfo
+    if tz_nome.strip().upper() in ("UTC", "GMT"):
         tzi = _tz.utc
+    else:
+        tzi = ZoneInfo(tz_nome)   # ZoneInfoNotFoundError = instalar tzdata; NAO engolir
     hh, mm = (int(x) for x in slot.split(":"))
     local = datetime.strptime(data_iso, "%Y-%m-%d").replace(hour=hh, minute=mm, tzinfo=tzi)
     return local.astimezone(_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
