@@ -375,7 +375,7 @@ def _reconciliar(config, repo: Path, canal_yt: str, alias: str, row: int, col: i
         pub = _publish_utc(data_iso, tz, slot)
         py = repo / "venv" / "Scripts" / "python.exe"
         cmd = [str(py), "-u", str(Path(__file__).parent / "upload_verify.py"),
-               "--video-id", video_id, "--publish-utc", pub]
+               f"--video-id={video_id}", f"--publish-utc={pub}"]
         if thumb:
             cmd += ["--thumb", str(thumb)]
         r = subprocess.run(cmd, cwd=str(repo), capture_output=True, text=True,
@@ -468,9 +468,9 @@ def rodar_pin(config: dict, alias: str, data_iso: str, video_id: str,
                 pass
         py = repo / "venv" / "Scripts" / "python.exe"
         cmd = [str(py), "-u", str(Path(__file__).parent / "upload_verify.py"),
-               "--video-id", video_id, "--publish-utc", pub, "--ensure-pin"]
+               f"--video-id={video_id}", f"--publish-utc={pub}", "--ensure-pin"]
         if comment_id:
-            cmd += ["--comment-id", comment_id]
+            cmd += [f"--comment-id={comment_id}"]
         # PIN_CONCURRENCY: cap GLOBAL de pins simultaneos (pinlock, entre
         # processos). REGRA (Piter 31/07): pin paralelo, MAXIMO 5 por vez —
         # validado com teste real (5 profiles + automacao CDP, 0 erros).
