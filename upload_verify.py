@@ -203,11 +203,11 @@ def main():
                 # upload_one -> reconcile -> pin, um por estagio).
                 import time as _t2
                 cid = None
-                for _tent in range(3):
+                for _tent in range(5):
                     cid = _achar_cta_proprio(y, vid, build_comment(pub_local))
                     if cid:
                         break
-                    _t2.sleep(20)         # lag de indexacao: espera e re-procura
+                    _t2.sleep(30)         # lag de indexacao (ENO lagga >60s: duplicou 11/08)
                 if cid:
                     _p(f"CTA ja existia (achado por autor+texto, sera persistido): {cid}")
                 else:
