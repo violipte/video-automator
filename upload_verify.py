@@ -195,11 +195,18 @@ def main():
                 _t.sleep(4)               # propagacao do YouTube
                 ncom = n_comentarios()
                 _p(f"comentarios REAIS (agora visiveis): {ncom}")
-            if not ncom:                  # 0 ou None (comentarios desabilitados dao None)
+            if not ncom and not a.comment_id:
+                # so posta se NAO ha comment_id conhecido: a contagem do YouTube
+                # atrasa a indexar (lag > sleep de 4s) e voltou 0 com o CTA JA
+                # postado -> DUPLICOU o CTA no ENO 05/08 (01/08). comment_id no
+                # grid = CTA existe, contagem que se dane.
                 texto = build_comment(pub_local)
                 cid = youtube.post_comment(vid, texto)
                 consertos.append("comentario")
                 _p(f"comentario postado: {cid}")
+            elif not ncom and a.comment_id:
+                cid = a.comment_id
+                _p(f"contagem=0 mas comment_id conhecido ({cid}) — NAO re-posto (lag de indexacao)")
             else:
                 _p("comentario ja existia")
                 if a.ensure_pin:
