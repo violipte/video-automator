@@ -251,7 +251,16 @@ def upload_loop():
     while True:
         try:
             for t in _uploads_prontos():
-                canal_yt = ut.slot_map(_config()).get(t["alias"], (None,))[0]
+                cfg_now = _config()
+                canais_up = [c.strip().upper() for c in
+                             ((cfg_now.get("upload_trigger") or {}).get("canais") or [])]
+                if canais_up and t["alias"].upper() not in canais_up:
+                    # FORA do piloto nao precisa de slot (upload e' manual) —
+                    # sem este check EN/EN3 06/08 morriam "alias sem slot"
+                    # com a thumb JA pronta nos Exports (01/08).
+                    _upload_task(cfg_now, t, 1)   # fecha como thumb_only DONE
+                    continue
+                canal_yt = ut.slot_map(cfg_now).get(t["alias"], (None,))[0]
                 if not canal_yt:
                     t["erro"], t["etapa"] = "alias sem slot (cadastro do canal)", "falha"
                     esteira.salvar(t)
