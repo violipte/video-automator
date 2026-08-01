@@ -196,14 +196,25 @@ def main():
                 ncom = n_comentarios()
                 _p(f"comentarios REAIS (agora visiveis): {ncom}")
             if not ncom and not a.comment_id:
-                # so posta se NAO ha comment_id conhecido: a contagem do YouTube
-                # atrasa a indexar (lag > sleep de 4s) e voltou 0 com o CTA JA
-                # postado -> DUPLICOU o CTA no ENO 05/08 (01/08). comment_id no
-                # grid = CTA existe, contagem que se dane.
-                texto = build_comment(pub_local)
-                cid = youtube.post_comment(vid, texto)
-                consertos.append("comentario")
-                _p(f"comentario postado: {cid}")
+                # REGRA DURA (Piter 01/08): NUNCA postar sem antes PROCURAR o
+                # CTA por autor+texto com backoff. Contagem NAO decide nada —
+                # ela atrasa MINUTOS em video recem-subido, e cada estagio que
+                # confiou nela postou de novo (CO3/CO4 09/08 = 3 CTAs iguais:
+                # upload_one -> reconcile -> pin, um por estagio).
+                import time as _t2
+                cid = None
+                for _tent in range(3):
+                    cid = _achar_cta_proprio(y, vid, build_comment(pub_local))
+                    if cid:
+                        break
+                    _t2.sleep(20)         # lag de indexacao: espera e re-procura
+                if cid:
+                    _p(f"CTA ja existia (achado por autor+texto, sera persistido): {cid}")
+                else:
+                    texto = build_comment(pub_local)
+                    cid = youtube.post_comment(vid, texto)
+                    consertos.append("comentario")
+                    _p(f"comentario postado: {cid}")
             elif not ncom and a.comment_id:
                 cid = a.comment_id
                 _p(f"contagem=0 mas comment_id conhecido ({cid}) — NAO re-posto (lag de indexacao)")
