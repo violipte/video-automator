@@ -45,9 +45,11 @@ CICLO_SEG = 15
 # RENDERIZA a secao de comentarios -> pin impossivel (falhava com timeout/menu
 # vazio). Mesma descoberta do youtube-publish-app (delay 12-15min pos-upload).
 # 1a tentativa em T+12min; retries a cada 15min; 3 tentativas = cobre T+42min.
-PIN_DELAY_POS_UPLOAD_SEG = 720
+# Delays do pin em POOL ALEATORIO, nao cravados (Piter 01/08): cadencia fixa
+# e' assinatura de robo. Cada espera sorteia um valor novo dentro da faixa.
+PIN_DELAY_POS_UPLOAD_FAIXA = (11 * 60, 16 * 60)   # pos-upload (janela de processamento)
 PIN_MAX_TENTATIVAS = 3
-PIN_RETRY_SEG = 900
+PIN_RETRY_FAIXA = (13 * 60, 19 * 60)              # entre re-tentativas de pin
 
 # Erro TRANSITORIO de upload (rede/proxy/lock) -> re-tenta AQUI com backoff em
 # vez de dead-letter direto (absorvido do youtube-publish-app, espec C2/C6 do
@@ -203,9 +205,11 @@ def _upload_task(cfg: dict, t: dict, fila_n: int = 1):
         t["video_id"] = r.get("video_id") or ""
         t["etapa"] = "pin"
         # pin so DEPOIS da janela de processamento do YouTube (ver constante)
-        t["nao_antes"] = time.time() + PIN_DELAY_POS_UPLOAD_SEG
+        import random as _rd
+        espera = _rd.uniform(*PIN_DELAY_POS_UPLOAD_FAIXA)
+        t["nao_antes"] = time.time() + espera
         _log(f"  upload OK ({t['video_id'] or 'id no grid'}) -> pin em "
-             f"{PIN_DELAY_POS_UPLOAD_SEG // 60}min (janela de processamento)")
+             f"{espera / 60:.0f}min (janela de processamento)")
         # pendencia de thumb fica REGISTRADA no grid pro daily re-tentar
         if t.get("thumb_status") == "pendente":
             _marcar(cfg, t, thumb_status="pendente")
@@ -314,11 +318,13 @@ def _pin_task(cfg: dict, t: dict, fila_n: int = 1):
                           f"{n} tentativas — video segue agendado; daily re-tenta")
         _log(f"  pin PENDENTE ({n} tentativas) — tema DONE, daily re-tenta")
     else:
-        t["nao_antes"] = agora + PIN_RETRY_SEG
+        import random as _rd
+        espera = _rd.uniform(*PIN_RETRY_FAIXA)
+        t["nao_antes"] = agora + espera
         # o verify pode ter deixado o video ok mas sem pin; status volta
         # a refletir o estado real (agendado) enquanto espera o retry
         _marcar(cfg, t, upload_status="scheduled")
-        _log(f"  pin falhou — re-tento em {PIN_RETRY_SEG // 60}min")
+        _log(f"  pin falhou — re-tento em {espera / 60:.0f}min")
     esteira.salvar(t)
 
 
