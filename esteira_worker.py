@@ -182,6 +182,9 @@ def _upload_task(cfg: dict, t: dict, fila_n: int = 1):
                  ((cfg.get("upload_trigger") or {}).get("canais") or [])]
     if canais_up and t["alias"].upper() not in canais_up:
         t["etapa"], t["nota"] = "done", "thumb_only (canal fora do upload automatico)"
+        # limpa o "fila:thumb" da celula — sem isso o badge ficava preso pra
+        # sempre no grid (visto na auditoria 05/08). Upload manual = sem badge.
+        _marcar(cfg, t, upload_status="")
         _log(f"UPLOAD {t['alias']} {t['data']}: fora do piloto — thumb_only, DONE")
         esteira.salvar(t)
         return
