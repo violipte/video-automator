@@ -1399,6 +1399,119 @@ async def upload_mark(request: Request):
     }
 
 
+# === API: GRID CELULA-A-CELULA (criacao de canal / skill arquitetar-canal) ===
+# Contrato: resolver coluna por pipeline_id -> ensure linha (idempotente) ->
+# GET celula (guard) -> PUT celula COMPLETA -> re-GET validando.
+# Substitui o POST /api/temas (grid inteiro, 4.4MB, read-modify-write com race)
+# para escrita programatica. Validado com o Claude do Carlos (skill arquitetar-canal).
+
+@app.get("/api/temas/resolver-coluna")
+def temas_resolver_coluna(pipeline_id: str = "", nome: str = "", template_id: str = ""):
+    """Resolve o INDICE da coluna por pipeline_id (preferido), nome ou template_id.
+
+    Regra dura: NUNCA enderecar coluna por indice fixo — indices sao volateis
+    (drag&drop reordena, coluna nova desloca tudo). Sempre resolver na hora.
+    """
+    d = scriptwriter.carregar_temas()
+    cols = d.get("colunas", []) if isinstance(d, dict) else []
+    achados = []
+    for i, c in enumerate(cols):
+        c = c or {}
+        if (pipeline_id and c.get("pipeline_id") == pipeline_id) \
+           or (nome and (c.get("nome") or "").strip().lower() == nome.strip().lower()) \
+           or (template_id and c.get("template_id") == template_id):
+            achados.append({"col": i, "nome": c.get("nome"), "pipeline_id": c.get("pipeline_id"),
+                            "template_id": c.get("template_id")})
+    if not achados:
+        return {"ok": False, "erro": "coluna nao encontrada", "col": None}
+    if len(achados) > 1:
+        return {"ok": False, "erro": f"{len(achados)} colunas casam — criterio ambiguo",
+                "col": None, "candidatos": achados}
+    return {"ok": True, **achados[0]}
+
+
+@app.post("/api/temas/ensure-linha")
+async def temas_ensure_linha(request: Request):
+    """Garante linha da data (DD/MM/YYYY). IDEMPOTENTE — chamar 2x nao duplica.
+
+    Unico ponto com race real no modelo celula-a-celula, por isso o create-if-missing
+    e' atomico no servidor (sob o lock do temas). Body: {data:"DD/MM/YYYY"}
+    """
+    body = await request.json()
+    data = (body.get("data") or "").strip()
+    if not data:
+        raise HTTPException(400, "campo 'data' (DD/MM/YYYY) obrigatorio")
+    try:
+        return {"ok": True, **scriptwriter.ensure_linha_temas(data)}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        return {"ok": False, "erro": str(e)}
+
+
+@app.put("/api/temas/celula")
+async def temas_put_celula(request: Request):
+    """Escreve UMA celula de CONTEUDO, completa, com guard atomico.
+
+    Body: {row|data, col|pipeline_id|canal, campos:{tema,titulo,thumb,roteiro,...},
+           sobrescrever?:false}
+    - `data` cria a linha se faltar (idempotente); `row` usa o indice direto.
+    - `pipeline_id`/`canal` resolvem a coluna (nunca use indice cru se puder evitar).
+    - Guards (dentro do lock): celula publicada = imutavel · celula ocupada exige
+      sobrescrever=true · titulo <=100 CODEPOINTS.
+    - Campos de upload NAO passam aqui (tem o /api/upload/mark).
+    """
+    body = await request.json()
+    campos = body.get("campos") or {}
+    if not isinstance(campos, dict) or not campos:
+        raise HTTPException(400, "campo 'campos' (objeto) obrigatorio")
+
+    # --- resolver coluna ---
+    col = body.get("col")
+    if col is None:
+        d = scriptwriter.carregar_temas()
+        cols = d.get("colunas", []) if isinstance(d, dict) else []
+        pid, canal = body.get("pipeline_id"), (body.get("canal") or "").strip().lower()
+        cand = [i for i, c in enumerate(cols)
+                if (pid and (c or {}).get("pipeline_id") == pid)
+                or (canal and ((c or {}).get("nome") or "").strip().lower() == canal)]
+        if len(cand) != 1:
+            raise HTTPException(400, f"coluna nao resolvida ({len(cand)} candidatos) — "
+                                     "mande col, pipeline_id ou canal exato")
+        col = cand[0]
+    try:
+        col = int(col)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "col invalido")
+
+    # --- resolver/criar linha ---
+    row, linha_criada = body.get("row"), False
+    if row is None:
+        data = (body.get("data") or "").strip()
+        if not data:
+            raise HTTPException(400, "mande 'row' ou 'data' (DD/MM/YYYY)")
+        r = scriptwriter.ensure_linha_temas(data)
+        row, linha_criada = r["row"], r["criada"]
+    try:
+        row = int(row)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "row invalido")
+
+    key = f"{row}_{col}"
+    res = scriptwriter.put_celula_temas(key, campos, sobrescrever=bool(body.get("sobrescrever")))
+    if not res.get("ok"):
+        return {**res, "cell": key, "row": row, "col": col}
+
+    # --- re-GET validando (o contrato pede confirmacao pos-write) ---
+    conf = (scriptwriter.carregar_temas().get("celulas") or {}).get(key) or {}
+    tit = conf.get("titulo") or ""
+    return {"ok": True, "cell": key, "row": row, "col": col, "linha_criada": linha_criada,
+            "celula": conf,
+            "validacao": {"titulo_codepoints": len(tit), "titulo_ok": len(tit) <= 100,
+                          "confirmado": all(conf.get(k) == v for k, v in
+                                            res["celula"].items() if k in campos)}}
+
+
 @app.get("/api/upload/status")
 def upload_status(dias: int = 14, canal: str = ""):
     """Painel do upload: o que subiu, o que falta e o que deu problema.
@@ -2956,7 +3069,9 @@ async def niche_similares(request: Request):
         return niche_search.similares(url,
                                       n_buscas=int(body.get("n_buscas") or 3),
                                       min_subs=body.get("min_subs"),
-                                      max_subs=body.get("max_subs"))
+                                      max_subs=body.get("max_subs"),
+                                      idioma=body.get("idioma"),
+                                      max_dias_sem_postar=body.get("max_dias_sem_postar"))
     except Exception as e:
         return {"ok": False, "erro": str(e), "canais": []}
 

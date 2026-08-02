@@ -223,31 +223,135 @@ def patch_temas_celula(key: str, patch: dict) -> dict:
         cel.update(patch)
         cels[key] = cel
         # Write atomico (mesma logica do _salvar_json; lock JA segurado -> nao re-adquire).
-        if TEMAS_FILE.name in _BACKUP_ROTATIVO and TEMAS_FILE.exists():
-            try:
-                for i in range(4, 0, -1):
-                    src = TEMAS_FILE.with_name(TEMAS_FILE.name + f".bak{i}")
-                    dst = TEMAS_FILE.with_name(TEMAS_FILE.name + f".bak{i+1}")
-                    if src.exists():
-                        os.replace(str(src), str(dst))
-                shutil.copy2(str(TEMAS_FILE), str(TEMAS_FILE.with_name(TEMAS_FILE.name + ".bak1")))
-            except Exception as e:
-                print(f"[patch_temas_celula] WARN backup falhou: {e}")
-        tmp = TEMAS_FILE.with_name(TEMAS_FILE.name + f".tmp.{os.getpid()}.{threading.get_ident()}")
-        try:
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(d, f, ensure_ascii=False, indent=2)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(str(tmp), str(TEMAS_FILE))
-        except Exception:
-            try:
-                if tmp.exists():
-                    tmp.unlink()
-            except Exception:
-                pass
-            raise
+        _escrever_temas_sob_lock(d)
         return cel
+
+
+def _escrever_temas_sob_lock(d: dict):
+    """Backup rotativo + write atomico do temas.json. PRESSUPOE o lock JA segurado
+    (extraido do patch_temas_celula pra ser reusado pelas escritas celula-a-celula)."""
+    if TEMAS_FILE.name in _BACKUP_ROTATIVO and TEMAS_FILE.exists():
+        try:
+            for i in range(4, 0, -1):
+                src = TEMAS_FILE.with_name(TEMAS_FILE.name + f".bak{i}")
+                dst = TEMAS_FILE.with_name(TEMAS_FILE.name + f".bak{i+1}")
+                if src.exists():
+                    os.replace(str(src), str(dst))
+            shutil.copy2(str(TEMAS_FILE), str(TEMAS_FILE.with_name(TEMAS_FILE.name + ".bak1")))
+        except Exception as e:
+            print(f"[_escrever_temas_sob_lock] WARN backup falhou: {e}")
+    tmp = TEMAS_FILE.with_name(TEMAS_FILE.name + f".tmp.{os.getpid()}.{threading.get_ident()}")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(str(tmp), str(TEMAS_FILE))
+    except Exception:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except Exception:
+            pass
+        raise
+
+
+def ensure_linha_temas(data_str: str) -> dict:
+    """Garante que existe uma linha com essa data (DD/MM/YYYY). IDEMPOTENTE e atomico.
+
+    É o unico ponto com race real no modelo celula-a-celula (2 clientes criando a
+    mesma data em paralelo criariam linhas duplicadas) -> resolvido aqui, sob o lock.
+    Insere mantendo a ORDEM CRONOLOGICA. Retorna {row, criada, data}.
+    """
+    from datetime import datetime as _dt
+    lock = _get_save_lock(TEMAS_FILE)
+    with lock:
+        d = _carregar_json(TEMAS_FILE, {})
+        if not isinstance(d, dict):
+            d = {}
+        linhas = d.setdefault("linhas", [])
+        for i, L in enumerate(linhas):
+            if (L or {}).get("data") == data_str:
+                return {"row": i, "criada": False, "data": data_str}
+        try:
+            alvo = _dt.strptime(data_str, "%d/%m/%Y").date()
+        except Exception:
+            raise ValueError(f"data invalida (esperado DD/MM/YYYY): {data_str}")
+        pos = len(linhas)
+        for i, L in enumerate(linhas):
+            try:
+                if _dt.strptime((L or {}).get("data", ""), "%d/%m/%Y").date() > alvo:
+                    pos = i
+                    break
+            except Exception:
+                continue
+        linhas.insert(pos, {"data": data_str})
+        # celulas sao chaveadas por "{row}_{col}" -> inserir linha SHIFTA todas abaixo
+        cels = d.get("celulas")
+        if isinstance(cels, dict) and pos < len(linhas) - 1:
+            novo = {}
+            for k, v in cels.items():
+                try:
+                    r, c = k.split("_")
+                    r = int(r)
+                except (ValueError, AttributeError):
+                    novo[k] = v
+                    continue
+                novo[f"{r + 1 if r >= pos else r}_{c}"] = v
+            d["celulas"] = novo
+        _escrever_temas_sob_lock(d)
+        return {"row": pos, "criada": True, "data": data_str}
+
+
+# Campos de CONTEUDO que a criacao de canal (skill arquitetar-canal) escreve.
+# Campos de upload NAO entram aqui — esses tem o /api/upload/mark proprio.
+CAMPOS_CONTEUDO = ("tema", "titulo", "thumb", "roteiro", "pipeline_id",
+                   "thumb_ia_prompt", "descricao", "tags")
+
+
+def put_celula_temas(key: str, campos: dict, sobrescrever: bool = False) -> dict:
+    """Escreve UMA celula COMPLETA de conteudo, com guard, tudo sob o MESMO lock.
+
+    O guard precisa rodar DENTRO do lock: checar fora e gravar depois abriria uma
+    janela (TOCTOU) em que outro writer publica a celula no meio.
+
+    Guards (na ordem):
+      1. celula PUBLICADA (tem youtube_video_id) -> ABORTA sempre (regra do Piter:
+         video postado nao tem o grid alterado).
+      2. celula OCUPADA (tem titulo ou roteiro) -> ABORTA, a menos que sobrescrever=True.
+      3. titulo > 100 CODEPOINTS -> ABORTA (limite do YouTube; len() do Python, nunca no olho).
+
+    Retorna {ok, celula} ou {ok:False, erro, motivo}.
+    """
+    campos = {k: v for k, v in (campos or {}).items() if k in CAMPOS_CONTEUDO}
+    if not campos:
+        return {"ok": False, "erro": "Nenhum campo de conteudo valido", "motivo": "vazio"}
+
+    tit = campos.get("titulo")
+    if tit and len(str(tit)) > 100:
+        return {"ok": False, "motivo": "titulo_longo",
+                "erro": f"titulo tem {len(str(tit))} codepoints (limite 100)"}
+
+    lock = _get_save_lock(TEMAS_FILE)
+    with lock:
+        d = _carregar_json(TEMAS_FILE, {})
+        if not isinstance(d, dict):
+            d = {}
+        cels = d.setdefault("celulas", {})
+        atual = cels.get(key) if isinstance(cels.get(key), dict) else {}
+
+        if atual.get("youtube_video_id"):
+            return {"ok": False, "motivo": "publicada", "celula": atual,
+                    "erro": f"celula {key} ja tem video publicado ({atual['youtube_video_id']}) — imutavel"}
+        if not sobrescrever and (atual.get("titulo") or atual.get("roteiro")):
+            return {"ok": False, "motivo": "ocupada", "celula": atual,
+                    "erro": f"celula {key} ja tem conteudo — use sobrescrever=true se for intencional"}
+
+        nova = dict(atual)
+        nova.update(campos)
+        cels[key] = nova
+        _escrever_temas_sob_lock(d)
+        return {"ok": True, "celula": nova, "criada": not atual}
 
 
 # === CREDENCIAIS ===
