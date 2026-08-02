@@ -11,9 +11,24 @@ const TABS = [
 const TIERS = ['S', 'A', 'B']
 const fmt = (n) => (n == null ? '—' : Intl.NumberFormat('pt-BR', { notation: 'compact' }).format(n))
 
+// dias desde o último vídeo -> rótulo curto + semáforo de atividade
+function atividade(d) {
+  if (d == null) return { txt: '—', cls: '' }
+  const txt = d === 0 ? 'hoje' : d === 1 ? 'ontem' : d < 30 ? `${d}d`
+    : d < 365 ? `${Math.round(d / 30)} mês${Math.round(d / 30) > 1 ? 'es' : ''}` : `${(d / 365).toFixed(1)} anos`
+  return { txt, cls: d <= 30 ? 'viva' : d <= 90 ? 'morna' : 'fria' }
+}
+
 export function NicheSpy() {
   const [tab, setTab] = useState('salvos')
   const [status, setStatus] = useState(null)
+  const [refSimilar, setRefSimilar] = useState(null)   // {url, n} — n força re-disparo no mesmo canal
+
+  // "Encontrar Similares" nos Canais Salvos: pula pra aba e já dispara a busca
+  function irParaSimilares(url) {
+    setRefSimilar((r) => ({ url, n: (r?.n || 0) + 1 }))
+    setTab('similar')
+  }
 
   useEffect(() => {
     api.get('/api/niche-spy/status').then(setStatus).catch(() => setStatus({ ok: false }))
@@ -39,15 +54,15 @@ export function NicheSpy() {
         ))}
       </div>
 
-      {tab === 'salvos' && <CanaisSalvos />}
+      {tab === 'salvos' && <CanaisSalvos onSimilares={irParaSimilares} semKey={semKey} />}
       {tab === 'buscar' && <BuscarNichos semKey={semKey} />}
-      {tab === 'similar' && <CanaisSimilares semKey={semKey} />}
+      {tab === 'similar' && <CanaisSimilares semKey={semKey} refInicial={refSimilar} />}
     </div>
   )
 }
 
 /* ---------------- Sub-aba 1: Canais Salvos (o "spy") ---------------- */
-function CanaisSalvos() {
+function CanaisSalvos({ onSimilares, semKey }) {
   const [canais, setCanais] = useState([])
   const [carregando, setCarregando] = useState(true)
   const [erro, setErro] = useState('')
@@ -145,7 +160,8 @@ function CanaisSalvos() {
                     {c.handle && <span className="ns-handle">{c.handle}</span>}
                   </div>
                 </td>
-                <td>{c.nicho || <span className="ns-dim">—</span>}</td>
+                <td><CampoEdit valor={c.nicho} placeholder="nicho…"
+                               onSalvar={(v) => patch(c.id, { nicho: v || null })} /></td>
                 <td>
                   <select className={`ns-tier t${c.tier || ''}`} value={c.tier || ''}
                           onChange={(e) => patch(c.id, { tier: e.target.value })}>
@@ -156,10 +172,16 @@ function CanaisSalvos() {
                 <td>{fmt(c.subs)}</td>
                 <td>{fmt(c.views_total)}</td>
                 <td>{fmt(c.videos_count)}</td>
-                <td className="ns-notas">{c.notas || <span className="ns-dim">—</span>}</td>
+                <td className="ns-notas"><CampoEdit valor={c.notas} placeholder="notas…"
+                                                   onSalvar={(v) => patch(c.id, { notas: v || null })} /></td>
                 <td className="ns-acoes">
                   <a className="link-pill" href={c.url || `https://youtube.com/channel/${c.channel_id}`}
                      target="_blank" rel="noopener">▶ Abrir</a>
+                  <button className="ns-btn similar" disabled={semKey}
+                          title={semKey ? 'Precisa da YouTube API key' : 'Achar canais parecidos com este'}
+                          onClick={() => onSimilares?.(c.url || `https://youtube.com/channel/${c.channel_id}`)}>
+                    🧬 Similares
+                  </button>
                   <button className="ns-btn danger" onClick={() => remover(c.id, c.titulo)}>×</button>
                 </td>
               </tr>
@@ -171,9 +193,52 @@ function CanaisSalvos() {
   )
 }
 
+/* -------- Campo editável inline (salva no blur / Enter; Esc cancela) -------- */
+function CampoEdit({ valor, placeholder, onSalvar }) {
+  const [v, setV] = useState(valor || '')
+  useEffect(() => { setV(valor || '') }, [valor])
+  const confirmar = () => { if ((v || '') !== (valor || '')) onSalvar(v.trim()) }
+  return (
+    <input className="ns-edit" value={v} placeholder={placeholder}
+           onChange={(e) => setV(e.target.value)}
+           onBlur={confirmar}
+           onKeyDown={(e) => {
+             if (e.key === 'Enter') e.currentTarget.blur()
+             if (e.key === 'Escape') { setV(valor || ''); e.currentTarget.blur() }
+           }} />
+  )
+}
+
 /* -------- Tabela de resultados (compartilhada pelas abas Buscar e Similares) -------- */
 function Resultados({ canais, mostrarSimilaridade }) {
   const [salvos, setSalvos] = useState({})   // channel_id -> 'salvando' | 'ok' | 'erro'
+  const [sort, setSort] = useState(null)     // {campo, dir} — null = ordem que veio (relevância)
+
+  // clique no cabeçalho: 1º = desc (maior primeiro), 2º = asc, 3º = volta à relevância
+  function ordenarPor(campo) {
+    setSort((s) => (s?.campo !== campo ? { campo, dir: 'desc' }
+      : s.dir === 'desc' ? { campo, dir: 'asc' } : null))
+  }
+
+  const lista = (() => {
+    if (!sort) return canais
+    const txt = sort.campo === 'titulo'
+    const arr = [...canais].sort((a, b) => {
+      const x = a[sort.campo], y = b[sort.campo]
+      if (x == null && y == null) return 0
+      if (x == null) return 1          // sem valor sempre no fim
+      if (y == null) return -1
+      return txt ? String(x).localeCompare(String(y)) : x - y
+    })
+    return sort.dir === 'desc' ? arr.reverse() : arr
+  })()
+
+  const Th = ({ campo, children, ...p }) => (
+    <th {...p} className={`ns-th ${sort?.campo === campo ? 'ord' : ''}`} onClick={() => ordenarPor(campo)}
+        title="Clique para ordenar">
+      {children}<span className="ns-seta">{sort?.campo === campo ? (sort.dir === 'desc' ? '▼' : '▲') : '↕'}</span>
+    </th>
+  )
 
   async function salvar(c, tier) {
     setSalvos((s) => ({ ...s, [c.channel_id]: 'salvando' }))
@@ -193,13 +258,20 @@ function Resultados({ canais, mostrarSimilaridade }) {
     <table className="ns-table ns-res">
       <thead>
         <tr>
-          <th></th><th>Canal</th>
-          {mostrarSimilaridade && <th>Sim.</th>}
-          <th>Inscritos</th><th>Views/vídeo</th><th>V/sub</th><th>Vídeos</th><th>Salvar como</th>
+          <th></th>
+          <Th campo="titulo">Canal</Th>
+          {mostrarSimilaridade && <Th campo="similaridade">Sim.</Th>}
+          <Th campo="subs">Inscritos</Th>
+          <Th campo="views_por_video">Views/vídeo</Th>
+          <Th campo="views_por_sub">V/sub</Th>
+          <Th campo="videos_count">Vídeos</Th>
+          <Th campo="dur_mediana">Duração</Th>
+          <Th campo="dias_sem_postar">Último vídeo</Th>
+          <th>Salvar como</th>
         </tr>
       </thead>
       <tbody>
-        {canais.map((c) => (
+        {lista.map((c) => (
           <tr key={c.channel_id}>
             <td>{c.thumb_url && <img className="ns-thumb" src={c.thumb_url} alt="" />}</td>
             <td>
@@ -216,6 +288,15 @@ function Resultados({ canais, mostrarSimilaridade }) {
             <td>{fmt(c.views_por_video)}</td>
             <td title="views por inscrito — acima de 100 costuma indicar alcance além da base">{c.views_por_sub ?? '—'}</td>
             <td>{fmt(c.videos_count)}</td>
+            <td title="mediana dos últimos vídeos">
+              {c.dur_mediana == null ? <span className="ns-dim">—</span>
+                : <span className={`ns-dur ${c.eh_shorts ? 'short' : ''}`}>
+                    {c.eh_shorts ? '📱 ' : ''}{Math.round(c.dur_mediana / 60)}min
+                  </span>}
+            </td>
+            <td title={c.ultimo_video ? new Date(c.ultimo_video).toLocaleDateString('pt-BR') : 'sem dado'}>
+              <span className={`ns-ativ ${atividade(c.dias_sem_postar).cls}`}>{atividade(c.dias_sem_postar).txt}</span>
+            </td>
             <td>
               {salvos[c.channel_id] === 'ok'
                 ? <span className="ns-ok">✓ salvo</span>
@@ -332,21 +413,43 @@ function BuscarNichos({ semKey }) {
 }
 
 /* ---------------- Sub-aba 3: Canais Similares (finder por referência) ---------------- */
-function CanaisSimilares({ semKey }) {
+function CanaisSimilares({ semKey, refInicial }) {
   const [url, setUrl] = useState('')
+  const [idioma, setIdioma] = useState('en')   // idioma da BUSCA (≠ idioma do canal-ref)
   const [nBuscas, setNBuscas] = useState(3)
+  const [minSubs, setMinSubs] = useState('')
+  const [maxSubs, setMaxSubs] = useState('')
+  const [ativo, setAtivo] = useState('90')     // dias desde o último vídeo
+  const [formato, setFormato] = useState('medium')   // exclui Shorts por padrão
+  const [pronto, setPronto] = useState(false)  // veio dos Salvos, aguardando o operador disparar
   const [res, setRes] = useState(null)
   const [carregando, setCarregando] = useState(false)
   const [erro, setErro] = useState('')
 
-  async function buscar() {
-    if (!url.trim()) { setErro('Cole o link do canal de referência'); return }
+  async function buscar(alvo) {
+    const u = (typeof alvo === 'string' ? alvo : url).trim()
+    if (!u) { setErro('Cole o link do canal de referência'); return }
     setCarregando(true); setErro(''); setRes(null)
     try {
-      const r = await api.post('/api/niche-spy/similar', { url: url.trim(), n_buscas: Number(nBuscas) })
+      const r = await api.post('/api/niche-spy/similar', {
+        url: u, n_buscas: Number(nBuscas), idioma,
+        min_subs: minSubs || null, max_subs: maxSubs || null,
+        max_dias_sem_postar: ativo || null, formato,
+      })
+      setPronto(false)
       if (!r.ok) setErro(r.erro || 'Falha na busca'); else setRes(r)
     } catch (e) { setErro(e.message) } finally { setCarregando(false) }
   }
+
+  // veio da aba Canais Salvos pelo botão "Similares": SÓ preenche — quem dispara é o
+  // operador, depois de ajustar inscritos/atividade (busca custa cota, não pode sair sozinha)
+  useEffect(() => {
+    if (!refInicial?.url) return
+    setUrl(refInicial.url)
+    setRes(null); setErro('')
+    setPronto(true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refInicial?.n])
 
   return (
     <>
@@ -356,16 +459,46 @@ function CanaisSimilares({ semKey }) {
       <div className="ns-form">
         <input className="ns-input ns-q" placeholder="Canal de referência (link ou @handle)"
                value={url} onChange={(e) => setUrl(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && buscar()} />
-        <select className="ns-input" value={nBuscas} onChange={(e) => setNBuscas(e.target.value)}
-                title="Cada busca custa 100 unidades de quota">
-          <option value="2">2 buscas (200 un.)</option>
-          <option value="3">3 buscas (300 un.)</option>
-          <option value="4">4 buscas (400 un.)</option>
+        <select className="ns-input" value={idioma} onChange={(e) => setIdioma(e.target.value)}
+                title="Idioma em que a BUSCA será feita — independe do idioma do canal de referência">
+          <option value="en">🇺🇸 Buscar em Inglês</option>
+          <option value="es">🇪🇸 Buscar em Espanhol</option>
+          <option value="pt">🇧🇷 Buscar em Português</option>
+          <option value="">Mesmo idioma do canal</option>
         </select>
-        <button className="btn-primary" onClick={buscar} disabled={carregando || semKey}>
+        <input className="ns-input ns-num" type="number" placeholder="Inscritos mín."
+               value={minSubs} onChange={(e) => setMinSubs(e.target.value)} />
+        <input className="ns-input ns-num" type="number" placeholder="Inscritos máx."
+               value={maxSubs} onChange={(e) => setMaxSubs(e.target.value)} />
+        <select className="ns-input" value={ativo} onChange={(e) => setAtivo(e.target.value)}
+                title="Descarta canal parado — filtra pela data do último vídeo publicado">
+          <option value="30">🟢 Postou nos últimos 30d</option>
+          <option value="90">🟢 Postou nos últimos 90d</option>
+          <option value="180">Postou nos últimos 6 meses</option>
+          <option value="">Qualquer (inclui parados)</option>
+        </select>
+        <select className="ns-input" value={formato} onChange={(e) => setFormato(e.target.value)}
+                title="Shorts poluem a busca — 'longo' filtra na origem E descarta canal cuja mediana é short">
+          <option value="medium">🎬 Vídeo longo (4–20min)</option>
+          <option value="long">🎬 Muito longo (20min+)</option>
+          <option value="short">📱 Só Shorts (&lt;4min)</option>
+          <option value="any">Qualquer formato</option>
+        </select>
+        <select className="ns-input" value={nBuscas} onChange={(e) => setNBuscas(e.target.value)}
+                title="Quantas queries diferentes o LLM cria pra caçar os pares. Cada uma = 100 unidades de cota">
+          <option value="2">2 queries (200 un.)</option>
+          <option value="3">3 queries (300 un.)</option>
+          <option value="4">4 queries (400 un.)</option>
+        </select>
+        <button className="btn-primary" onClick={() => buscar()} disabled={carregando || semKey}>
           {carregando ? 'Analisando…' : '🧬 Achar similares'}
         </button>
       </div>
+      {pronto && !carregando && (
+        <div className="ns-pronto">
+          ✅ Canal carregado. <strong>Ajuste os filtros acima</strong> e clique em <strong>🧬 Achar similares</strong>.
+        </div>
+      )}
       {carregando && <p className="ns-dim">Lendo os vídeos do canal, extraindo os temas e cruzando com a busca — leva ~30s.</p>}
       {erro && <div className="ns-erro">{erro}</div>}
 

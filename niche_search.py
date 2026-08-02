@@ -58,14 +58,16 @@ def _yt(endpoint: str, params: dict, custo: int):
 
 
 def _metricas(channel_ids, chunk=50):
-    """channels.list em LOTE (1 unidade por 50 ids). Retorna {id: {...}}."""
+    """channels.list em LOTE (1 unidade por 50 ids). Retorna {id: {...}}.
+    Pede contentDetails junto (mesma unidade) pra ter a uploads playlist -> ultimo video."""
     out = {}
     ids = [c for c in dict.fromkeys(channel_ids) if c]
     for i in range(0, len(ids), chunk):
-        d = _yt("channels", {"part": "snippet,statistics",
+        d = _yt("channels", {"part": "snippet,statistics,contentDetails",
                              "id": ",".join(ids[i:i + chunk]), "maxResults": str(chunk)}, 1)
         for it in d.get("items", []):
             sn, st = it.get("snippet", {}), it.get("statistics", {})
+            upl = ((it.get("contentDetails") or {}).get("relatedPlaylists") or {}).get("uploads")
             th = sn.get("thumbnails") or {}
             out[it["id"]] = {
                 "channel_id": it["id"],
@@ -75,12 +77,82 @@ def _metricas(channel_ids, chunk=50):
                 "thumb_url": (th.get("medium") or th.get("default") or {}).get("url"),
                 "pais": sn.get("country"),
                 "criado_em_yt": sn.get("publishedAt"),
+                "_uploads": upl,
                 "url": f"https://www.youtube.com/channel/{it['id']}",
                 "subs": int(st["subscriberCount"]) if st.get("subscriberCount") else None,
                 "views_total": int(st["viewCount"]) if st.get("viewCount") else None,
                 "videos_count": int(st["videoCount"]) if st.get("videoCount") else None,
             }
     return out
+
+
+SHORTS_MAX_SEG = 240      # YouTube trata <=3min como Short; 4min dá margem
+
+
+def _ultimos_do_canal(c, n=5):
+    """Data + ids dos N vídeos mais recentes — 1 unidade (playlistItems na uploads).
+    Jeito barato de medir ATIVIDADE e FORMATO (search.list custaria 100)."""
+    pl = c.get("_uploads")
+    if not pl:
+        return None, []
+    try:
+        d = _yt("playlistItems", {"part": "snippet", "playlistId": pl, "maxResults": str(n)}, 1)
+        itens = d.get("items") or []
+        if not itens:
+            return None, []
+        data = (itens[0].get("snippet") or {}).get("publishedAt")
+        ids = [(i.get("snippet") or {}).get("resourceId", {}).get("videoId") for i in itens]
+        return data, [v for v in ids if v]
+    except Exception:
+        return None, []
+
+
+def _iso_para_seg(iso):
+    """PT1H2M3S -> segundos."""
+    m = re.match(r"P(?:(\d+)D)?T?(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", iso or "")
+    if not m:
+        return None
+    d, h, mi, s = (int(x) if x else 0 for x in m.groups())
+    return d * 86400 + h * 3600 + mi * 60 + s
+
+
+def _duracoes(video_ids, chunk=50):
+    """videos.list em LOTE: 1 unidade por 50 ids. Retorna {video_id: segundos}."""
+    out = {}
+    ids = [v for v in dict.fromkeys(video_ids) if v]
+    for i in range(0, len(ids), chunk):
+        try:
+            d = _yt("videos", {"part": "contentDetails", "id": ",".join(ids[i:i + chunk])}, 1)
+            for it in d.get("items", []):
+                out[it["id"]] = _iso_para_seg((it.get("contentDetails") or {}).get("duration"))
+        except Exception:
+            pass
+    return out
+
+
+def _marcar_atividade(canais, workers=8):
+    """Preenche ultimo_video, dias_sem_postar, dur_mediana e eh_shorts em cada canal.
+    Custo: 1 un./canal (playlistItems) + ~1 un. total (videos.list em lote)."""
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        res = list(ex.map(_ultimos_do_canal, canais))
+
+    durs = _duracoes([v for _, ids in res for v in ids])   # 1 chamada pra todos
+    agora = datetime.now(timezone.utc)
+    for c, (dt, ids) in zip(canais, res):
+        c.pop("_uploads", None)
+        c["ultimo_video"] = dt
+        c["dias_sem_postar"] = None
+        if dt:
+            try:
+                c["dias_sem_postar"] = (agora - datetime.fromisoformat(dt.replace("Z", "+00:00"))).days
+            except Exception:
+                pass
+        # formato: mediana da duração dos últimos vídeos -> canal de Shorts ou de vídeo longo
+        vals = sorted(s for s in (durs.get(v) for v in ids) if s)
+        c["dur_mediana"] = vals[len(vals) // 2] if vals else None
+        c["eh_shorts"] = (c["dur_mediana"] is not None and c["dur_mediana"] <= SHORTS_MAX_SEG)
+    return canais
 
 
 def _derivados(c):
@@ -148,6 +220,8 @@ def buscar(criterios: dict, forcar=False):
     params = {"part": "snippet", "type": "video", "q": q,
               "maxResults": str(min(int(c.get("max_resultados", 50)), 50)),
               "order": c.get("order", "viewCount")}
+    if c.get("formato") in ("medium", "long", "short"):
+        params["videoDuration"] = c["formato"]      # medium=4-20min, long=20min+ -> exclui Shorts
     if c.get("idioma"):
         params["relevanceLanguage"] = c["idioma"]
     if c.get("pais"):
@@ -184,6 +258,13 @@ def buscar(criterios: dict, forcar=False):
         canais.append(m)
 
     canais.sort(key=lambda x: (x.get("hits", 0), x.get("views_por_video") or 0), reverse=True)
+    canais = canais[:40]
+    _marcar_atividade(canais)                       # ultimo video + formato
+    if c.get("max_dias_sem_postar"):                # so canais ATIVOS
+        lim = int(c["max_dias_sem_postar"])
+        canais = [x for x in canais if x.get("dias_sem_postar") is not None and x["dias_sem_postar"] <= lim]
+    if c.get("formato") in ("medium", "long"):      # canal cuja MEDIANA é short -> fora
+        canais = [x for x in canais if not x.get("eh_shorts")]
     res = {"canais": canais, "total_bruto": len(metr), "criterios": c}
     _cache_set(chave, c, res)
     return {"ok": True, "cache": False, **res}
@@ -238,7 +319,11 @@ def videos_do_canal(channel_id, n=25):
              "publicado": (i.get("snippet") or {}).get("publishedAt")} for i in d2.get("items", [])]
 
 
-def similares(url_ou_handle: str, n_buscas=3, min_subs=None, max_subs=None):
+IDIOMAS = {"en": "English", "es": "Spanish", "pt": "Portuguese", "de": "German", "fr": "French"}
+
+
+def similares(url_ou_handle: str, n_buscas=3, min_subs=None, max_subs=None, idioma=None,
+              max_dias_sem_postar=None, formato="medium"):
     """Dado um canal de referencia, acha canais no mesmo estilo.
 
     O YouTube NAO tem endpoint de 'canais relacionados' (relatedToVideoId foi
@@ -260,11 +345,21 @@ def similares(url_ou_handle: str, n_buscas=3, min_subs=None, max_subs=None):
     if not titulos:
         return {"ok": False, "erro": "Canal sem videos publicos para analisar"}
 
+    # idioma da BUSCA (independente do idioma do canal-ref): buscar em EN/ES abre um
+    # mercado muito maior que PT-BR, mesmo modelando um canal brasileiro.
+    lang = (idioma or "").lower().strip() or None
+    if lang:
+        instr_idioma = (f"IMPORTANTE: escreva as queries em {IDIOMAS.get(lang, lang.upper())}, "
+                        "NAO no idioma dos titulos — traduza os conceitos do nicho para esse idioma "
+                        "usando os termos que o publico daquele idioma REALMENTE busca (nao traducao literal).")
+    else:
+        instr_idioma = "Use o mesmo idioma dos titulos."
+
     p = ("Analise este canal do YouTube e os titulos dos videos recentes dele. "
          f"CANAL: {ref_meta.get('titulo')}\nDESCRICAO: {(ref_meta.get('descricao') or '')[:400]}\n"
          "TITULOS:\n- " + "\n- ".join(titulos) +
          f"\n\nRetorne APENAS um array JSON com {n_buscas} strings: as {n_buscas} MELHORES queries de busca "
-         "do YouTube para encontrar OUTROS canais do mesmo nicho/estilo. Use o mesmo idioma dos titulos. "
+         f"do YouTube para encontrar OUTROS canais do mesmo nicho/estilo. {instr_idioma} "
          "Queries especificas do nicho (nao genericas). Exemplo: [\"query 1\",\"query 2\"]")
     queries = _json_do_texto(_gemini(p)) or []
     queries = [q for q in queries if isinstance(q, str)][:n_buscas]
@@ -273,9 +368,13 @@ def similares(url_ou_handle: str, n_buscas=3, min_subs=None, max_subs=None):
 
     achados, exemplos = {}, {}
     for q in queries:
+        params = {"part": "snippet", "type": "video", "q": q, "maxResults": "50", "order": "viewCount"}
+        if lang:
+            params["relevanceLanguage"] = lang     # prioriza resultados NAQUELE idioma
+        if formato in ("medium", "long", "short"):
+            params["videoDuration"] = formato      # exclui Shorts ja na origem
         try:
-            d = _yt("search", {"part": "snippet", "type": "video", "q": q,
-                               "maxResults": "50", "order": "viewCount"}, 100)
+            d = _yt("search", params, 100)
         except Exception:
             continue
         for it in d.get("items", []):
@@ -303,6 +402,16 @@ def similares(url_ou_handle: str, n_buscas=3, min_subs=None, max_subs=None):
         cands.append(m)
     cands.sort(key=lambda x: -x.get("hits", 0))
     cands = cands[:20]
+    _marcar_atividade(cands)                        # ultimo video + formato
+    if max_dias_sem_postar:                         # so canais ATIVOS
+        lim = int(max_dias_sem_postar)
+        cands = [x for x in cands
+                 if x.get("dias_sem_postar") is not None and x["dias_sem_postar"] <= lim]
+    if formato in ("medium", "long"):               # canal cuja MEDIANA é short -> fora
+        cands = [x for x in cands if not x.get("eh_shorts")]
+    if not cands:
+        return {"ok": False, "erro": "Nenhum canal passou nos filtros — afrouxe atividade/formato/inscritos",
+                "queries": queries, "canais": []}
 
     # pontuacao de semelhanca pelo LLM
     lista = "\n".join(f'{i}. {c["titulo"]} ({c.get("subs") or 0} subs) — ex: {"; ".join(c["titulos_exemplo"][:2])}'
@@ -319,4 +428,5 @@ def similares(url_ou_handle: str, n_buscas=3, min_subs=None, max_subs=None):
         c["motivo"] = n.get("motivo")
     cands.sort(key=lambda x: (x.get("similaridade") or 0, x.get("hits", 0)), reverse=True)
 
-    return {"ok": True, "referencia": _derivados(ref_meta), "queries": queries, "canais": cands}
+    return {"ok": True, "referencia": _derivados(ref_meta), "queries": queries,
+            "idioma_busca": lang, "canais": cands}

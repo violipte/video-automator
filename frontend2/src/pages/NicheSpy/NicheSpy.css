@@ -123,3 +123,37 @@
 .ns-tierbtn.tS:hover { background: #3a2a12; border-color: #d9a441; color: #ffd479; }
 .ns-tierbtn.tA:hover { background: #14304a; border-color: #4a90d9; }
 .ns-tierbtn.tB:hover { background: #22303a; }
+
+/* ---- cabecalho ordenavel ---- */
+.ns-th { cursor: pointer; user-select: none; white-space: nowrap; }
+.ns-th:hover { color: #cfe3ff; }
+.ns-th.ord { color: #6ee7a8; }
+.ns-seta { margin-left: 5px; font-size: 9px; opacity: .35; }
+.ns-th.ord .ns-seta { opacity: 1; }
+.ns-th:hover .ns-seta { opacity: .7; }
+
+/* ---- botao Similares na tabela de salvos ---- */
+.ns-btn.similar { background: #14304a; border-color: #2a4a6a; color: #9fc0ff; white-space: nowrap; }
+.ns-btn.similar:hover:not(:disabled) { background: #1c4166; border-color: #4a90d9; color: #cfe3ff; }
+.ns-btn.similar:disabled { opacity: .35; cursor: not-allowed; }
+
+/* ---- atividade do canal (ultimo video) ---- */
+.ns-num { max-width: 130px; }
+.ns-ativ { display: inline-block; padding: 2px 7px; border-radius: 10px; font-size: 11px; font-weight: 600;
+           background: #232b36; color: #8a97a6; white-space: nowrap; }
+.ns-ativ.viva  { background: #1e3a2a; color: #6ee7a8; }   /* ate 30d — canal vivo */
+.ns-ativ.morna { background: #3a3316; color: #e5c76b; }   /* 31-90d */
+.ns-ativ.fria  { background: #3a1e1e; color: #ff9b9b; }   /* +90d — parado */
+
+/* ---- campo editavel inline (nicho/notas) ---- */
+.ns-edit { width: 100%; min-width: 90px; background: transparent; border: 1px solid transparent;
+           border-radius: 5px; padding: 4px 6px; color: #cfe3ff; font: inherit; font-size: 12px; }
+.ns-edit::placeholder { color: #4a5666; font-style: italic; }
+.ns-edit:hover { border-color: #2a3444; background: #1a212b; }
+.ns-edit:focus { outline: none; border-color: #4a90d9; background: #141a22; }
+
+/* ---- formato / duracao ---- */
+.ns-dur { font-size: 12px; color: #9fb2cc; white-space: nowrap; }
+.ns-dur.short { color: #e5c76b; }
+.ns-pronto { background: #14304a; border: 1px solid #2a4a6a; color: #cfe3ff;
+             padding: 9px 12px; border-radius: 8px; margin-bottom: 12px; font-size: 13px; }
