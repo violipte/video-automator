@@ -35,6 +35,10 @@ except Exception as _e_thumb_import:
     lib_thumbnail = None
     print(f"[orchestrator] lib_thumbnail nao carregado: {_e_thumb_import}")
 
+# Geracao automatica de thumbnail DESLIGADA (ai33.pro /v1i dava 403/prompt>4000
+# e as thumbs nao eram usadas). Flip para True se um dia quiser reativar.
+THUMBNAIL_ENABLED = False
+
 # Imports GPU — so necessarios em modo local (render_queue.REMOTE_MODE=False)
 if not render_queue.REMOTE_MODE:
     import transcriber
@@ -373,7 +377,7 @@ def _renderizar_canal(i, job, narr_path, data_formatada, data_ymd, data_pasta):
                     _salvar_temas(temas_data)
 
                 # === Thumbnail generation (best-effort, nao bloqueia render OK) ===
-                if lib_thumbnail and cel_done:
+                if THUMBNAIL_ENABLED and lib_thumbnail and cel_done:
                     try:
                         thumb_pasta = EXPORT_BASE / data_pasta / "Thumbs"
                         thumb_pasta.mkdir(parents=True, exist_ok=True)
@@ -473,6 +477,9 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
         if ci >= len(colunas):
             continue
         col = colunas[ci]
+        # Pula colunas marcadas como ocultas/inativas (ex: ENS desligado em 06/2026)
+        if col.get("oculta") or col.get("ativo") is False:
+            continue
         key = f"{data_idx}_{ci}"
         cel = celulas.get(key, {})
         if not cel.get("tema"):
@@ -680,7 +687,7 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
                         _salvar_temas(temas_data_local)
 
                     # Thumbnail no fluxo remoto tambem (best-effort)
-                    if lib_thumbnail and cel_done_remoto:
+                    if THUMBNAIL_ENABLED and lib_thumbnail and cel_done_remoto:
                         try:
                             EXPORT_BASE_T = _export_base()
                             thumb_pasta_r = EXPORT_BASE_T / data_pasta / "Thumbs"
@@ -936,7 +943,13 @@ def produzir_data_completa(data_idx: int, temas_data: dict = None, ordem_colunas
                         # RETRY: ate 2 tentativas Chatterbox antes de cair pro Inworld.
                         # Resume aproveita chunks ja gerados na 2a tentativa.
                         MAX_CB_RETRIES = 2
-                        TIMEOUT_NARR = 90 * 60  # timeout queue 90min cada
+                        # Narracao tipica leva 5-11min. 90min era absurdo: travamento
+                        # com heartbeat falso (Chatterbox preso em loop interno que mantem
+                        # o STALL watchdog de 12min enganado) deixava o orchestrator pendurado
+                        # 1h30 antes de cair pro Inworld. Reduzido pra 22min (3x duracao max
+                        # observada) — destrava rapido e cai pro fallback sem o operador
+                        # ter que matar processo na mao.
+                        TIMEOUT_NARR = 22 * 60  # timeout queue 22min cada
                         for _cb_attempt in range(MAX_CB_RETRIES):
                             production_log.atualizar_canal(i, etapa="narracao",
                                 etapa_detalhe=f"Chatterbox{f' (retry {_cb_attempt})' if _cb_attempt else ''}...",
@@ -1379,14 +1392,16 @@ def _data_teve_erro() -> bool:
         return False
 
 
-def _produzir_loop(data_idx_inicio: int, ordem_colunas: list = None):
+def _produzir_loop(data_idx_inicio: int, ordem_colunas: list = None, data_idx_fim: int = None):
     """Produz em loop: completa uma data, faz repass IN-PLACE dela mesma se houver erros,
     e SO ENTAO avanca pra proxima.
 
+    data_idx_fim (opcional): se setado, para AUTOMATICAMENTE depois que essa data fechar.
+    Loop natural respeita data_idx_fim como ultimo indice INCLUSIVO. Quando avancar pra
+    data_idx_fim+1, encerra sozinho. Substitui gatilhos externos de stop por data alvo.
+
     Cada data eh processada uma primeira vez; se deixar canais em 'erro', tenta de novo
-    ate REPASS_MAX vezes adicionais ANTES de avancar pra proxima data. Como o orchestrator
-    pula canais com MP4/MP3/.txt ja existentes, apenas os canais com erro sao re-tentados,
-    e o forced fallback do scriptwriter cuida de pular o provider que falhou.
+    ate REPASS_MAX vezes adicionais ANTES de avancar pra proxima data.
     """
     global estado
     temas_data = _carregar_temas()
@@ -1395,16 +1410,23 @@ def _produzir_loop(data_idx_inicio: int, ordem_colunas: list = None):
     celulas = temas_data.get("celulas", {})
     total_datas = len(linhas)
 
+    # data_idx_fim inclusivo. Se None ou alem do grid, usa fim natural.
+    if data_idx_fim is None or data_idx_fim >= total_datas:
+        data_idx_limite = total_datas  # exclusivo do range
+    else:
+        data_idx_limite = data_idx_fim + 1  # inclusivo
+
     estado["loop"] = True
     estado["loop_data_atual"] = data_idx_inicio
-    estado["loop_total"] = total_datas - data_idx_inicio
+    estado["loop_total"] = data_idx_limite - data_idx_inicio
+    estado["data_idx_fim"] = data_idx_fim  # exposto via /health pra observabilidade
 
     # Lazy start: pods sobem soh quando primeiro render entrar na fila
     # via _iniciar_pods_se_necessario() dentro de _enfileirar_render.
     # Removido em 2026-05-13: bloco antigo que subia 3 pods + sleep(180)
     # bloqueava o loop por 3min mesmo com worker local pollando.
 
-    for data_idx in range(data_idx_inicio, total_datas):
+    for data_idx in range(data_idx_inicio, data_idx_limite):
         if estado["cancelado"]:
             production_log.adicionar_log(f"LOOP: Cancelado pelo usuario na data {data_idx + 1}/{total_datas}")
             break
@@ -1508,8 +1530,12 @@ def _iniciar_pods_se_necessario():
         production_log.adicionar_log(f"LIFECYCLE: AVISO subir pods falhou ({e})")
 
 
-def iniciar_producao(data_idx: int, temas_data: dict = None, ordem_colunas: list = None, loop: bool = False):
-    """Inicia producao em thread separada. loop=True avanca pras proximas datas."""
+def iniciar_producao(data_idx: int, temas_data: dict = None, ordem_colunas: list = None, loop: bool = False, data_idx_fim: int = None):
+    """Inicia producao em thread separada. loop=True avanca pras proximas datas.
+
+    data_idx_fim (opcional, inclusivo): se setado junto com loop=True, o orchestrator
+    para AUTOMATICAMENTE depois que essa data fechar. Substitui gatilhos externos.
+    """
     global _thread_producao
     if estado["ativo"]:
         return {"ok": False, "erro": "Producao ja em andamento"}
@@ -1545,14 +1571,14 @@ def iniciar_producao(data_idx: int, temas_data: dict = None, ordem_colunas: list
 
     if loop:
         _thread_producao = threading.Thread(
-            target=_wrap_loop, args=(data_idx, ordem_colunas), daemon=True
+            target=_wrap_loop, args=(data_idx, ordem_colunas, data_idx_fim), daemon=True
         )
     else:
         _thread_producao = threading.Thread(
             target=_wrap_data, args=(data_idx, temas_data, ordem_colunas), daemon=True
         )
     _thread_producao.start()
-    return {"ok": True, "loop": loop}
+    return {"ok": True, "loop": loop, "data_idx_fim": data_idx_fim}
 
 
 def cancelar():
