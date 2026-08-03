@@ -70,7 +70,7 @@ export function Canais() {
         </table>
       </div>
       {editando !== null && (
-        <CanalModal canal={editando} onClose={() => setEditando(null)}
+        <CanalModal canal={editando} canais={canais} onClose={() => setEditando(null)}
                     onSaved={() => { setEditando(null); load() }} />
       )}
     </div>
@@ -162,7 +162,7 @@ function CampoProd({ c, valor, onChange }) {
   )
 }
 
-function CanalModal({ canal, onClose, onSaved }) {
+function CanalModal({ canal, canais = [], onClose, onSaved }) {
   const novo = !canal.alias
   const [tab, setTab] = useState('Infra')
   const [f, setF] = useState(() => ({
@@ -288,6 +288,24 @@ function CanalModal({ canal, onClose, onSaved }) {
                 </div>
               </div>
             ))}
+            {/* Piter 31/07: collab = PAR FIXO escolhido a mão. Sem alvo = canal nao
+                faz collab. Vinculo entre canais fica PUBLICO no video — por isso
+                nada e' automatico/round-robin aqui. */}
+            <h4 className="py-secao">Collab & tela final (pós-upload, via RPA)</h4>
+            <div className="py-grid2">
+              <label className="py-campo">
+                <span>Canal parceiro do collab (vazio = não faz collab)</span>
+                <select value={prod.collab_alvo ?? ''} onChange={e => setP('collab_alvo', e.target.value)}>
+                  <option value="">— sem collab —</option>
+                  {canais.filter(c => c.alias && c.alias !== canal.alias).map(c => (
+                    <option key={c.alias} value={c.alias}>{c.alias} — {c.nome_youtube}</option>
+                  ))}
+                </select>
+              </label>
+              <CampoProd c={{ k: 'tela_final', l: 'Aplicar tela final automaticamente (importa do vídeo anterior)', t: 'toggle' }}
+                         valor={prod.tela_final} onChange={v => setP('tela_final', v)} />
+            </div>
+
             <h4 className="py-secao">Publicação (colunas do painel)</h4>
             <div className="py-grid2">
               {CAMPOS_PUB.map(([k, label]) => (
