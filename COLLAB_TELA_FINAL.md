@@ -54,10 +54,25 @@ Rodado com `collab_invite.py --canal ENO2 --video <id> --probe-dialog` (não alt
 `accounts.google.com/signin`. Isso quebra o pin desse canal também. Precisa re-login manual no
 AdsPower. ENO2/CO3/CON estavam logados. *(A pedido do Piter, os testes seguem só no ENO2.)*
 
-### O que falta calibrar
-Só o trecho **depois de digitar o handle**: como a sugestão aparece e se o link do convite é exibido
-após o `Save`. Isso exige um convite REAL (o probe para no diálogo, de propósito) — precisa de um par
-definido no cadastro e do OK do Piter.
+## 2c. SEQUÊNCIA REAL do convite (ditada pelo Piter 31/07) — implementada
+
+1. **Buscar pelo NOME EXATO** do canal-alvo (⚠ **não** `@handle` — o Studio casa pelo nome).
+   O alvo aparece como **primeiro da lista** → clicar pra selecionar.
+2. Abre a tela de **permissão de ver analytics** + botão **`Criar link`**.
+   *(o toggle de analytics fica no default do YouTube — o RPA não mexe nele)*
+3. O **link aparece na tela** → copiar e **fechar essa janela**.
+4. De volta à busca, o alvo fica com **ação pendente** → **`Salvar`** efetiva o convite.
+
+⚠ `Criar link` e `Salvar` são **passos distintos** — juntar os dois num regex só faria o RPA parar
+no meio, com o convite criado e **não efetivado**.
+
+**Guard anti-canal-errado** (`_casa_nome`): o 1º da lista só é clicado se o texto dele casar com o
+nome buscado (normalizado, ignorando acento/caixa/@/contagem de inscritos). Busca que não devolve o
+canal certo **aborta** em vez de convidar quem estiver no topo — convite errado fica público.
+
+### O que falta
+Rodar **um convite real** (o probe para no diálogo, de propósito) pra confirmar o formato do link e
+o comportamento do "ação pendente". Precisa do par definido no cadastro e do OK do Piter.
 
 ## 3. Decisões do Piter (31/07) — já fechadas
 
