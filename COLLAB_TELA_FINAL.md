@@ -31,11 +31,33 @@ padrão de confirmação visual no fim de cada passo.
   no **feed de inscritos de todos os colaboradores** (o ganho que motivou o pedido).
 - Receita **não é dividida** — fica 100% com o canal que subiu.
 
-### ⚠ Incógnita a resolver ANTES de codar
-A doc oficial **não diz onde o canal-alvo vê e aceita** o convite pendente (notificação no Studio?
-seção própria? link enviado?). **Primeiro passo obrigatório = reconhecimento**: abrir o Studio de um
-canal via AdsPower e mapear as 3 telas (tela final · envio do convite · aceite), anotando seletores
-estáveis. Sem isso não há como escrever o `lib/collab.py`.
+### Aceite (esclarecido pelo Piter 31/07)
+O convite **gera um LINK** que o canal-alvo abre pra aceitar. Ou seja, o aceite não depende de achar
+notificação no Studio do alvo — basta abrir o link no profile certo. Por isso `lib/collab.py` guarda
+o link em `_collab_links.json` (`pendentes_de_aceite()` é a entrada do futuro RPA de aceite).
+**Decisão do Piter: o pedido vem primeiro e bem robusto; o aceite depois.**
+
+## 2b. RECONHECIMENTO FEITO (ENO2, 31/07) — seletores REAIS
+
+Rodado com `collab_invite.py --canal ENO2 --video <id> --probe-dialog` (não altera nada):
+
+| passo | rótulo/seletor real | observação |
+|---|---|---|
+| expandir | `Show more` (`div`) — rótulo completo: *"Show more — Paid promotion, collaboration, and more"* | fica **abaixo do viewport**: precisa `scroll_into_view` antes de clicar |
+| seção | `div:Collaboration` + *"Grow your audience by collaborating…"* | só existe após expandir |
+| botão | `ytcp-button:Invite a collaborator` (também `button:` e `div:`) | |
+| campo | `input[placeholder="Search for a channel"]` | dentro do diálogo |
+| confirmar | **`Save`** | ⚠ **NÃO é "Create link"** como diziam os artigos — a UI real confirma em `Save` (o vocabulário aceita os dois por segurança) |
+| cancelar | `Cancel` | o probe sai com `Esc`, sem tocar em Save |
+
+**Achado operacional:** o profile do **EST (`k1e61o9g`) está DESLOGADO** — o Studio redireciona pra
+`accounts.google.com/signin`. Isso quebra o pin desse canal também. Precisa re-login manual no
+AdsPower. ENO2/CO3/CON estavam logados. *(A pedido do Piter, os testes seguem só no ENO2.)*
+
+### O que falta calibrar
+Só o trecho **depois de digitar o handle**: como a sugestão aparece e se o link do convite é exibido
+após o `Save`. Isso exige um convite REAL (o probe para no diálogo, de propósito) — precisa de um par
+definido no cadastro e do OK do Piter.
 
 ## 3. Decisões do Piter (31/07) — já fechadas
 
