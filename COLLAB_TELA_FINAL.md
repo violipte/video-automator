@@ -93,9 +93,38 @@ Cada uma custou um run; todas estão travadas no código com comentário:
 5. **Link errado** — o regex genérico pegava o "Video link" (`youtu.be/…`) do painel lateral. O link
    do convite tem forma fixa: `studio.youtube.com/channel/<CANAL>/collaboration/<ID>`.
 
+## 2e. ACEITE — implementado (`collab_accept.py`), falta teste real
+
+**Sequência ditada pelo Piter (31/07):**
+1. Abrir o link do convite **no profile do canal que recebeu**.
+2. **1 pedido** → a janela *"Você recebeu um convite para colaborar"* vem direto.
+   **>1 pedido do mesmo remetente** → vem a **LISTA de vídeos**: seleciona o 1º e aí a janela aparece.
+3. Clicar **Aceitar** → a janela **FECHA**.
+4. Pros demais convites, **rodar o link de novo** — daí o **loop** até secar (`max_ciclos=10`).
+
+```
+python collab_accept.py --canal <ALIAS_QUE_RECEBEU> --link "<url>" --de "Whispers from Kaelon"
+python collab_accept.py --canal <ALIAS> --pendentes      # tudo do _collab_links.json
+python collab_accept.py --canal <ALIAS> --link "<url>" --probe   # só relata, não aceita
+```
+
+**Proteções:**
+- **Nunca clica em "Recusar"** (regex separado, só pra garantir que nunca casa com Aceitar).
+- `--de` valida o **remetente** antes de aceitar: convite de desconhecido colocaria o vídeo dele no
+  feed dos inscritos deste canal. Divergência ⇒ aborta.
+- Profile deslogado ⇒ erro claro. Aceite marca `aceito:true` no `_collab_links.json`.
+- Vocabulário validado contra os rótulos reais (tela veio em **PT**: Aceitar/Recusar; EN/DE/ES cobertos).
+
+### ⛔ Bloqueio pra validar
+O convite de teste foi pro **"Whispers from Arcturus", que é EXTERNO** — não há profile dele no
+AdsPower (os 22 profiles são os canais da rede). Sem o profile do canal que recebe, o aceite não roda.
+Pra validar de verdade é preciso um **par interno** (ex.: ENO2 → outro canal da rede) — o que expõe
+publicamente o vínculo entre esses dois canais, então é **decisão do Piter** qual par usar.
+
 ### O que falta
-Só o **RPA de aceite** (o link já é guardado em `_collab_links.json`; `pendentes_de_aceite()` é a
-entrada dele) e a **tela final**. O Piter definiu: pedido primeiro, aceite depois.
+- Teste real do aceite (depende do par interno acima).
+- **Tela final** (usar "importar do vídeo anterior").
+- Plugar na esteira: hoje os dois são CLI manual; falta o gancho pós-upload lendo `collab_alvo`.
 
 ## 3. Decisões do Piter (31/07) — já fechadas
 
