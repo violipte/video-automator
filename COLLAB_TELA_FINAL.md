@@ -115,16 +115,30 @@ python collab_accept.py --canal <ALIAS> --link "<url>" --probe   # só relata, n
 - Profile deslogado ⇒ erro claro. Aceite marca `aceito:true` no `_collab_links.json`.
 - Vocabulário validado contra os rótulos reais (tela veio em **PT**: Aceitar/Recusar; EN/DE/ES cobertos).
 
-### ⛔ Bloqueio pra validar
-O convite de teste foi pro **"Whispers from Arcturus", que é EXTERNO** — não há profile dele no
-AdsPower (os 22 profiles são os canais da rede). Sem o profile do canal que recebe, o aceite não roda.
-Pra validar de verdade é preciso um **par interno** (ex.: ENO2 → outro canal da rede) — o que expõe
-publicamente o vínculo entre esses dois canais, então é **decisão do Piter** qual par usar.
+### ✅ CICLO COMPLETO VALIDADO (EOA → NARC, 31/07)
+
+```
+collab_invite.py --canal eoa  --video jH1EQbypYdA --alvo "Arcturian Violet Codex"   → convidado
+collab_accept.py --canal NARC --link "<link>" --de "Echoes of Arcturus"             → aceitos: 1
+```
+Verificado na tela do EOA: o colaborador saiu de **"Pending acceptance"** para
+**"Active collaborator"** (verde). Convite feito em vídeo **agendado** (publishAt 11/08) — funciona
+normalmente; o efeito materializa na publicação (a própria tela diz *"quando o vídeo estiver público,
+aparecerá na guia Início do seu canal"*). Isso valida o desenho de aceitar **antes do `publishAt`**.
+
+### ⚠ 2 armadilhas do ACEITE (as duas custaram um run e estão travadas no código)
+
+1. **Botão visível ≠ clicável** — a janela abre com `Decline`/`Accept` **desabilitados** enquanto o
+   Studio hidrata. O clique "dava certo" sem efeito: o convite seguia `Pending`, o loop reabria o
+   link e **reclicava — 4× no mesmo convite** (o Piter teve que fechar a janela na mão).
+   `_clicar_aceitar()` agora espera `is_enabled()` **e** exige que a janela FECHE pra contar aceite.
+2. **Loop infinito por convite repetido** — reabrir o link mostra o MESMO convite enquanto o aceite
+   não propaga. `_assinatura_convite()` (remetente + título do vídeo) detecta a repetição e **para**.
 
 ### O que falta
-- Teste real do aceite (depende do par interno acima).
 - **Tela final** (usar "importar do vídeo anterior").
 - Plugar na esteira: hoje os dois são CLI manual; falta o gancho pós-upload lendo `collab_alvo`.
+- Convite ENO2 → "Whispers from Arcturus" (externo) segue **pendente** — o aceite é do dono dele.
 
 ## 3. Decisões do Piter (31/07) — já fechadas
 
