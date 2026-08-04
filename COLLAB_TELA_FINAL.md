@@ -70,9 +70,32 @@ no meio, com o convite criado e **não efetivado**.
 nome buscado (normalizado, ignorando acento/caixa/@/contagem de inscritos). Busca que não devolve o
 canal certo **aborta** em vez de convidar quem estiver no topo — convite errado fica público.
 
+## 2d. ✅ CONVITE VALIDADO EM PRODUÇÃO (ENO2 → Whispers from Arcturus, 31/07)
+
+`python collab_invite.py --canal ENO2 --video IiuiQO_0FoA --alvo "Whispers from Arcturus"`
+→ `{"status": "convidado", "link": "https://studio.youtube.com/channel/UC3-iT3rJ2Zi3nn89GJ1DURw/collaboration/UC1HJA1zSkBAEXCggFgikqAQ"}`
+
+Confirmado por leitura independente da tela: o colaborador aparece como **"Pending acceptance"** e o
+botão da seção virou **"Manage collaborators"**. Rodar de novo devolve `ja_convidado` (não duplica).
+
+### As 5 armadilhas que só apareceram rodando de verdade
+Cada uma custou um run; todas estão travadas no código com comentário:
+
+1. **Lazy render** — a seção Colaboração só existe no DOM depois de expandir **e rolar**. O probe
+   rolava, o fluxo real não → botão "não encontrado". Hoje os dois usam `_abrir_secao_collab()`.
+2. **Shadow DOM** — `page.evaluate`/`querySelectorAll` voltam **vazios** com a lista na tela;
+   **locator do Playwright atravessa**. Só se descobre por screenshot.
+3. **8 `[role=dialog]` na página** — escopar a busca no `.last` pegava o diálogo errado. O certo é
+   `page.get_by_role("option")` direto na página.
+4. **DOIS botões "Save"** — o da página (topo) e o do modal. Clicar no da página deixa o convite
+   "pending" e **não efetiva**. `_clicar_salvar_do_dialogo()` escopa no modal e, na dúvida, pega o
+   de maior `y`. Depois **confirma que o modal fechou** — senão reporta falha.
+5. **Link errado** — o regex genérico pegava o "Video link" (`youtu.be/…`) do painel lateral. O link
+   do convite tem forma fixa: `studio.youtube.com/channel/<CANAL>/collaboration/<ID>`.
+
 ### O que falta
-Rodar **um convite real** (o probe para no diálogo, de propósito) pra confirmar o formato do link e
-o comportamento do "ação pendente". Precisa do par definido no cadastro e do OK do Piter.
+Só o **RPA de aceite** (o link já é guardado em `_collab_links.json`; `pendentes_de_aceite()` é a
+entrada dele) e a **tela final**. O Piter definiu: pedido primeiro, aceite depois.
 
 ## 3. Decisões do Piter (31/07) — já fechadas
 
